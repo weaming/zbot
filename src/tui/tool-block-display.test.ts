@@ -6,6 +6,7 @@ import {
     formatToolBlockArgs,
     isAskUserTool,
     isTodoTool,
+    parsePeerSendBlock,
     renderCollapsedToolBlock,
     renderExpandedToolBlock,
     renderCollapsedFileBlocks,
@@ -153,6 +154,77 @@ describe("工具块参数转换", () => {
         expect(stripTerminalSequences(renderCollapsedToolBlock({ name: "session_send", args: brokenArgs }))).toBe(
             `🔧 session_send\n${brokenArgs}`,
         );
+    });
+
+    test("期望结果的 session_send：正文与结果原样交给 Markdown，头部只留摘要", () => {
+        const digest = parsePeerSendBlock({
+            name: "session_send",
+            args: JSON.stringify({
+                session: "01J8ZZZZZZZZZZZZZZZZZZZZZZ",
+                text: "## 改一下 README\n- 命令示例",
+                expect_result: true,
+            }),
+            result: "改好了",
+            durationMs: 1200,
+        });
+
+        expect(digest).toBeDefined();
+        expect(stripTerminalSequences(digest!.head)).toBe("🔧 session_send → ZZZZZZZZ · 期望结果 1.2s");
+        // 正文不再占位成 ...，结果也要能拿到
+        expect(digest!.text).toBe("## 改一下 README\n- 命令示例");
+        // 回执不是会话间结果的包装形状，界面按「已发送」而不是「结果」处理
+        expect(digest!.result).toEqual({ body: "改好了", isResult: false });
+        // wait_seconds=0：结果区只是「已发送」回执，真结果走 peer_result 气泡
+        expect(digest!.waitSeconds).toBe(0);
+    });
+
+    test("就地等待的 session_send 头部标出等待秒数", () => {
+        const digest = parsePeerSendBlock({
+            name: "session_send",
+            args: JSON.stringify({ session: "a1b2c3d4", text: "跑一下", wait_seconds: 30 }),
+        });
+
+        expect(stripTerminalSequences(digest!.head)).toBe("🔧 session_send → a1b2c3d4 · 就地等待");
+        expect(digest!.waitSeconds).toBe(30);
+        expect(digest!.result).toBeUndefined();
+    });
+
+    test("等待拿到的结果剥掉模型侧包装，只留正文", () => {
+        const digest = parsePeerSendBlock({
+            name: "session_send",
+            args: JSON.stringify({ session: "01J8ZZZZZZZZZZZZZZZZZZZZZZ", text: "跑一下", wait_seconds: 30 }),
+            result: "[会话 01J8ZZZZZZZZZZZZZZZZZZZZZZ 的结果]\n跑完了，全绿\n（stopReason: end_turn）",
+            durationMs: 30000,
+        });
+
+        expect(digest!.result).toEqual({ body: "跑完了，全绿", isResult: true, status: "ok" });
+    });
+
+    test("失败与取消：标签要跟头部状态一致", () => {
+        const failed = parsePeerSendBlock({
+            name: "session_send",
+            args: JSON.stringify({ session: "a1b2c3d4", text: "跑一下", wait_seconds: 30 }),
+            result: "对方会话不可达",
+            isError: true,
+        });
+        expect(failed!.isError).toBe(true);
+
+        const cancelled = parsePeerSendBlock({
+            name: "session_send",
+            args: JSON.stringify({ session: "a1b2c3d4", text: "跑一下", wait_seconds: 30 }),
+            cancelled: true,
+        });
+        expect(cancelled!.cancelled).toBe(true);
+        expect(cancelled!.result).toBeUndefined();
+    });
+
+    test("纯通知或参数不合法的 session_send 交回常规渲染", () => {
+        expect(parsePeerSendBlock({
+            name: "session_send",
+            args: JSON.stringify({ session: "a1b2c3d4", text: "知会一声" }),
+        })).toBeUndefined();
+        expect(parsePeerSendBlock({ name: "session_send", args: "not-json" })).toBeUndefined();
+        expect(parsePeerSendBlock({ name: "bash", args: "{}" })).toBeUndefined();
     });
 
     test("edit_file 使用变更统计摘要并为增删行着色", () => {

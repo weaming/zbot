@@ -224,6 +224,25 @@ describe("runToolBatch", () => {
     expect(outcome.results[1]!.failed).toBe(true);
   });
 
+  test("失败标记随工具消息落盘：重开/回放时才不会把失败当成功", async () => {
+    const host = makeHost(async name =>
+      name === "tool_bad" ? { content: "exit code 7", isError: true } : "ok");
+
+    const outcome = await runToolBatch(host, [call("good"), call("bad")]);
+
+    expect(outcome.results[0]!.message).not.toHaveProperty("isError");
+    expect(outcome.results[1]!.message.isError).toBe(true);
+
+    // 抛异常与自报失败要落成同一个标记
+    const thrown = await runToolBatch(
+      makeHost(async () => {
+        throw new Error("boom");
+      }),
+      [call("boom")],
+    );
+    expect(thrown.results[0]!.message.isError).toBe(true);
+  });
+
   test("同一阶段内部分失败：整组结果照样汇报，只有后续阶段被跳过", async () => {
     const host = makeHost(async name =>
       name === "tool_bad" ? { content: "exit code 7", isError: true } : "ok");

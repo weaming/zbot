@@ -108,6 +108,7 @@ async function processToolCall(
         name: toolCall.name,
         content: toolOutput,
         durationMs,
+        ...(toolFailed ? { isError: true } : {}),
         ...(toolContextPolicy ? { contextPolicy: toolContextPolicy } : {}),
         ...(toolImageContent && toolImageContent.length > 0 ? { imageContent: toolImageContent } : {}),
         ...(toolAudioContent && toolAudioContent.length > 0 ? { audioContent: toolAudioContent } : {}),

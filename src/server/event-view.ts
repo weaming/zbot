@@ -9,6 +9,10 @@
  */
 
 import type { AgentEvent } from "../events/agent-events.js";
+import { isCancelledStopReason } from "../control/protocol.js";
+import { isPeerSendTool, parsePeerSendCall } from "../tools/tool-kinds.js";
+import { parsePeerResultText } from "../utils/peer-result.js";
+import { isUlid, shortSessionId } from "../utils/session-id.js";
 import { formatToolArguments } from "../utils/tool-progress.js";
 
 /**
@@ -18,6 +22,24 @@ import { formatToolArguments } from "../utils/tool-progress.js";
 const ARGUMENTS_MAX_CHARS = 400;
 /** 摘要一行够用，再长也只是噪音。 */
 const SUMMARY_MAX_CHARS = 120;
+
+/**
+ * 会话间发送（session_send）的正文与结果不走「工具输出只留长度」的口径：
+ * 它们是会话之间的对话内容，界面要按 Markdown 常驻展示，否则对方回了什么无从看起。
+ * 只对这一个工具例外，长度上限防止一次派活把响应撑爆。
+ */
+const PEER_TEXT_MAX_CHARS = 4000;
+const PEER_RESULT_MAX_CHARS = 8000;
+
+/** 超长正文截断并留一句说明，避免界面以为对方只回了这么点。 */
+function clipPeerText(text: string, max: number): string {
+    // 快路径：UTF-16 长度不超上限时码点数必然也不超
+    if (text.length <= max) return text;
+    // 按码点截断：slice 会切出孤立代理对，emoji 变乱码
+    const points = [...text];
+    if (points.length <= max) return text;
+    return `${points.slice(0, max).join("")}\n\n…（已截断，原文 ${points.length} 字）`;
+}
 
 /** 一次 patch 里改动的单个文件。 */
 interface PatchFileStat {
@@ -187,8 +209,21 @@ export function toSessionEventView(event: AgentEvent): SessionEventView | null {
                 },
             };
         case "peer_result":
-            // 时间线只显示一行提示，正文不下发
-            return { ...base, payload: { ok: event.payload.ok } };
+            // 结果正文也下发：这是「派活拿到了什么」的主线，与 TUI 的结果气泡对齐
+            return {
+                ...base,
+                payload: {
+                    msgId: event.payload.msgId,
+                    peerId: event.payload.peerId,
+                    ...(event.payload.peerTitle ? { peerTitle: event.payload.peerTitle } : {}),
+                    ok: event.payload.ok,
+                    ...(event.payload.lost ? { lost: true } : {}),
+                    ...(event.payload.late ? { late: true } : {}),
+                    // 取消与否由服务端判定：前端不必复制 stopReason 口径
+                    ...(isCancelledStopReason(event.payload.stopReason) ? { cancelled: true } : {}),
+                    text: clipPeerText(event.payload.text, PEER_RESULT_MAX_CHARS),
+                },
+            };
         case "steer_update":
             return {
                 ...base,
@@ -228,6 +263,9 @@ export function toSessionEventView(event: AgentEvent): SessionEventView | null {
                                       tool_calls: toolCalls.map((call: any) => {
                                           const { id, name, rawArguments } = readToolCall(call);
                                           const patchStat = patchStatOf(name, rawArguments);
+                                          const peer = isPeerSendTool(name)
+                                              ? parsePeerSendCall(rawArguments)
+                                              : undefined;
                                           return {
                                               ...(id ? { id } : {}),
                                               name,
@@ -243,6 +281,25 @@ export function toSessionEventView(event: AgentEvent): SessionEventView | null {
                                               ...(rawArguments.length > ARGUMENTS_MAX_CHARS
                                                   ? { argumentSize: rawArguments.length }
                                                   : {}),
+                                              // 期望结果的会话间发送：正文是对话内容，界面要常驻展示
+                                              ...(peer?.expectResult
+                                                  ? {
+                                                        expectResult: true,
+                                                        ...(peer.session
+                                                            ? {
+                                                                  peerTarget: isUlid(peer.session)
+                                                                      ? shortSessionId(peer.session)
+                                                                      : peer.session,
+                                                              }
+                                                            : {}),
+                                                        ...(peer.waitSeconds > 0
+                                                            ? { peerWaitSeconds: peer.waitSeconds }
+                                                            : {}),
+                                                        ...(peer.text
+                                                            ? { peerText: clipPeerText(peer.text, PEER_TEXT_MAX_CHARS) }
+                                                            : {}),
+                                                    }
+                                                  : {}),
                                           };
                                       }),
                                   }
@@ -253,6 +310,9 @@ export function toSessionEventView(event: AgentEvent): SessionEventView | null {
             }
             if (role === "tool") {
                 const content = typeof message.content === "string" ? message.content : "";
+                const isPeerSend = typeof message.name === "string" && isPeerSendTool(message.name);
+                // 会话间结果：剥掉给模型看的会话头与 stopReason 尾注，正文与状态分开给界面
+                const peerResult = isPeerSend ? parsePeerResultText(content) : undefined;
                 return {
                     ...base,
                     payload: {
@@ -263,8 +323,21 @@ export function toSessionEventView(event: AgentEvent): SessionEventView | null {
                             ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
                             ...(typeof message.name === "string" ? { name: message.name } : {}),
                             ...(typeof message.durationMs === "number" ? { durationMs: message.durationMs } : {}),
-                            // 输出正文只留长度：界面只显示「← 工具 用时」，正文去日志看
-                            contentLength: content.length,
+                            ...(message.isError === true ? { isError: true } : {}),
+                            // 输出正文只留长度：界面只显示「← 工具 用时」，正文去日志看；
+                            // 会话间结果按剥包装后的正文算，悬停字数与实际展示一致
+                            contentLength: peerResult ? peerResult.body.length : content.length,
+                            // 会话间发送例外：结果是对方的产出，界面按 Markdown 展示。
+                            // 单事件投影看不到这次调用是否 expect_result，只能按工具名放行；
+                            // 纯通知的 ack 只有一行，多带的代价可以接受。
+                            ...(peerResult
+                                ? {
+                                      content: clipPeerText(peerResult.body, PEER_RESULT_MAX_CHARS),
+                                      ...(peerResult.isResult && peerResult.status
+                                          ? { peerResultStatus: peerResult.status }
+                                          : {}),
+                                  }
+                                : {}),
                         },
                     },
                 };

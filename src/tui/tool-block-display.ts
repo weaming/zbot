@@ -1,6 +1,9 @@
 import * as path from "path";
+import { isPeerSendTool, parsePeerSendCall } from "../tools/tool-kinds.js";
+import { parsePeerResultText, type PeerResultText } from "../utils/peer-result.js";
 import { formatToolArguments } from "../utils/tool-progress.js";
 import { formatDisplayPath, getToolCwd, resolveCwdInput } from "../utils/runtime-paths.js";
+import { isUlid, shortSessionId } from "../utils/session-id.js";
 import { formatGoDuration } from "../utils/time.js";
 import { CUSTOM_ANSWER_PREFIX, questionLabel } from "../utils/user-question.js";
 import { theme } from "./theme.js";
@@ -90,13 +93,10 @@ type CollapsedFileBlock = Omit<CollapsedToolBlock, "name"> & { name?: string };
 /** 折叠态正文占位符。 */
 const COLLAPSED_TEXT_PLACEHOLDER = "...";
 
-/** 折叠态需要隐藏 text 正文字段的工具。 */
-const COLLAPSED_LONG_TEXT_TOOLS = new Set(["session_send"]);
-
 /** 折叠态参数行：普通工具走常规格式化，正文类工具只把 text 换成占位符。 */
 function formatCollapsedToolArgs(toolName: string, args?: string): string {
     const rawArgs = args ?? "";
-    if (COLLAPSED_LONG_TEXT_TOOLS.has(toolName)) {
+    if (isPeerSendTool(toolName)) {
         const collapsedArgs = shortenTextArg(rawArgs);
         if (collapsedArgs !== undefined) return collapsedArgs;
     }
@@ -135,6 +135,53 @@ export function renderCollapsedToolBlock(block: CollapsedToolBlock, showDiff = t
     const argsText = formatCollapsedToolArgs(block.name, block.args);
     if (argsText) lines.push(theme.toolArgs(argsText));
     return lines.join("\n");
+}
+
+// ── 会话间发送（session_send） ──────────────────────────────────────────────
+
+/** 会话间发送块的渲染素材：正文与结果都按 Markdown 排版，头部只留一行摘要。 */
+export interface PeerSendDigest {
+    /** 头部单行：工具名 + 目标会话 + 期望结果标记 + 状态 */
+    head: string;
+    /** 发出的正文（原样，交 Markdown 渲染） */
+    text: string;
+    /** 结果正文与状态（已剥掉模型侧包装）；结果未就绪时不带该字段 */
+    result?: PeerResultText;
+    /** 就地等待的秒数：决定结果是「已回传」还是「已发送回执」，0 表示不等 */
+    waitSeconds: number;
+    isError: boolean;
+    /** 回合被用户中止：没有结果，也不该一直挂着「等待回传」 */
+    cancelled: boolean;
+}
+
+/**
+ * 解析「期望结果」的 session_send：这类调用的价值在「发了什么、对方回了什么」，
+ * 因此不走折叠渲染，正文与结果都交给 Markdown；纯通知或参数不合法时返回 undefined 交回常规渲染。
+ */
+export function parsePeerSendBlock(block: CollapsedToolBlock): PeerSendDigest | undefined {
+    if (!isPeerSendTool(block.name)) return undefined;
+    const peer = parsePeerSendCall(block.args);
+    if (!peer?.expectResult) return undefined;
+
+    const target = peer.session ? ` ${theme.dim("→")} ${formatPeerTarget(peer.session)}` : "";
+    // 不写秒数：状态后缀的耗时在等待场景就等于等待时长，写两遍是噪音
+    const tag = peer.waitSeconds > 0
+        ? ` ${theme.dim("·")} ${theme.statusWarn("就地等待")}`
+        : ` ${theme.dim("·")} ${theme.dim("期望结果")}`;
+    return {
+        head: `${theme.tool(`🔧 ${block.name}`)}${target}${tag}${renderToolBlockStatus([block])}`,
+        text: peer.text,
+        waitSeconds: peer.waitSeconds,
+        isError: block.isError === true,
+        cancelled: block.cancelled === true,
+        ...(block.result === undefined ? {} : { result: parsePeerResultText(block.result) }),
+    };
+}
+
+/** 目标会话展示：完整 ULID 截成末 8 位，命令行发起方这类短标识原样显示。 */
+function formatPeerTarget(session: string): string {
+    const label = isUlid(session) ? shortSessionId(session) : session;
+    return theme.chatRoom(label);
 }
 
 /**

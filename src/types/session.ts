@@ -39,6 +39,8 @@ export type ChatMessage =
         contextPolicy?: ToolResultPolicy;
         /** 执行耗时（ms）：本地渲染元数据，上行前剥离。 */
         durationMs?: number;
+        /** 工具执行失败：本地渲染元数据，上行前剥离（时间线据此标红） */
+        isError?: boolean;
         /** 工具返回的图片/音频：本地元数据，上行前由 expandToolMediaMessages 抽成独立 user 消息。 */
         imageContent?: Array<ImageAssetContent | ImageDataContent>;
         audioContent?: AudioContent[];

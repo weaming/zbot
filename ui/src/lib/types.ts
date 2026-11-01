@@ -93,6 +93,7 @@ export interface AgentEvent {
         images?: Array<{ id: string; path: string; filename: string; mimeType: string }>;
         message?: {
             role: string;
+            /** 正文；工具消息例外只有 session_send 的结果会带上（对话内容按 Markdown 展示） */
             content?: string | null;
             /** 思考内容：界面只显示「思考中」，不把推理过程铺开 */
             reasoning_content?: string | null;
@@ -110,6 +111,14 @@ export interface AgentEvent {
                     added: number;
                     removed: number;
                 };
+                /** 期望结果的 session_send：界面按对话正文常驻渲染，不折叠 */
+                expectResult?: boolean;
+                /** session_send 发出的正文（对话内容，服务端直接下发） */
+                peerText?: string;
+                /** session_send 的目标会话（短 id） */
+                peerTarget?: string;
+                /** session_send 就地等待的秒数 */
+                peerWaitSeconds?: number;
                 /** 老数据兼容：原始 OpenAI 形状 */
                 function?: { name: string; arguments: string };
             }>;
@@ -122,11 +131,22 @@ export interface AgentEvent {
             contentLength?: number;
             /** 工具耗时（毫秒）：历史回放只显示这个与状态，不铺开输出 */
             durationMs?: number;
+            /** 工具执行失败 */
+            isError?: boolean;
+            /** 会话间发送拿到了对方产出时的结果状态（界面据此选标签与配色；与 src/utils/peer-result.ts 同源） */
+            peerResultStatus?: "ok" | "cancelled" | "failed" | "late";
         };
         direction?: "in" | "out";
+        msgId?: string;
         peerId?: string;
         peerTitle?: string;
         ok?: boolean;
+        /** 会话间结果：确定丢失 */
+        lost?: boolean;
+        /** 会话间结果：超时/丢失报告之后才到达 */
+        late?: boolean;
+        /** 会话间结果：被取消的回合没有产出 */
+        cancelled?: boolean;
     };
 }
 

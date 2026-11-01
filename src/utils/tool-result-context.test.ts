@@ -53,12 +53,16 @@ describe("projectToolMessageForPrompt", () => {
         expect(projected).not.toHaveProperty("contextPolicy");
     });
 
-    it("durationMs 是本地渲染元数据，投影时连同 contextPolicy 一起剥离", () => {
+    it("durationMs / isError 是本地渲染元数据，投影时连同 contextPolicy 一起剥离", () => {
         const withDuration: ChatMessage = {
             ...toolMessage("short", { mode: "adaptive" }),
             durationMs: 1234,
+            isError: true,
         };
-        expect(projectToolMessageForPrompt(withDuration, tinyOptions)).not.toHaveProperty("durationMs");
+        const projectedAdaptive = projectToolMessageForPrompt(withDuration, tinyOptions);
+        expect(projectedAdaptive).not.toHaveProperty("durationMs");
+        // isError 不是官方 tool 消息字段，不剥离会被端点拒绝
+        expect(projectedAdaptive).not.toHaveProperty("isError");
 
         // mode=full 的早返回分支同样要剥离
         const fullMessage: ChatMessage = {

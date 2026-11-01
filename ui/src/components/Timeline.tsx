@@ -144,6 +144,14 @@ function ToolCall({
     loadArguments,
     durationMs,
     resultSize,
+    expectResult,
+    peerText,
+    peerResultStatus,
+    peerTarget,
+    peerWaitSeconds,
+    resultText,
+    isError,
+    isTurnLive,
 }: {
     name: string;
     summary: string;
@@ -157,11 +165,38 @@ function ToolCall({
     /** 该工具调用的结果（同一条工具消息）已经到达：用时直接贴在原块上，不再另起一行 */
     durationMs?: number;
     resultSize?: number;
+    /** 期望结果的 session_send：正文与结果常驻，不折叠 */
+    expectResult?: boolean;
+    peerText?: string;
+    peerResultStatus?: keyof typeof PEER_SEND_STATUS;
+    peerTarget?: string;
+    peerWaitSeconds?: number;
+    resultText?: string;
+    /** 调用失败（服务端投影带上） */
+    isError?: boolean;
+    /** 回合还在跑 */
+    isTurnLive?: boolean;
 }) {
     const [open, setOpen] = useState(false);
     const [loaded, setLoaded] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const [loadFailed, setLoadFailed] = useState(false);
+
+    // 期望结果的会话间发送：发了什么、对方回了什么都要看得见，和 TUI 一样不带折叠态
+    if (expectResult) {
+        return (
+            <PeerSendCall
+                peerText={peerText}
+                resultText={resultText}
+                durationMs={durationMs}
+                isError={isError}
+                isTurnLive={isTurnLive}
+                peerResultStatus={peerResultStatus}
+                peerTarget={peerTarget}
+                peerWaitSeconds={peerWaitSeconds}
+            />
+        );
+    }
 
     const hasResult = durationMs !== undefined || resultSize !== undefined;
     /** patch 类看文件清单，其余看参数原文；长参数要等服务端回传长度才知道能拉 */
@@ -203,10 +238,10 @@ function ToolCall({
                 <span className="ml-auto flex shrink-0 items-center gap-2">
                     {hasResult && (
                         <span
-                            className="text-ok"
+                            className={isError ? "text-bad" : "text-ok"}
                             title={resultSize === undefined ? undefined : `输出 ${resultSize} 字`}
                         >
-                            {durationMs === undefined ? "✓" : formatDuration(durationMs)}
+                            {isError ? "✗" : durationMs === undefined ? "✓" : formatDuration(durationMs)}
                         </span>
                     )}
                     {canExpand && (
@@ -236,6 +271,71 @@ function ToolCall({
 }
 
 /**
+ * 期望结果的 session_send：正文（发出的消息）与结果（对方的产出）都按 Markdown 常驻展示。
+ * 「永不收起」是有意的：派活与回传的内容就是这条时间线的主线，藏起来等于没有。
+ */
+const PEER_SEND_STATUS = { ok: "", cancelled: "（已取消）", failed: "（未完成）", late: "（迟到）" } as const;
+
+function PeerSendCall({
+    peerText,
+    resultText,
+    durationMs,
+    isError,
+    isTurnLive,
+    peerResultStatus,
+    peerTarget,
+    peerWaitSeconds,
+}: {
+    peerText?: string;
+    resultText?: string;
+    durationMs?: number;
+    isError?: boolean;
+    /** 回合还在跑：只有这时候「等待结果回传」才不是永久挂着的残影 */
+    isTurnLive?: boolean;
+    /** 会话间发送拿到了对方产出时的结果状态 */
+    peerResultStatus?: keyof typeof PEER_SEND_STATUS;
+    peerTarget?: string;
+    peerWaitSeconds?: number;
+}) {
+    const isWaiting = (peerWaitSeconds ?? 0) > 0;
+    /**
+     * 就地等待才有对方产出；只标 ack 的调用，结果在下面的 peer_result 气泡里。
+     * 标签要跟状态后缀（红色失败）说同一件事。
+     */
+    const resultLabel = isError
+        ? "↩ 失败"
+        : peerResultStatus === undefined
+            ? isWaiting ? "↩ 返回" : "↩ 已发送"
+            : `↩ 结果${PEER_SEND_STATUS[peerResultStatus]}`;
+    return (
+        <div className="flex flex-col gap-2 rounded-md bg-accent/5 px-2.5 py-2">
+            <div className="flex items-center gap-2 text-xs">
+                <span className="text-accent">💬</span>
+                <span className="shrink-0 font-mono">session_send</span>
+                {peerTarget && <span className="truncate text-accent">→ {peerTarget}</span>}
+                <span className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-accent">
+                    {isWaiting ? "就地等待" : "期望结果"}
+                </span>
+                {durationMs !== undefined && (
+                    <span className={cn("ml-auto shrink-0", isError ? "text-bad" : "text-ok")}>
+                        {formatDuration(durationMs)}
+                    </span>
+                )}
+            </div>
+            {peerText && <MarkdownBlock content={peerText} className="border-0 bg-col/40" />}
+            {resultText ? (
+                <div className="flex flex-col gap-1">
+                    <span className={cn("text-xs", isError ? "text-bad" : "text-muted")}>{resultLabel}</span>
+                    <MarkdownBlock content={resultText} className="border-0 bg-col/40" />
+                </div>
+            ) : (
+                isWaiting && isTurnLive && <span className="text-xs text-muted">↩ 等待结果回传…</span>
+            )}
+        </div>
+    );
+}
+
+/**
  * 工具输出：与 TUI 一致，只留一行「← 工具名 + 用时」，不铺开内容 ——
  * 一段日志能把整屏占满，而真正要排查时该去看 sessions/log 里的原始记录。
  * 输出长度放 title 里，鼠标悬停即可看到大小，不额外占视觉。
@@ -258,10 +358,40 @@ function PeerMessage({ event }: { event: AgentEvent }) {
     return (
         <div className="flex flex-col items-start gap-1">
             <span className="text-xs text-muted">
-                {incoming ? "收到" : "发给"} {event.payload.peerTitle ?? event.payload.peerId?.slice(-6) ?? "会话"}
+                {incoming ? "收到" : "发给"} {event.payload.peerTitle ?? event.payload.peerId?.slice(-8) ?? "会话"}
             </span>
             <div className="w-[85%]">
                 <MarkdownBlock content={event.payload.text ?? ""} className="border-accent/30 bg-accent/5" />
+            </div>
+        </div>
+    );
+}
+
+/** 会话间结果在 TUI 里也是整段气泡：Web 不再缩成一行提示，否则对方回了什么就丢了。 */
+const PEER_RESULT_TAG = {
+    lost: "结果丢失",
+    late: "迟到结果",
+    cancelled: "已取消",
+    failed: "结果（未完成）",
+    ok: "结果",
+} as const;
+
+function PeerResult({ event }: { event: AgentEvent }) {
+    const { peerId, peerTitle, ok, lost, late, cancelled, text } = event.payload;
+    // 取消优先于 ok：被取消的回合没有产出，标「结果」会误导成正常回传
+    const tag = PEER_RESULT_TAG[lost ? "lost" : late ? "late" : cancelled ? "cancelled" : ok === false ? "failed" : "ok"];
+    const tone = lost || late || cancelled || ok === false ? "text-warn" : "text-muted";
+    return (
+        <div className="flex flex-col items-start gap-1">
+            <span className={cn("text-xs", tone)}>
+                ← 会话 {peerTitle ?? peerId?.slice(-8) ?? ""} · {tag}
+            </span>
+            <div className="w-[85%]">
+                {text ? (
+                    <MarkdownBlock content={text} className="border-accent/30 bg-accent/5" />
+                ) : (
+                    <span className="text-xs text-muted">（无文本输出）</span>
+                )}
             </div>
         </div>
     );
@@ -280,14 +410,29 @@ export function Timeline({
     // 工具输出只有 tool_call_id，先扫一遍建立 id → 名字/结果的映射。
     // 结果回填到发起它的那个工具块上，时间线里不再单独占一行。
     const callNames = new Map<string, string>();
-    const callResults = new Map<string, { durationMs?: number; size?: number }>();
+    const callResults = new Map<
+        string,
+        {
+            durationMs?: number;
+            size?: number;
+            content?: string;
+            isError?: boolean;
+            peerResultStatus?: keyof typeof PEER_SEND_STATUS;
+        }
+    >();
     for (const event of events) {
         const message = event.payload.message;
         for (const call of message?.tool_calls ?? []) {
             if (call.id) callNames.set(call.id, call.name ?? call.function?.name ?? "工具");
         }
         if (message?.role === "tool" && message.tool_call_id) {
-            callResults.set(message.tool_call_id, { durationMs: message.durationMs, size: message.contentLength });
+            callResults.set(message.tool_call_id, {
+                durationMs: message.durationMs,
+                size: message.contentLength,
+                content: message.content ?? undefined,
+                isError: message.isError,
+                peerResultStatus: message.peerResultStatus,
+            });
         }
     }
     // 「思考中」只属于"还没收尾的那一轮的最后一条 assistant 消息"：
@@ -345,9 +490,7 @@ export function Timeline({
                 nodes.push(<PeerMessage key={event.seq} event={event} />);
                 break;
             case "peer_result":
-                nodes.push(
-                    <Notice key={event.seq} text={payload.ok === false ? "会话间结果回传失败" : "收到会话间结果"} />,
-                );
+                nodes.push(<PeerResult key={event.seq} event={event} />);
                 break;
             case "context_compacted":
                 nodes.push(<Notice key={event.seq} text="上下文已压缩" />);
@@ -364,6 +507,8 @@ export function Timeline({
                     pendingSteerText = undefined;
                     // 只有"最后一轮、还没收尾"的那条 assistant 消息显示，历史轮不显示
                     const hasReasoning = event.seq === pendingThinkSeq;
+                    // 该回合是否还在跑：没提交过的 turnId 才可能还在等结果，历史轮不能一直挂「等待」
+                    const isTurnLive = payload.turnId === undefined || !committedTurns.has(payload.turnId);
                     nodes.push(
                         <Fragment key={event.seq}>
                             {hasReasoning && <Thinking />}
@@ -386,6 +531,14 @@ export function Timeline({
                                         loadArguments={onLoadArguments}
                                         durationMs={result?.durationMs}
                                         resultSize={result?.size}
+                                        expectResult={call.expectResult}
+                                        peerText={call.peerText}
+                                        peerTarget={call.peerTarget}
+                                        peerWaitSeconds={call.peerWaitSeconds}
+                                        peerResultStatus={result?.peerResultStatus}
+                                        resultText={result?.content ?? undefined}
+                                        isError={result?.isError}
+                                        isTurnLive={isTurnLive}
                                     />
                                 );
                             })}

@@ -37,3 +37,50 @@ export function getPatchToolTag(toolName: string): string | undefined {
     if (!isApplyPatchTool(toolName)) return undefined;
     return toolName.toLowerCase().includes("codex") ? "codex:apply_patch" : "apply_patch";
 }
+
+/** 判断是否为会话间发送工具（session_send）：它的结果是要读的对话正文，不是日志。 */
+export function isPeerSendTool(toolName: string): boolean {
+    const normalized = toolName.toLowerCase();
+    return (
+        normalized === "session_send"
+        || normalized.endsWith("__session_send")
+        || normalized.endsWith(":session_send")
+    );
+}
+
+/** session_send 的调用语义：目标会话、正文、是否在等对方结果。 */
+export interface PeerSendCall {
+    session: string;
+    text: string;
+    /** expect_result=true 或 wait_seconds>0：这轮调用会带回对方的产出。 */
+    expectResult: boolean;
+    /** 就地等待的秒数，0 表示不等（结果稍后自动回传）。 */
+    waitSeconds: number;
+}
+
+/** 解析 session_send 参数；不是合法对象时返回 undefined，交给调用方退回常规处理。 */
+export function parsePeerSendCall(args?: string): PeerSendCall | undefined {
+    const rawArgs = args?.trim();
+    if (!rawArgs) return undefined;
+
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(rawArgs);
+    } catch {
+        return undefined;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+
+    const record = parsed as Record<string, unknown>;
+    const waitSeconds = typeof record.wait_seconds === "number"
+        && Number.isFinite(record.wait_seconds)
+        && record.wait_seconds > 0
+        ? record.wait_seconds
+        : 0;
+    return {
+        session: typeof record.session === "string" ? record.session.trim() : "",
+        text: typeof record.text === "string" ? record.text : "",
+        expectResult: record.expect_result === true || waitSeconds > 0,
+        waitSeconds,
+    };
+}

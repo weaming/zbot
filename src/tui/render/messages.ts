@@ -20,13 +20,16 @@ import { StreamingReasoningBlock } from "../streaming-reasoning.js";
 import { markdownTheme, theme } from "../theme.js";
 import { ToolBlockText } from "../tool-block-text.js";
 import type { Citation } from "../../types/session.js";
+import type { PeerResultStatus, PeerResultText } from "../../utils/peer-result.js";
 import {
     isAskUserTool,
     isFileMutationTool,
     isTodoTool,
+    parsePeerSendBlock,
     renderCollapsedFileBlocks,
     renderCollapsedToolBlock,
     renderExpandedToolBlock,
+    type PeerSendDigest,
 } from "../tool-block-display.js";
 import type { AssistantTimelineItem, UiMessage } from "../store.js";
 
@@ -263,6 +266,11 @@ function renderTimelineItem(
 
     if (item.type !== "tool") return undefined;
 
+    // 期望结果的 session_send：发了什么、对方回了什么都要看得见，正文与结果都走 Markdown，
+    // 且不受 ⌃O 与单块折叠影响（头部摘要 + 正文 + 结果，形态固定）
+    const peerSend = item.block ? parsePeerSendBlock(item.block) : undefined;
+    if (peerSend) return renderPeerSendBlock(peerSend);
+
     // todo 已由底部常驻条展示最新状态，不再出现在事件流里
     if (item.block && isTodoTool(item.block.name)) return undefined;
     const isFileMutation = item.block && isFileMutationTool(item.block.name);
@@ -275,6 +283,42 @@ function renderTimelineItem(
         ? renderExpandedToolBlock(item.block, showDiff)
         : renderCollapsedToolBlock(item.block, showDiff);
     return new ToolBlockText(text, 1, isFileMutation);
+}
+
+/** 会话间发送块：头部摘要 + 正文 + 结果，全部常驻，没有折叠态。 */
+function renderPeerSendBlock(digest: PeerSendDigest): Component {
+    const root = new Container();
+    root.addChild(new Text(digest.head, 1, 0));
+
+    // 正文原样交 Markdown：trim 会吃掉开头就是缩进代码块的缩进
+    if (digest.text.trim()) root.addChild(new Markdown(digest.text, 1, 0, markdownTheme));
+
+    const result = digest.result;
+    if (result && result.body.trim()) {
+        root.addChild(new Text(theme.dim(peerSendResultLabel(digest, result)), 1, 0));
+        root.addChild(new Markdown(result.body, 1, 0, markdownTheme));
+    } else if (digest.waitSeconds > 0 && !digest.isError && !digest.cancelled) {
+        root.addChild(new Text(theme.dim("↩ 等待结果回传…"), 1, 0));
+    }
+    return root;
+}
+
+/**
+ * 结果区标签：按「实际拿到了什么」着色，而不是按调用形态。
+ * 只有拆出会话间结果格式的才是对方产出，其余是回执（wait_seconds 的超时/转后台提示也在此列）。
+ */
+function peerSendResultLabel(digest: PeerSendDigest, result: PeerResultText): string {
+    if (digest.isError) return "↩ 失败";
+    if (!result.isResult) return digest.waitSeconds > 0 ? "↩ 返回" : "↩ 已发送";
+    return `↩ 结果${peerSendStatusSuffix(result.status)}`;
+}
+
+/** 结果状态后缀：被取消/未正常完成/迟到都要说出来，别把异常产出当正常结果。 */
+function peerSendStatusSuffix(status: PeerResultStatus | undefined): string {
+    if (status === "cancelled") return "（已取消）";
+    if (status === "failed") return "（未完成）";
+    if (status === "late") return "（迟到）";
+    return "";
 }
 
 /** 托管搜索的来源清单使用 Markdown 链接，折叠态也展示。 */
