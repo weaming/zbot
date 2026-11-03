@@ -17,7 +17,10 @@ function createStoredMessage(message: ChatMessage): StoredChatMessage {
     // 图片走 sessions/assets 资产引用没有这个问题，音频暂无对应机制，落盘前直接剔除，
     // 代价是后续轮次只保留工具结果里的文本占位符。ctx.messages 里的原消息不受影响。
     const { audioContent: _audioContent, ...rest } = message as ChatMessage & { audioContent?: unknown };
-    return { ...rest, id: createUlid(), createdAt: getShanghaiISOString() } as StoredChatMessage;
+    // 回合内已分配 id 的消息沿用原 id：token / 投影缓存都按 id 记账，重放后还能命中。
+    // 前提同 appendTurnMessage：id 唯一，一个消息对象只落盘一次。
+    const id = (message as { id?: string }).id ?? createUlid();
+    return { ...rest, id, createdAt: getShanghaiISOString() } as StoredChatMessage;
 }
 
 function toChatMessage(message: StoredChatMessage): ChatMessage {
@@ -25,8 +28,20 @@ function toChatMessage(message: StoredChatMessage): ChatMessage {
     return chatMessage as ChatMessage;
 }
 
-function toPromptMessage(message: StoredChatMessage): ChatMessage {
+/** 剥掉内部消息 id（只服务本地缓存，不属于上游协议）；构造请求体前必须过一遍。 */
+export function stripInternalPromptIds(messages: ChatMessage[]): ChatMessage[] {
+    return messages.map(message => {
+        if (!("id" in message)) return message;
+        const { id: _id, ...rest } = message as ChatMessage & { id?: string };
+        return rest as ChatMessage;
+    });
+}
+
+function toPromptMessage(message: StoredChatMessage, withIds: boolean): ChatMessage {
+    // id 是内部记账字段（token 缓存按它命中），不属于上游协议；请求序列化前由
+    // turn-request 的 stripInternalPromptIds 统一剥离。
     const chatMessage = toChatMessage(message);
+    if (withIds) (chatMessage as ChatMessage & { id?: string }).id = message.id;
     if (message.role !== 'tool') return chatMessage;
 
     const toolChatMessage = chatMessage as Extract<ChatMessage, { role: 'tool' }>;
@@ -55,6 +70,26 @@ export function getSessionContextHistory(
     session: Pick<Session, 'turns' | 'compactedContext' | 'compactedThroughTurnId'> & Partial<Pick<Session, 'compactedKeepFromMessageId' | 'contextEpochId'>>,
     options: { skipToolCallIds?: ReadonlySet<string> } = {},
 ): ChatMessage[] {
+    return buildContextHistory(session, options, false);
+}
+
+/**
+ * 同 getSessionContextHistory，但保留消息 id：token 记账与工具结果投影都按 id 缓存，
+ * 长会话才能只算新增内容。id 是内部字段，构造请求体前由 turn-request 统一剥掉。
+ */
+export function getSessionContextHistoryWithIds(
+    session: Pick<Session, 'turns' | 'compactedContext' | 'compactedThroughTurnId'> & Partial<Pick<Session, 'compactedKeepFromMessageId' | 'contextEpochId'>>,
+    options: { skipToolCallIds?: ReadonlySet<string> } = {},
+): ChatMessage[] {
+    return buildContextHistory(session, options, true);
+}
+
+/** 上下文窗口构建：withIds 决定是否带内部 id（带 id 才能命中 token / 投影缓存）。 */
+function buildContextHistory(
+    session: Pick<Session, 'turns' | 'compactedContext' | 'compactedThroughTurnId'> & Partial<Pick<Session, 'compactedKeepFromMessageId' | 'contextEpochId'>>,
+    options: { skipToolCallIds?: ReadonlySet<string> },
+    withIds: boolean,
+): ChatMessage[] {
     const messages: ChatMessage[] = [];
 
     // 1. 压缩摘要作为首条 user 消息注入（配合一条 assistant 确认，形成固定不变的代际前缀）
@@ -71,7 +106,7 @@ export function getSessionContextHistory(
     }
 
     // 2. 拼接保留段（严格只读追加，保障前缀缓存）
-    messages.push(...collectRetainedMessages(session));
+    messages.push(...collectRetainedMessages(session, withIds));
 
     return repairToolCallPairing(messages, options.skipToolCallIds);
 }
@@ -83,6 +118,7 @@ export function getSessionContextHistory(
  */
 function collectRetainedMessages(
     session: Pick<Session, 'turns' | 'compactedKeepFromMessageId' | 'compactedThroughTurnId'>,
+    withIds: boolean,
 ): ChatMessage[] {
     const turns = session.turns ?? [];
     const keepFrom = session.compactedKeepFromMessageId;
@@ -101,7 +137,7 @@ function collectRetainedMessages(
                 if (message.id !== keepFrom) continue;
                 started = true;
             }
-            messages.push(toPromptMessage(message));
+            messages.push(toPromptMessage(message, withIds));
         }
     }
     return messages;

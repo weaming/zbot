@@ -5,6 +5,14 @@ import os from "node:os";
 import path from "node:path";
 import { createTestImageFile } from "./image-fixture.js";
 
+/** 断言送 LLM 的内容时忽略内部消息 id（只服务本地缓存，构造请求体前会剥掉）。 */
+function stripMessageIds<T>(messages: T[]): Array<Omit<T, "id">> {
+    return messages.map(message => {
+        const { id: _id, ...rest } = message as T & { id?: string };
+        return rest as Omit<T, "id">;
+    });
+}
+
 describe("Chat Orchestrator", () => {
   test("should create chat client with default baseURL", async () => {
     const { createChatClient } = await import('../../src/tools/chat-orchestrator.js');
@@ -156,7 +164,9 @@ describe("Chat Orchestrator", () => {
     // 耗时与工具名只是本地渲染元数据，不随请求上行
     expect(requests[1].messages.at(-1)).not.toHaveProperty("durationMs");
     expect(requests[1].messages.at(-1)).not.toHaveProperty("name");
-    expect(result.messages).toEqual([
+    // 消息 id 只服务本地缓存（token 记账 / 工具结果投影），不能出现在请求体里
+    expect(requests[1].messages.some((message: any) => "id" in message)).toBe(false);
+    expect(stripMessageIds(result.messages)).toEqual([
       {
         role: "assistant",
         tool_calls: [{
@@ -450,8 +460,9 @@ describe("Chat Orchestrator", () => {
       client,
       model: "gpt-5.6-luna",
       history: [
-        { role: "assistant", tool_calls: [{ id: "call_00_u5h6LBjP3G1biuashXC12188", type: "function", function: { name: "get_time", arguments: "{}" } }] },
-        { role: "tool", tool_call_id: "call_00_u5h6LBjP3G1biuashXC12188", content: "10:00" },
+        // 历史消息带内部 id（本地缓存记账用），请求体里必须被剥掉
+        { id: "m-1", role: "assistant", tool_calls: [{ id: "call_00_u5h6LBjP3G1biuashXC12188", type: "function", function: { name: "get_time", arguments: "{}" } }] },
+        { id: "m-2", role: "tool", tool_call_id: "call_00_u5h6LBjP3G1biuashXC12188", content: "10:00" },
       ],
     });
 
@@ -463,6 +474,7 @@ describe("Chat Orchestrator", () => {
     });
     expect(request.input[0]).not.toHaveProperty("id");
     expect(request.input[1].call_id).toBe(request.input[0].call_id);
+    expect(request.input.every((item: any) => !("id" in item))).toBe(true);
   });
 
   test("GPT Responses 流式响应归一化文本和工具调用事件", async () => {
@@ -669,7 +681,7 @@ describe("Chat Orchestrator", () => {
       { role: "system", content: "system" },
       { role: "user", content: "压缩后的当前进展" },
     ]);
-    expect(result.messages).toEqual([
+    expect(stripMessageIds(result.messages)).toEqual([
       toolCallMessage,
       {
         role: "tool",

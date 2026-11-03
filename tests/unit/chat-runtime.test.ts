@@ -92,10 +92,12 @@ describe("chat runtime", () => {
             ["first", "second"],
         );
 
-        expect(history).toEqual([
+        // 历史消息带内部 id（token / 投影缓存按它记账）；待发的 pending 消息不需要
+        expect(history.map(({ id: _id, ...rest }: any) => rest)).toEqual([
             { role: "assistant", content: "already there" },
             { role: "user", content: "first" },
         ]);
+        expect(typeof (history[0] as any).id).toBe("string");
     });
 
     test("buildSystemPrompt includes identity and the complete skill listing", async () => {

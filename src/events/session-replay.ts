@@ -21,6 +21,12 @@ import { sanitizeSessionId } from "../utils/session-id.js";
 /** 每 N 个事件写一次快照，避免日志无限增长时全量重放。 */
 const SNAPSHOT_INTERVAL = 100;
 
+/** 快照头读取窗口（写前判断 lastSeq 用）：JSON 前 256 字节足以覆盖 lastSeq 字段。 */
+const SNAPSHOT_HEAD_BYTES = 256;
+
+/** snapshotSeq 内存缓存的会话上限，避免长驻进程无界增长。 */
+const SNAPSHOT_STATE_MAX_ENTRIES = 512;
+
 /**
  * 只有回合闭合的事件才允许落快照：turn 进行中（user_message 已落盘、turn_commit 未落盘）
  * 写快照，会让该用户消息永远落在快照边界之前，重放时被排除、上下文丢失。
@@ -61,6 +67,17 @@ export interface ReplayResult {
 }
 
 export class SessionReplay {
+    /** 已落盘快照的 seq：避免每次判断都读快照文件。 */
+    private readonly snapshotSeq = new Map<string, number>();
+
+    private rememberSnapshotSeq(sessionId: string, seq: number): void {
+        if (!this.snapshotSeq.has(sessionId) && this.snapshotSeq.size >= SNAPSHOT_STATE_MAX_ENTRIES) {
+            const oldest = this.snapshotSeq.keys().next().value;
+            if (oldest !== undefined) this.snapshotSeq.delete(oldest);
+        }
+        this.snapshotSeq.set(sessionId, seq);
+    }
+
     constructor(private readonly eventLog: EventLog) {}
 
     private snapshotFilePath(sessionId: string): string {
@@ -75,6 +92,7 @@ export class SessionReplay {
         const snapshot = await this.readSnapshot(sessionId);
         const snapshotUsable =
             snapshot !== null && (upToSeq === undefined || upToSeq >= snapshot.lastSeq);
+        if (snapshotUsable && snapshot) this.rememberSnapshotSeq(sessionId, snapshot.lastSeq);
 
         const fromSeq = snapshotUsable ? snapshot.lastSeq + 1 : 1;
         const events = await this.eventLog.read(sessionId, fromSeq, undefined);
@@ -180,12 +198,21 @@ export class SessionReplay {
         await this.writeSnapshotIfDue(session.sessionId, session);
     }
 
-    /** 事件数达到快照间隔时落盘当前状态快照。 */
+    /**
+     * 距上次快照超过 SNAPSHOT_INTERVAL 个事件、且日志尾巴是「快照安全事件」时落盘当前状态。
+     *
+     * 判据用「距上次快照的增量」而不是「seq 是否整除间隔」：整除只有在事件数恰好命中时
+     * 才成立，长回合会产生大量 turn_message，长会话往往一直落在非整除位置，导致永远没有快照、
+     * 每次重放都从日志开头扫起。
+     */
     async writeSnapshotIfDue(sessionId: string, session: Session): Promise<void> {
         const lastSeq = await this.eventLog.lastSeq(sessionId);
-        if (lastSeq === 0 || lastSeq % SNAPSHOT_INTERVAL !== 0) return;
+        if (lastSeq === 0) return;
+        if (lastSeq - (await this.lastSnapshotSeq(sessionId)) < SNAPSHOT_INTERVAL) return;
         const tail = await this.eventLog.read(sessionId, lastSeq, 1);
-        if (tail[0] && !SNAPSHOT_SAFE_EVENT_TYPES.has(tail[0].type)) return;
+        // 读不到尾巴（半行/并发截断）时不能当成安全边界：否则会在回合中途落快照，
+        // 让本回合的用户消息落在边界之前、重放时丢失
+        if (!tail[0] || !SNAPSHOT_SAFE_EVENT_TYPES.has(tail[0].type)) return;
 
         const snapshot: EventSnapshot = {
             lastSeq,
@@ -198,8 +225,37 @@ export class SessionReplay {
         try {
             await fs.promises.writeFile(tempPath, JSON.stringify(snapshot, null, 2), "utf8");
             await fs.promises.rename(tempPath, filePath);
+            this.rememberSnapshotSeq(sessionId, lastSeq);
         } finally {
             await fs.promises.rm(tempPath, { force: true });
+        }
+    }
+
+    /** 上次快照覆盖到的 seq（没有快照时为 0）。 */
+    private async lastSnapshotSeq(sessionId: string): Promise<number> {
+        // 其他实例可能写过更新的快照：以磁盘为准，避免本实例用更旧的状态覆盖它
+        const cached = this.snapshotSeq.get(sessionId) ?? 0;
+        const seq = Math.max(cached, await this.readSnapshotLastSeq(sessionId));
+        this.rememberSnapshotSeq(sessionId, seq);
+        return seq;
+    }
+
+    /** 只读快照文件头取 lastSeq：写快照前判断用，不必解析整个快照。 */
+    private async readSnapshotLastSeq(sessionId: string): Promise<number> {
+        let handle: fs.promises.FileHandle;
+        try {
+            handle = await fs.promises.open(this.snapshotFilePath(sessionId), "r");
+        } catch (error: any) {
+            if (error?.code === "ENOENT") return 0;
+            throw error;
+        }
+        try {
+            const buffer = Buffer.allocUnsafe(SNAPSHOT_HEAD_BYTES);
+            const { bytesRead } = await handle.read(buffer, 0, SNAPSHOT_HEAD_BYTES, 0);
+            const match = /"lastSeq"\s*:\s*(\d+)/.exec(buffer.subarray(0, bytesRead).toString("utf8"));
+            return match ? Number(match[1]) : 0;
+        } finally {
+            await handle.close();
         }
     }
 
@@ -231,6 +287,7 @@ export class SessionReplay {
 
     /** 删除会话快照（截断/回滚后快照过期，重放改为全量）。 */
     async deleteSnapshot(sessionId: string): Promise<void> {
+        this.snapshotSeq.delete(sessionId);
         try {
             await fs.promises.unlink(this.snapshotFilePath(sessionId));
         } catch (error: any) {

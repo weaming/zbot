@@ -22,6 +22,7 @@ import { runToolBatch, type ToolBatchOutcome } from "./orchestrator/tool-loop.js
 import { truncateAssistantToolCalls } from "./orchestrator/tool-order.js";
 import { runTurnLoop, type TurnContext } from "./orchestrator/turn-loop.js";
 import { type ToolExecutionResponse } from "./tool-interface.js";
+import { createUlid } from "../utils/ulid.js";
 
 /** 差分基准的会话上限，超出后按插入序淘汰最老的一条。 */
 const ACCUMULATED_USAGE_BASELINE_MAX = 512;
@@ -242,7 +243,17 @@ export async function executeWithChat(
         console.error("⚠️ [Orchestrator] turn_message 落盘失败:", error?.message ?? error);
       });
   };
+  /**
+   * 定稿消息已不可变，立即分配 id：token 记账与工具结果投影都按 id 缓存，
+   * 回合内每轮请求才能只算新增消息。前提是同一个对象只 append 一次
+   * （失败/中断回合靠对象身份去重），否则会出现两条同 id 消息。
+   */
+  const ensureMessageId = (message: ChatMessage): void => {
+    if (!("id" in message)) (message as ChatMessage & { id?: string }).id = createUlid();
+  };
+
   const appendTurnMessage = (message: ChatMessage): void => {
+    ensureMessageId(message);
     ctx.messages.push(message);
     turnMessages.push(message);
     persistMessage(message);

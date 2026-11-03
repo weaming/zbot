@@ -128,3 +128,35 @@ describe("projectChatMessagesForPrompt", () => {
         expect(messages[2].content).toBe("full-content");
     });
 });
+
+describe("projectToolMessageForPrompt 的按 id 缓存", () => {
+    it("同一条消息（内容不可变）复用首次投影结果", () => {
+        const content = "a".repeat(40000);
+        const first = projectToolMessageForPrompt({ ...toolMessage(content), id: "m-1" } as ChatMessage);
+        const second = projectToolMessageForPrompt({ ...toolMessage(content), id: "m-1" } as ChatMessage);
+
+        expect(first.content).toContain("[工具结果已截取");
+        expect(second.content).toBe(first.content);
+    });
+
+    it("同 id 但内容变了会重算，不吃旧投影", () => {
+        const first = projectToolMessageForPrompt({ ...toolMessage("a".repeat(40000)), id: "m-3" } as ChatMessage);
+        const changed = projectToolMessageForPrompt({ ...toolMessage("b".repeat(50000)), id: "m-3" } as ChatMessage);
+
+        expect(changed.content).toContain("[工具结果已截取");
+        expect(changed.content).not.toBe(first.content);
+        expect(changed.content).toContain("b");
+    });
+
+    it("自定义阈值不吃默认档位的缓存", () => {
+        const content = "abcdefghijklmnopqrstuvwxyz".repeat(20);
+        const defaultProjection = projectToolMessageForPrompt({ ...toolMessage(content), id: "m-2" } as ChatMessage);
+        const tinyProjection = projectToolMessageForPrompt(
+            { ...toolMessage(content), id: "m-2" } as ChatMessage,
+            tinyOptions,
+        );
+
+        expect(defaultProjection.content).toBe(content);
+        expect(tinyProjection.content).toContain("[工具结果已截取");
+    });
+});

@@ -20,6 +20,23 @@ import type { ChatModelSelection } from "../types/chat-model.js";
 import { buildSystemPrompt, runChatQuery } from "./chat-runtime.js";
 import { DEFAULT_MEMORY_USER_ID, normalizeMemoryUserId } from "../utils/runtime-paths.js";
 
+/**
+ * 快速跳过压缩判定的安全水位：provider 上报的真实输入低于阈值这个比例时直接放行，
+ * 不再对全量历史做真实分词（纯 JS 精确计数在几十万字时单次数百毫秒，
+ * 而回合内每轮工具调用后都要判定一次）。
+ *
+ * 只信 provider 值：本地启发式对 JSON / base64 / emoji 类工具输出的低估可达 1.3~3 倍，
+ * 拿它做跳过判据会把「已过阈值」判成「远未到」。缺 provider 值（新会话首轮、刚重放）
+ * 时照旧走精确计数，此时只多付一次。20%~30% 余量留给本轮新增的工具结果。
+ */
+const FAST_SKIP_RATIO = 0.7;
+
+/** 是否可跳过精确分词：仅当 provider 上报的真实输入离阈值足够远。 */
+function canSkipPreciseCount(model: string | undefined, lastPromptTokens?: number): boolean {
+    if (!lastPromptTokens || lastPromptTokens <= 0) return false;
+    return lastPromptTokens < getAutoCompactThreshold(model) * FAST_SKIP_RATIO;
+}
+
 export interface AutoCompactOptions {
     model?: string;
     /** 工具定义占用的 token：压缩请求仍带工具声明（保缓存前缀），预算里必须先扣掉。 */
@@ -71,7 +88,9 @@ export async function compactActiveTurnMessagesIfNeeded(
     options: ActiveTurnCompactOptions,
 ): Promise<any[] | undefined> {
     if (options.providerMaxTokens === undefined) {
-        // 工具结果这类内容启发式会低估，正常路径需用真实分词计数预判。
+        // 上一轮 provider 上报的真实输入离阈值还远时无需再数一遍（工具结果这类内容启发式会低估，
+        // 所以不用启发式做跳过判据）。
+        if (canSkipPreciseCount(options.model, options.lastPromptTokens)) return undefined;
         const currentTokens = await countMessagesTokens(projectChatMessagesForPrompt(messages), options.model);
         const threshold = getAutoCompactThreshold(options.model);
         const checkTokens = Math.max(options.lastPromptTokens ?? 0, currentTokens);
@@ -251,6 +270,13 @@ export async function autoCompactIfNeeded(
     const userId = normalizeMemoryUserId(options.userId);
     // 判定要带上系统提示的占用：只有历史估算会低估真实请求量，漏判就直接涨到 provider 400
     const systemPrompt = buildSystemPrompt(session.cwd);
+
+    // 上一回合 provider 上报的真实输入离阈值还远时直接放行：精确计数要对整段历史分词，
+    // 长会话单次数百毫秒。
+    if (canSkipPreciseCount(options.model, session.lastPromptTokens)) {
+        return { wasCompacted: false };
+    }
+
     const systemPromptTokens = await countTextTokens(systemPrompt, options.model);
     if (!(await shouldAutoCompact(session, {
         model: options.model,

@@ -6,7 +6,7 @@ import {
     RETAINED_TAIL_TOKENS,
 } from "../config.js";
 import type { ChatMessage, ConversationTurn, Session, StoredChatMessage } from "../types/session.js";
-import { getSessionContextHistory } from "./conversation-history.js";
+import { getSessionContextHistoryWithIds } from "./conversation-history.js";
 import { estimateMessageTokens } from "./token-estimator.js";
 import { countMessagesTokens, countTurnsTokens } from "./tokenizer.js";
 
@@ -162,7 +162,7 @@ export async function countSessionContextTokens(
     >,
     options: { systemPromptTokens?: number; model?: string } = {},
 ): Promise<number> {
-    const history = getSessionContextHistory(session);
+    const history = getSessionContextHistoryWithIds(session);
     const total = options.systemPromptTokens ?? 0;
     return total + (await countMessagesTokens(history, options.model));
 }

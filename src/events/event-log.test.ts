@@ -338,6 +338,69 @@ describe("EventLog", () => {
         expect(result.session.turns.at(-1)?.messages[1]).toMatchObject({ role: "assistant", content: "done" });
     });
 
+    it("快照按距上次快照的增量写，不要求 seq 整除间隔", async () => {
+        const log = new EventLog();
+        const replay = new SessionReplay(log);
+        const sessionId = "sess-snapshot-delta";
+
+        // 40 个完整回合 = 120 个事件，落点不整除 SNAPSHOT_INTERVAL
+        await log.append(sessionId, "session_created", {});
+        for (let index = 0; index < 40; index += 1) {
+            await appendTurn(log, sessionId, {
+                turnId: `D${index}`,
+                userMessages: [`msg-${index}`],
+                messages: [{ role: "assistant", content: `reply-${index}` } as ChatMessage],
+            });
+        }
+
+        const session = (await replay.replayTo(sessionId)).session;
+        await replay.writeSnapshotIfDue(sessionId, session);
+
+        const snapshotPath = path.join(tmpDir, "sessions", "events", `${sessionId}.snapshot.json`);
+        expect(fs.existsSync(snapshotPath)).toBe(true);
+        const raw = JSON.parse(fs.readFileSync(snapshotPath, "utf8"));
+        expect(raw.lastSeq).toBe(121);
+        expect(raw.lastSeq % 100).not.toBe(0);
+    });
+
+    it("距上次快照不足间隔、或尾部不是安全事件时不写快照", async () => {
+        const log = new EventLog();
+        const replay = new SessionReplay(log);
+        const sessionId = "sess-snapshot-unsafe-tail";
+        const snapshotPath = path.join(tmpDir, "sessions", "events", `${sessionId}.snapshot.json`);
+
+        await appendTurn(log, sessionId, { turnId: "U1", userMessages: ["a"], messages: [{ role: "assistant", content: "b" } as ChatMessage] });
+        const early = (await replay.replayTo(sessionId)).session;
+        await replay.writeSnapshotIfDue(sessionId, early);
+        expect(fs.existsSync(snapshotPath)).toBe(false);
+
+        // 累计到超过间隔，但尾巴停在 user_message（回合未闭合）上
+        for (let index = 0; index < 40; index += 1) {
+            await appendTurn(log, sessionId, {
+                turnId: `U-${index}`,
+                userMessages: [`msg-${index}`],
+                messages: [{ role: "assistant", content: `reply-${index}` } as ChatMessage],
+            });
+        }
+        await log.append(sessionId, "user_message", { text: "未闭合", turnId: "U-open" });
+        const open = (await replay.replayTo(sessionId)).session;
+        await replay.writeSnapshotIfDue(sessionId, open);
+        expect(fs.existsSync(snapshotPath)).toBe(false);
+
+        // 回合闭合后补写
+        await log.append(sessionId, "turn_commit", {
+            turnId: "U-open",
+            events: [],
+            userMessages: ["未闭合"],
+            stopReason: "stop",
+            usage: usage(),
+            interrupted: false,
+        });
+        const closed = (await replay.replayTo(sessionId)).session;
+        await replay.writeSnapshotIfDue(sessionId, closed);
+        expect(fs.existsSync(snapshotPath)).toBe(true);
+    });
+
     it("快照只写会话事实：system prompt 与工具定义不落盘", async () => {
         const log = new EventLog();
         const replay = new SessionReplay(log);
@@ -700,6 +763,115 @@ describe("EventLog 逆序分页（时间线首屏）", () => {
         expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
         expect(new Set(seqs).size).toBe(seqs.length);
         expect(["user_message", "session_created"]).toContain(page[0]!.type);
+    });
+});
+
+describe("EventLog 正向读取（尾部窗口）", () => {
+    it("从指定 seq 起读到日志末尾，limit 截断", async () => {
+        const log = new EventLog();
+        const sessionId = "sess-read-tail";
+
+        await log.append(sessionId, "session_created", {});
+        for (let index = 0; index < 5; index += 1) {
+            await appendTurn(log, sessionId, {
+                turnId: `R${index}`,
+                userMessages: [`q${index}`],
+                messages: [{ role: "assistant", content: `a${index}` } as ChatMessage],
+            });
+        }
+
+        expect((await log.read(sessionId, 1)).map(event => event.seq)).toEqual(
+            Array.from({ length: 16 }, (_, index) => index + 1),
+        );
+        expect((await log.read(sessionId, 13)).map(event => event.seq)).toEqual([13, 14, 15, 16]);
+        expect((await log.read(sessionId, 13, 2)).map(event => event.seq)).toEqual([13, 14]);
+        expect((await log.read(sessionId, 16)).map(event => event.seq)).toEqual([16]);
+    });
+
+    it("单个事件超过读取窗口时跨窗口拼接仍然正确", async () => {
+        const log = new EventLog();
+        const sessionId = "sess-read-big-window";
+
+        await log.append(sessionId, "session_created", {});
+        await log.append(sessionId, "turn_message", {
+            turnId: "B1",
+            message: { role: "assistant", content: "x".repeat(200_000) },
+        });
+        await log.append(sessionId, "turn_message", {
+            turnId: "B1",
+            message: { role: "assistant", content: "tail-after-big" },
+        });
+
+        expect((await log.read(sessionId, 3)).map(event => event.seq)).toEqual([3]);
+        const middle = await log.read(sessionId, 2);
+        expect(middle.map(event => event.seq)).toEqual([2, 3]);
+        expect((middle[0].payload as any).message.content.length).toBe(200_000);
+        expect((middle[1].payload as any).message.content).toBe("tail-after-big");
+    });
+
+    it("窗口边界跨多字节字符时内容不被破坏", async () => {
+        const log = new EventLog();
+        const sessionId = "sess-read-multibyte";
+
+        await log.append(sessionId, "session_created", {});
+        const texts: string[] = [];
+        for (let index = 0; index < 60; index += 1) {
+            // 每条约 3.6KB 中文，读取窗口（64KB 起翻倍）必然落在某个字符中间
+            const text = `第${index}条：` + "中文内容测试".repeat(200);
+            texts.push(text);
+            await log.append(sessionId, "turn_message", {
+                turnId: "M1",
+                message: { role: "assistant", content: text },
+            });
+        }
+
+        const all = await log.read(sessionId, 1);
+        expect(all).toHaveLength(61);
+        const contents = all
+            .filter(event => event.type === "turn_message")
+            .map(event => (event.payload as any).message.content);
+        expect(contents).toEqual(texts);
+
+        // 尾部读同样不能把跨窗口的字符解码坏
+        const tail = await log.read(sessionId, 61);
+        expect((tail[0].payload as any).message.content).toBe(texts.at(-1));
+    });
+
+    it("尾部被写入更早的 seq（日志被改动）时退化为整文件扫描，不漏事件", async () => {
+        const log = new EventLog();
+        const sessionId = "sess-read-tampered";
+
+        await log.append(sessionId, "session_created", {});
+        for (let index = 0; index < 3; index += 1) {
+            await log.append(sessionId, "user_message", { text: `q${index}`, turnId: "T1" });
+        }
+
+        const filePath = path.join(tmpDir, "sessions", "events", `${sessionId}.jsonl`);
+        fs.appendFileSync(filePath, `${JSON.stringify({
+            seq: 2,
+            ts: new Date().toISOString(),
+            sessionId,
+            type: "user_message",
+            payload: { text: "rewound", turnId: "T1" },
+        })}\n`, "utf8");
+
+        const events = await log.read(sessionId, 3);
+        // 全量扫描后仍按 fromSeq 过滤：被插到尾部的那条（seq=2）不该出现
+        expect(events.map(event => event.seq)).toEqual([3, 4]);
+    });
+
+    it("fromSeq 越过末尾时返回空，尾部半行不影响读取", async () => {
+        const log = new EventLog();
+        const sessionId = "sess-read-past-end";
+
+        await log.append(sessionId, "session_created", {});
+        await log.append(sessionId, "user_message", { text: "q", turnId: "T1" });
+
+        const filePath = path.join(tmpDir, "sessions", "events", `${sessionId}.jsonl`);
+        fs.appendFileSync(filePath, '{"seq":3,"type":"turn_me', "utf8");
+
+        expect(await log.read(sessionId, 3)).toEqual([]);
+        expect((await log.read(sessionId, 2)).map(event => event.seq)).toEqual([2]);
     });
 });
 

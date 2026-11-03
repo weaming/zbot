@@ -29,8 +29,30 @@ const MESSAGE_OVERHEAD_TOKENS = 4;
 const TOOL_CALL_OVERHEAD_TOKENS = 10;
 
 let loading: Promise<DeepSeekTokenizer | null> | undefined;
-/** 已精确统计过的消息（内容不可变的 StoredChatMessage 按 id 记账）。 */
+/**
+ * 已精确统计过的消息，键 = 消息 id + 模型 + 内容长度。
+ *
+ * 同一条消息可能以两种形态参与计数：原文（会话历史）与投影后的截取版（构造请求前）。
+ * 两者 id 相同而内容不同，键里必须带内容指纹，否则先算的那种会污染另一种，
+ * 压缩判定（投影口径）与压缩切分（原文口径）会互相给出错误结果。
+ */
 const messageCache = new Map<string, number>();
+const MESSAGE_CACHE_MAX_ENTRIES = 20_000;
+
+function messageCacheKey(message: ChatMessage | StoredChatMessage, model?: string): string | undefined {
+    const id = "id" in message ? message.id : undefined;
+    if (!id) return undefined;
+    const contentLength = typeof message.content === "string" ? message.content.length : -1;
+    return `${id}|${model ?? ""}|${contentLength}`;
+}
+
+function rememberMessageTokens(key: string, tokens: number): void {
+    if (messageCache.size >= MESSAGE_CACHE_MAX_ENTRIES) {
+        const oldest = messageCache.keys().next().value;
+        if (oldest !== undefined) messageCache.delete(oldest);
+    }
+    messageCache.set(key, tokens);
+}
 
 /** 关闭真分词（诊断/测试用）：`ZBOT_TOKENIZER=off`。 */
 function tokenizerDisabled(): boolean {
@@ -94,8 +116,8 @@ async function countMessageTokens(
     message: ChatMessage | StoredChatMessage,
     model?: string,
 ): Promise<number> {
-    const id = "id" in message ? message.id : undefined;
-    const cached = id ? messageCache.get(id) : undefined;
+    const cacheKey = messageCacheKey(message, model);
+    const cached = cacheKey ? messageCache.get(cacheKey) : undefined;
     if (cached !== undefined) return cached;
 
     let tokens = MESSAGE_OVERHEAD_TOKENS;
@@ -117,7 +139,7 @@ async function countMessageTokens(
         }
     }
 
-    if (id) messageCache.set(id, tokens);
+    if (cacheKey) rememberMessageTokens(cacheKey, tokens);
     return tokens;
 }
 

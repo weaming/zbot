@@ -41,6 +41,7 @@ import {
   stripResponsesMetadata,
 } from "./messages.js";
 import { adaptToolsForUpstream, resolveApplyPatchToolMode } from "./apply-patch-tool.js";
+import { stripInternalPromptIds } from "../../utils/conversation-history.js";
 
 /** 把工具结果中的图片上传成 DeepSeek Files，返回 file id。 */
 async function uploadImageForDeepSeek(client: ChatClient, image: any): Promise<string> {
@@ -149,7 +150,8 @@ export async function prepareRequest(options: PrepareRequestOptions): Promise<Pr
     const currentTools = sortToolsByName(options.getToolDefinitions ? options.getToolDefinitions() : options.tools);
 
     // 提醒消息只追加在请求尾部：不进历史、不落盘，前缀不变仍可命中缓存
-    const projected = projectChatMessagesForPrompt(options.messages);
+    // 历史里的消息 id 只服务于本地 token 缓存，构造请求体前必须剥掉
+    const projected = stripInternalPromptIds(projectChatMessagesForPrompt(options.messages));
     // 不下发工具时（纯生成请求）DeepSeek 不需要、也不会拼接历史思维链，剥掉省请求体
     const promptMessages = currentTools.length === 0 && isDeepSeekEndpoint(model, client.baseURL)
       ? stripReasoningContent(projected)

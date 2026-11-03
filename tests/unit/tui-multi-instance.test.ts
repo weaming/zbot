@@ -7,6 +7,14 @@ import { getSessionLogFile } from "../../src/utils/state-paths.js";
 import { getSessionExchangeLogFile } from "../../src/utils/logger.js";
 import { getSessionTodosFile } from "../../src/utils/runtime-paths.js";
 
+/** 断言送 LLM 的内容时忽略内部消息 id（只服务本地缓存，构造请求体前会剥掉）。 */
+function stripMessageIds<T>(messages: T[]): Array<Omit<T, "id">> {
+    return messages.map(message => {
+        const { id: _id, ...rest } = message as T & { id?: string };
+        return rest as Omit<T, "id">;
+    });
+}
+
 /**
  * 多 TUI 实例协同测试：
  * 1. 实例 A 完成 Turn 1 并落盘后，实例 B 能够检测到磁盘版本更新，重放最新历史并无缝接力 Turn 2；
@@ -88,7 +96,7 @@ describe("LocalSessionHost 多实例并发协同", () => {
 
         // 验证实例 B 发送 Turn 2 时构建的对话历史包含了 Turn 1 的问答！
         const turn2History = queriedHistories[1];
-        expect(turn2History).toEqual([
+        expect(stripMessageIds(turn2History)).toEqual([
             { role: "user", content: "Turn 1 question" },
             { role: "assistant", content: "reply to: Turn 1 question" },
         ]);
@@ -98,7 +106,7 @@ describe("LocalSessionHost 多实例并发协同", () => {
         expect(queriedHistories.length).toBe(3);
 
         const turn3History = queriedHistories[2];
-        expect(turn3History).toEqual([
+        expect(stripMessageIds(turn3History)).toEqual([
             { role: "user", content: "Turn 1 question" },
             { role: "assistant", content: "reply to: Turn 1 question" },
             { role: "user", content: "Turn 2 question" },
@@ -190,7 +198,7 @@ describe("LocalSessionHost 多实例并发协同", () => {
         // 取消归档后重放事件重建会话，历史完整且可继续对话
         await agent.sendMessage(sessionId, "归档后的问题");
         // history 是请求前的上下文：包含归档前那一整轮，说明重放正确
-        expect(queriedHistories.at(-1)).toEqual([
+        expect(stripMessageIds(queriedHistories.at(-1))).toEqual([
             { role: "user", content: "归档前的问题" },
             { role: "assistant", content: "reply to: 归档前的问题" },
         ]);

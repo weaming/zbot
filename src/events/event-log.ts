@@ -302,25 +302,14 @@ export class EventLog {
         limit?: number,
         options: { persistedOnly?: boolean } = {},
     ): Promise<AgentEvent[]> {
-        const text = await readFileIfExists(this.eventFilePath(sessionId));
-
-        const events: AgentEvent[] = [];
-        if (text) {
-            for (const line of text.split("\n")) {
-                if (!line.trim()) continue;
-                let event: AgentEvent;
-                try {
-                    event = JSON.parse(line);
-                } catch {
-                    // 追加中断可能留下半行，跳过损坏行，不阻断整条日志
-                    console.warn(`[EventLog] 跳过损坏事件行 (session=${sessionId}): ${line.slice(0, 120)}`);
-                    continue;
-                }
-                if (event.seq < fromSeq) continue;
-                events.push(event);
-                if (limit !== undefined && events.length >= limit) break;
-            }
-        }
+        // 从尾部窗口回读：seq 单调递增，命中尾部窗口即可停，不必全量解析大会话日志。
+        // 已知的最后 seq 用于校验尾部真实性（日志被外部改动时退化整文件扫描）。
+        const events = await readEventsFromSeq(
+            this.eventFilePath(sessionId),
+            fromSeq,
+            limit,
+            await this.lastSeq(sessionId),
+        );
 
         if (options.persistedOnly) return events;
 
@@ -451,6 +440,123 @@ function parseSeq(line: string | undefined): number | undefined {
 }
 
 /**
+ * 从 fromSeq 起正向读事件（最多 limit 条），按尾部窗口回读。
+ *
+ * 日志 seq 单调递增，所以从文件尾往前扫到「第一条 seq < fromSeq」就可以停：
+ * 常驻进程的增量读（如只查最新一条）只碰末尾一个窗口，不必解析几十 MB 的历史。
+ */
+async function readEventsFromSeq(
+    filePath: string,
+    fromSeq: number,
+    limit?: number,
+    expectedLastSeq?: number,
+): Promise<AgentEvent[]> {
+    let handle: fs.promises.FileHandle;
+    try {
+        handle = await fs.promises.open(filePath, "r");
+    } catch (error: any) {
+        if (error?.code === "ENOENT") return [];
+        throw error;
+    }
+
+    try {
+        const { size } = await handle.stat();
+        let pos = size;
+        let window = PAGE_WINDOW_BYTES;
+        let rest = Buffer.alloc(0);
+        const collected: AgentEvent[] = [];
+        let reachedEarlier = false;
+        let previousSeq = Number.POSITIVE_INFINITY;
+        let monotonic = true;
+        let firstSeq: number | undefined;
+
+        while (pos > 0 && !reachedEarlier) {
+            const start = Math.max(0, pos - window);
+            const length = pos - start;
+            const buffer = Buffer.allocUnsafe(length);
+            const { bytesRead } = await handle.read(buffer, 0, length, start);
+            if (bytesRead < length) {
+                // 读期间文件被其他实例截断：已收集的后缀仍然有效，不再往前读
+                pos = 0;
+                break;
+            }
+            // 按字节拼接再切行：逐窗 toString('utf8') 会把跨窗口边界的多字节字符解成 U+FFFD，
+            // 事务日志被静默改坏后重放不再确定，且坏内容会进入下一轮上下文。
+            const chunk = Buffer.concat([buffer.subarray(0, bytesRead), rest]);
+            let bodyStart = 0;
+            if (start > 0) {
+                const firstNewline = chunk.indexOf(0x0A);
+                bodyStart = firstNewline === -1 ? chunk.length : firstNewline + 1;
+            }
+            rest = Buffer.from(chunk.subarray(0, bodyStart));
+            const lines = chunk.subarray(bodyStart).toString("utf8").split("\n");
+
+            for (let index = lines.length - 1; index >= 0; index--) {
+                const event = parseEventLine(lines[index]);
+                if (!event) continue;
+                if (firstSeq === undefined) firstSeq = event.seq;
+                // 逆序遍历时 seq 必须单调不增；否则尾部窗口的「遇到更早即停」不成立
+                if (event.seq > previousSeq) monotonic = false;
+                previousSeq = event.seq;
+                if (event.seq < fromSeq) {
+                    reachedEarlier = true;
+                    break;
+                }
+                collected.push(event);
+            }
+
+            pos = start;
+            window = Math.min(window * 2, PAGE_WINDOW_MAX_BYTES);
+        }
+
+        // seq 连续递增是事实源的不变量：从尾部往前扫到的最后一条应当正好是 fromSeq，
+        // 且尾部第一条应当就是已知的最后 seq。任一不成立（缺口、非单调、日志被外部改动）
+        // 都说明尾部窗口的前缀假设不成立，退化整文件扫描，宁可一次全量也不静默漏事件。
+        const oldestSeq = collected.at(-1)?.seq;
+        const tailTampered = expectedLastSeq !== undefined
+            && expectedLastSeq > 0
+            && firstSeq !== undefined
+            && firstSeq < expectedLastSeq;
+        if (!monotonic || tailTampered || (oldestSeq !== undefined && oldestSeq > fromSeq)) {
+            return readEventsWholeFile(filePath, fromSeq, limit);
+        }
+
+        collected.reverse();
+        // limit 不能提前收敛：要返回 fromSeq 起最早的 limit 条，必须先定位到 fromSeq 边界
+        return limit !== undefined && collected.length > limit ? collected.slice(0, limit) : collected;
+    } finally {
+        await handle.close();
+    }
+}
+
+/** 整文件扫描读事件：尾部窗口的兜底（seq 非单调时）与损坏行提示。 */
+async function readEventsWholeFile(
+    filePath: string,
+    fromSeq: number,
+    limit?: number,
+): Promise<AgentEvent[]> {
+    const text = await readFileIfExists(filePath);
+    if (!text) return [];
+
+    const events: AgentEvent[] = [];
+    for (const line of text.split("\n")) {
+        if (!line.trim()) continue;
+        let event: AgentEvent;
+        try {
+            event = JSON.parse(line);
+        } catch {
+            // 追加中断可能留下半行，跳过损坏行，不阻断整条日志
+            console.warn(`[EventLog] 跳过损坏事件行 (${path.basename(filePath)}): ${line.slice(0, 120)}`);
+            continue;
+        }
+        if (!Number.isSafeInteger(event.seq) || event.seq < fromSeq) continue;
+        events.push(event);
+        if (limit !== undefined && events.length >= limit) break;
+    }
+    return events;
+}
+
+/**
  * 从文件尾部逆序回读一页事件，返回升序结果。
  *
  * 收够 count 条之后还要再往前跨一个回合收尾（turn_commit）才停：切点落在回合边界上，
@@ -473,7 +579,7 @@ async function readEventsBackward(
         const { size } = await handle.stat();
         let pos = size;
         let window = PAGE_WINDOW_BYTES;
-        let rest = "";
+        let rest = Buffer.alloc(0);
         const collected: AgentEvent[] = [];
         let done = false;
 
@@ -482,15 +588,20 @@ async function readEventsBackward(
             const length = pos - start;
             const buffer = Buffer.allocUnsafe(length);
             const { bytesRead } = await handle.read(buffer, 0, length, start);
-            // rest 是上一轮剩下的半行（更早的字节还没读到），要拼在本轮文本前面
-            const text = buffer.subarray(0, bytesRead).toString("utf8") + rest;
-            const lines = text.split("\n");
-            // 窗口没覆盖到文件头时，首行很可能是被截断的半行，留给下一轮拼接
-            rest = start > 0 ? lines[0] : "";
-            const complete = start > 0 ? lines.slice(1) : lines;
+            if (bytesRead < length) break;
+            // 按字节拼接后切行：跨窗口边界的多字节字符不能逐窗解码，否则会被解成 U+FFFD
+            const chunk = Buffer.concat([buffer.subarray(0, bytesRead), rest]);
+            let bodyStart = 0;
+            if (start > 0) {
+                // 窗口没覆盖到文件头时，首行很可能是被截断的半行，留给下一轮拼接
+                const firstNewline = chunk.indexOf(0x0A);
+                bodyStart = firstNewline === -1 ? chunk.length : firstNewline + 1;
+            }
+            rest = Buffer.from(chunk.subarray(0, bodyStart));
+            const lines = chunk.subarray(bodyStart).toString("utf8").split("\n");
 
-            for (let index = complete.length - 1; index >= 0; index--) {
-                const event = parseEventLine(complete[index]);
+            for (let index = lines.length - 1; index >= 0; index--) {
+                const event = parseEventLine(lines[index]);
                 if (!event || event.seq >= beforeSeq) continue;
                 if (collected.length >= count && event.type === "turn_commit") {
                     done = true;

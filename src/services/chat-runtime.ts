@@ -20,7 +20,7 @@ import type { ChatMessage, Session } from "../types/session.js";
 import type { SteerUpdate, StreamDelta } from "../types/chat.js";
 import { toUserContent, type UserContent, type UserMessageInput } from "../types/image.js";
 import type { ToolCall } from "../types/tool-call.js";
-import { getSessionContextHistory } from "../utils/conversation-history.js";
+import { getSessionContextHistoryWithIds } from "../utils/conversation-history.js";
 import type { LLMRequestKind } from "../utils/logger.js";
 import type { UIEvent } from "../events/ui-events.js";
 import { getSessionToolNames } from "../tools/session-tools.js";
@@ -398,7 +398,8 @@ export function buildConversationHistory(
     options: { skipToolCallIds?: ReadonlySet<string> } = {},
 ): any[] {
     const extraMessages = pendingMessages.slice(0, -1);
-    const history = getSessionContextHistory(session, options);
+    // 带上消息 id：请求前的压缩判定与工具结果投影都按 id 缓存，长会话只算新增内容
+    const history = getSessionContextHistoryWithIds(session, options);
     history.push(...extraMessages.map(input => ({
         role: "user" as const,
         content: toUserContent(typeof input === "string" ? { text: input } : input),

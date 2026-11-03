@@ -2,6 +2,14 @@ import { describe, it, expect } from "bun:test";
 import { executeWithChat, type ChatClient } from "./chat-orchestrator.js";
 import type { UIEvent } from "../events/ui-events.js";
 
+/** 断言送 LLM 的内容时忽略内部消息 id（只服务本地缓存，构造请求体前会剥掉）。 */
+function stripMessageIds<T>(messages: T[]): Array<Omit<T, "id">> {
+    return messages.map(message => {
+        const { id: _id, ...rest } = message as T & { id?: string };
+        return rest as Omit<T, "id">;
+    });
+}
+
 function textChunk(content: string, extra: any = {}): any {
     return {
         id: "chunk-1",
@@ -167,7 +175,7 @@ describe("executeWithChat 流式聚合", () => {
             onTurnMessage: message => { saved.push(message); },
         })).rejects.toThrow("Connection error.");
 
-        expect(saved).toEqual([{ role: "assistant", content: "已收到" }]);
+        expect(stripMessageIds(saved)).toEqual([{ role: "assistant", content: "已收到" }]);
     });
 
     it("Responses 托管 tool_search 事件显示工具发现进度", async () => {
@@ -314,7 +322,7 @@ describe("executeWithChat 流式聚合", () => {
             model: "test-model",
             onTurnMessage: message => { saved.push(message); },
         })).rejects.toThrow("显式标为失败");
-        expect(saved).toEqual([{ role: "assistant", content: "部分答复" }]);
+        expect(stripMessageIds(saved)).toEqual([{ role: "assistant", content: "部分答复" }]);
     });
 
     it("provider 失败时未确认的工具调用只记录参数，不执行", async () => {
@@ -365,7 +373,7 @@ describe("executeWithChat 流式聚合", () => {
             thrown = error;
         }
         expect(thrown?.message).toContain("回合消息落盘失败");
-        expect(thrown?.partialMessages).toEqual([{ role: "assistant", content: "已生成" }]);
+        expect(stripMessageIds(thrown?.partialMessages ?? [])).toEqual([{ role: "assistant", content: "已生成" }]);
     });
 
     it("text_delta 事件序列与聚合结果", async () => {
