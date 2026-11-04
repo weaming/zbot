@@ -61,6 +61,7 @@ import type {
     SessionHostOptions,
     SessionCreateInit,
     SessionSummary,
+    SlashCommandOutcome,
     TurnSpec,
     TurnUserMessage,
 } from "./session-host-types.js";
@@ -70,6 +71,7 @@ import {
     SessionNotFoundError,
 } from "./session-host-types.js";
 import { toUserContent, type UserMessageInput } from "../types/image.js";
+import { parseSlashCommand, REVIEW_PROMPT, type SlashCommandParse } from "../commands/slash-command.js";
 import { backgroundTaskManager } from "../tools/background-tasks.js";
 import { deleteSessionImageAssets } from "../utils/image-assets.js";
 
@@ -134,6 +136,8 @@ export class LocalSessionHost implements SessionHost {
     private readonly cancellingSessions = new Set<string>();
     /** 已进入退出流程：不再接受新的驱动回合（结果留在队列里即可）。 */
     private isClosing = false;
+    /** 会话间命令执行器（TUI 注入；无 UI 宿主不注册，命令按文本处理）。 */
+    private slashCommandHandler?: (sessionId: string, text: string) => SlashCommandOutcome | Promise<SlashCommandOutcome>;
     /** 每会话的有界排队投递队列（FIFO）。 */
     private readonly peerQueues = new Map<string, QueuedPeerMessage[]>();
     /**
@@ -341,6 +345,13 @@ export class LocalSessionHost implements SessionHost {
 
     takePeerResults(sessionId: string): string[] {
         return this.control.takeResults(sessionId);
+    }
+
+    /** 注册会话间命令执行器：解析层放行的 allow 命令交给前端执行。 */
+    setSlashCommandHandler(
+        handler: (sessionId: string, text: string) => SlashCommandOutcome | Promise<SlashCommandOutcome>,
+    ): void {
+        this.slashCommandHandler = handler;
     }
 
     /** 本实例在该会话上的待交付计数：等待别人回传 + 已就绪待附加。 */
@@ -577,50 +588,137 @@ export class LocalSessionHost implements SessionHost {
     /** 跑一轮"对方交付的"回合，并把最终输出作为结果回传。 */
     private async runPeerTurn(sessionId: string, message: PeerMessage): Promise<void> {
         const peerTitle = this.activeSessions.get(message.from)?.session.title;
-        const prompt = formatInboundPrompt(message, peerTitle);
+        let prompt = formatInboundPrompt(message, peerTitle);
         let content = "";
         let stopReason = "stop";
         let failure: string | undefined;
 
-        const spec: TurnSpec = {
-            turnId: createUlid(),
-            userMessages: [{ text: prompt, trigger: "peer" }],
-            query: prompt,
-            initialRequestKind: "peer_request",
-            onEvent: (event) => {
-                if (event.type === "message_end") {
-                    content = event.content;
-                    stopReason = event.stopReason;
-                } else if (event.type === "aborted") {
-                    stopReason = event.stopReason ?? "interrupted";
-                } else if (event.type === "error") {
-                    failure = event.message;
-                }
-            },
-        };
-
+        // 模型回合由 runSessionTurn 自己释放互斥；命令分支与异常路径需要这里兜底
+        let handedOff = false;
         try {
-            await this.runtimeReady;
-            const outcome = await runSessionTurn(this.turnHost, sessionId, spec, { alreadyReserved: true });
-            if (outcome.aborted && stopReason === "stop") stopReason = "aborted";
-        } catch (error: any) {
-            failure = error?.message ?? String(error);
-            if (stopReason === "stop") stopReason = "error";
-        } finally {
-            const result: PeerResult = {
-                msgId: message.id,
-                ok: !failure,
-                text: content,
-                stopReason,
-                ...(failure ? { error: failure } : {}),
-            };
-            // 先记终态再回传：重试同一 msgId 时能重推结果，且不会重复执行
-            this.rememberCompletedPeerResult(message, result);
-            try {
-                this.control.completeInbound(sessionId, message, result);
-            } catch (error) {
-                console.error("⚠️ [host] 会话间结果回传失败:", error);
+            // 命令：先经共享解析层判定；非法参数/不支持的命令给明确结果，不跑模型也不当文本
+            const parsed = parseSlashCommand(message.text);
+            if (parsed.kind === "invalid") {
+                this.completePeerTurn(sessionId, message, {
+                    content: "",
+                    stopReason: "invalid_command",
+                    failure: parsed.message,
+                });
+                return;
             }
+            if (parsed.kind === "command") {
+                const command = await this.resolvePeerSlashCommand(sessionId, message.text, parsed);
+                if (command.kind === "unsupported") {
+                    this.completePeerTurn(sessionId, message, {
+                        content: "",
+                        stopReason: "unsupported_command",
+                        failure: command.message,
+                    });
+                    return;
+                }
+                if (command.kind === "output") {
+                    this.completePeerTurn(sessionId, message, { content: command.output, stopReason: "command" });
+                    return;
+                }
+                if (command.kind === "prompt") prompt = command.prompt;
+            }
+
+            const spec: TurnSpec = {
+                turnId: createUlid(),
+                userMessages: [{ text: prompt, trigger: "peer" }],
+                query: prompt,
+                initialRequestKind: "peer_request",
+                onEvent: (event) => {
+                    if (event.type === "message_end") {
+                        content = event.content;
+                        stopReason = event.stopReason;
+                    } else if (event.type === "aborted") {
+                        stopReason = event.stopReason ?? "interrupted";
+                    } else if (event.type === "error") {
+                        failure = event.message;
+                    }
+                },
+            };
+
+            try {
+                await this.runtimeReady;
+                // runtimeReady 之后才交给 runSessionTurn；它内部 finally 负责释放
+                handedOff = true;
+                const outcome = await runSessionTurn(this.turnHost, sessionId, spec, { alreadyReserved: true });
+                if (outcome.aborted && stopReason === "stop") stopReason = "aborted";
+            } catch (error: any) {
+                failure = error?.message ?? String(error);
+                if (stopReason === "stop") stopReason = "error";
+            } finally {
+                this.completePeerTurn(sessionId, message, { content, stopReason, ...(failure ? { failure } : {}) });
+            }
+        } catch (error: any) {
+            // 命令执行/解析抛错：回传错误，绝不让回合悬空（否则会话会永久 busy）
+            this.completePeerTurn(sessionId, message, {
+                content: "",
+                stopReason: "error",
+                failure: error?.message ?? String(error),
+            });
+        } finally {
+            // 只有没交给 runSessionTurn 的路径才释放，避免删掉期间别的入口刚抢到的互斥
+            if (!handedOff) this.endSessionOperation(sessionId);
+        }
+    }
+
+    /**
+     * 会话间命令的落点：deny 明确拒绝；prompt 转模型指令；allow 交给前端执行器。
+     * 未注册执行器（无 UI 宿主）时回落成普通文本，由模型自己处理。
+     */
+    private async resolvePeerSlashCommand(
+        sessionId: string,
+        text: string,
+        parsed: Extract<SlashCommandParse, { kind: "command" }>,
+    ): Promise<
+        { kind: "output"; output: string }
+        | { kind: "prompt"; prompt: string }
+        | { kind: "unsupported"; message: string }
+        | { kind: "fallback" }
+    > {
+        if (parsed.spec.peer === "deny") {
+            return {
+                kind: "unsupported",
+                message: `命令 ${parsed.name} 不支持从会话间消息执行，请在 TUI 里直接输入。`,
+            };
+        }
+        if (parsed.spec.peer === "prompt") {
+            return parsed.name === "/review"
+                ? { kind: "prompt", prompt: REVIEW_PROMPT }
+                : { kind: "fallback" };
+        }
+
+        const handler = this.slashCommandHandler;
+        if (!handler) return { kind: "fallback" };
+        const outcome = await handler(sessionId, text);
+        if (!outcome.handled) return { kind: "fallback" };
+        if (outcome.prompt) return { kind: "prompt", prompt: outcome.prompt };
+        return { kind: "output", output: outcome.output ?? "" };
+    }
+
+    /** 落定一条会话间回合结果（命令与模型回合共用）。 */
+    private completePeerTurn(
+        sessionId: string,
+        message: PeerMessage,
+        outcome: { content: string; stopReason: string; failure?: string },
+    ): void {
+        const result: PeerResult = {
+            msgId: message.id,
+            ok: outcome.failure === undefined,
+            // 失败时把原因一并放进 text：结果落盘与 CLI 等待都靠它展示，不能只留在内存
+            text: outcome.content || outcome.failure || "",
+            stopReason: outcome.stopReason,
+            ...(outcome.failure ? { error: outcome.failure } : {}),
+        };
+        // 先记终态再回传：重试同一 msgId 时能重推结果，且不会重复执行
+        this.rememberCompletedPeerResult(message, result);
+        try {
+            this.control.completeInbound(sessionId, message, result);
+        } catch (error) {
+            console.error("⚠️ [host] 会话间结果回传失败:", error);
         }
     }
 

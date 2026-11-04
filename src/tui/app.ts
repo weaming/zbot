@@ -41,6 +41,14 @@ import {
     truncateInline,
     wrapAppLink,
 } from "./slash-commands.js";
+import { parseSlashCommand } from "../commands/slash-command.js";
+import {
+    formatBackgroundTaskDetails,
+    formatElapsed,
+    MAX_SHOWN_BACKGROUND_TASKS,
+    MAX_TASK_TEXT_COLUMNS,
+} from "./task-format.js";
+import { executePeerSlashCommand } from "./peer-commands.js";
 import { bindGlobalKeys, type GlobalKeyHost } from "./keybindings.js";
 import { buildStatusBarModel } from "./status-bar-model.js";
 import { protocolStatusLabel } from "../utils/responses-transport.js";
@@ -154,24 +162,6 @@ const RELEASE_FLASH: Partial<Record<SessionReleaseCause, string>> = {
 };
 
 const GLOBAL_RUNTIME_RELOAD_KEY = "__global__";
-const MAX_SHOWN_BACKGROUND_TASKS = 16;
-const MAX_TASK_TEXT_COLUMNS = 72;
-
-function formatBackgroundTaskDetails(task: BackgroundTaskSummary): string {
-    const statusLabels: Record<BackgroundTaskSummary["status"], string> = {
-        running: "运行中",
-        completed: "已完成",
-        failed: "失败",
-        stopped: "已终止",
-        timed_out: "超时",
-    };
-    const lines = [`后台任务 ${task.id} · ${statusLabels[task.status]}`, `命令：${task.command}`];
-    if (task.exitCode !== undefined && task.exitCode !== null) lines.push(`退出码：${task.exitCode}`);
-    if (task.stdout) lines.push(`stdout：\n${task.stdout}`);
-    if (task.stderr) lines.push(`stderr：\n${task.stderr}`);
-    if (task.outputTruncated) lines.push("（输出过长，已截断）");
-    return lines.join("\n");
-}
 
 function formatBackgroundTaskNotification(task: BackgroundTaskSummary): string {
     return JSON.stringify({
@@ -426,6 +416,9 @@ export class ChatApp {
         for (const [sessionId, draft] of loadRichDrafts()) {
             this.drafts.set(sessionId, typeof draft === "string" ? draft : draft.text, typeof draft === "string" ? [] : draft.images);
         }
+        // 会话间投递的 slash 命令：解析在 commands/，执行留在 TUI（面板等专属能力不塞进 host）
+        this.agent.setSlashCommandHandler?.((sessionId, text) =>
+            executePeerSlashCommand(this.agent, sessionId, text));
         this.agent.onEvent = (requestId, sessionId, event) => {
             this.store.applyEvent(requestId, sessionId, event);
 
@@ -588,13 +581,15 @@ export class ChatApp {
                 return;
             }
 
+            // 命令判定看原文：前导空格、空串都按普通文本处理（契约与 session send 一致）
+            const isCommand = value.startsWith("/");
             const text = value.trim() || (images.length > 0 ? "请分析所附图片。" : "");
             if (this.store.currentSessionId) {
                 this.dropDraft(this.store.currentSessionId);
             }
             if (!text) return;
-            if (text.startsWith("/")) {
-                void this.handleCommand(text);
+            if (isCommand) {
+                void this.handleCommand(value, images);
                 return;
             }
             this.enqueueOrSend(text, images);
@@ -734,12 +729,31 @@ export class ChatApp {
         }
         return true;
     }
-    /** 斜杠命令：/new /review /clear /delete /close /compact /system /help。 */
-    private async handleCommand(raw: string): Promise<void> {
+    /**
+     * 斜杠命令：先经共享解析层判定（完整命令名 + 参数校验）。
+     * 未知 `/xxx` 按普通文本交给模型；已识别但参数非法则报明确错误。
+     */
+    private async handleCommand(raw: string, images: ImageAssetRef[] = []): Promise<void> {
+        const parsed = parseSlashCommand(raw);
+        if (parsed.kind === "text") {
+            // 普通文本与编辑器提交口径一致：去掉首尾空白后再交给模型
+            this.enqueueOrSend(raw.trim(), images);
+            return;
+        }
+        if (parsed.kind === "invalid") {
+            const sessionId = this.store.currentSessionId;
+            if (sessionId) this.recordSubmittedInput(sessionId, raw.trim());
+            else this.editor.addToHistory(raw.trim());
+            this.store.pushSystemMessage(parsed.message, sessionId ?? undefined);
+            this.editor.setText("");
+            this.restoreFocus();
+            return;
+        }
+
         const sessionId = this.store.currentSessionId;
-        const [command, ...rest] = raw.split(/\s+/);
+        const { name, args } = parsed;
         // /review 等价于用户直接输入评审指令：入历史的是指令正文而非命令名
-        if (command === "/review") {
+        if (name === "/review") {
             this.editor.setText("");
             this.enqueueOrSend(REVIEW_PROMPT);
             this.restoreFocus();
@@ -747,12 +761,12 @@ export class ChatApp {
         }
         if (sessionId) this.recordSubmittedInput(sessionId, raw.trim());
         else this.editor.addToHistory(raw.trim());
-        if (!sessionId && SESSION_REQUIRED_COMMANDS.has(command)) {
+        if (!sessionId && SESSION_REQUIRED_COMMANDS.has(name)) {
             this.editor.setText("");
             this.tui.flash("没有打开的会话：直接输入消息即新建，或 ⌃N");
             return;
         }
-        switch (command) {
+        switch (name) {
             case "/new":
                 await this.newSession();
                 break;
@@ -760,13 +774,13 @@ export class ChatApp {
                 this.openSessionPanel();
                 break;
             case "/tasks":
-                await this.showBackgroundTasks(rest, sessionId);
+                await this.showBackgroundTasks(args, sessionId);
                 break;
             case "/ps":
                 this.showProcesses(sessionId);
                 break;
             case "/stop":
-                await this.stopWork(rest, sessionId);
+                await this.stopWork(args, sessionId);
                 break;
             case "/reload":
                 await this.requestRuntimeReload(sessionId);
@@ -793,7 +807,7 @@ export class ChatApp {
                 await this.compactCurrent();
                 break;
             case "/cwd":
-                await this.changeCwd(rest.join(" ").trim());
+                await this.changeCwd(args[0] ?? "");
                 break;
             case "/continue":
                 await this.continueCurrent();
@@ -810,10 +824,10 @@ export class ChatApp {
                 break;
             case "/effort":
             case "/thinking":
-                await this.handleEffortCommand(rest, sessionId ?? undefined);
+                await this.handleEffortCommand(args, sessionId ?? undefined);
                 break;
             case "/model":
-                if (rest.length > 0) {
+                if (args.length > 0) {
                     this.store.pushSystemMessage("请只输入 /model，然后在面板中选择协议和模型。", sessionId ?? undefined);
                 } else {
                     this.openModelPanel(sessionId!);
@@ -826,7 +840,8 @@ export class ChatApp {
                 this.store.pushSystemMessage(buildHelpText(), sessionId ?? undefined);
                 break;
             default:
-                this.store.pushSystemMessage(`未知命令: ${command}（/help 查看可用命令）`, sessionId ?? undefined);
+                // 解析层只放行已知命令；这里兜底未接入的实现
+                this.store.pushSystemMessage(`命令 ${name} 尚未接入 TUI。`, sessionId ?? undefined);
         }
         if (sessionId) {
             this.dropDraft(sessionId);
@@ -1324,7 +1339,7 @@ export class ChatApp {
         const lines = [`后台任务（${running.length} 个运行中）：`, ""];
         for (const task of running.slice(0, MAX_SHOWN_BACKGROUND_TASKS)) {
             const command = truncatePlain(task.command, MAX_TASK_TEXT_COLUMNS);
-            const elapsed = this.formatElapsed(task.startedAt);
+            const elapsed = formatElapsed(task.startedAt);
             lines.push(`  • ${task.id}${elapsed ? ` · ${elapsed}` : ""}  ${command}`);
 
             const stdoutLine = task.stdout?.trim().split(/\r\n|\r|\n/).at(-1);
@@ -1338,17 +1353,6 @@ export class ChatApp {
         }
         lines.push("", "使用 /stop <task_id> 终止指定任务，/stop 终止全部");
         this.store.pushSystemMessage(lines.join("\n"), sessionId);
-    }
-
-    /** 已运行时长（分钟精度，超过 1 小时带小时）。 */
-    private formatElapsed(startedAt: string): string {
-        const started = Date.parse(startedAt);
-        if (!Number.isFinite(started)) return "";
-        const seconds = Math.max(0, Math.floor((Date.now() - started) / 1_000));
-        if (seconds < 60) return `${seconds}s`;
-        const minutes = Math.floor(seconds / 60);
-        if (minutes < 60) return `${minutes}m`;
-        return `${Math.floor(minutes / 60)}h${minutes % 60}m`;
     }
 
     /** 终止当前会话的后台任务；无参数或 all 终止全部运行中的任务。 */

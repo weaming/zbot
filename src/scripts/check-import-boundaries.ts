@@ -20,6 +20,7 @@ const LAYER_RULES: Record<string, string[]> = {
     events: ["tui", "server", "cli", "host"],
     tools: ["tui", "server", "cli", "host"],
     services: ["tui", "server", "cli", "host"],
+    commands: ["tui", "server", "cli", "host"],
     control: ["tui", "server", "cli"],
     mcp: ["tui", "server", "cli"],
     skills: ["tui", "server", "cli"],

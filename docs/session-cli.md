@@ -59,6 +59,26 @@ zbot session queue <id> --json                        # 队列快照（position/
 - **边界**：队列在持有会话的进程内；宿主进程退出时队列随之消失（事件日志仍可复盘）。
   跨进程可靠投递仍以 `--wait` 拿到明确结果为准，不做重启后自动重放。
 
+## 会话间命令（send）
+
+`session send` 投递的文本如果**第一个字符就是 `/`** 且是 zbot 支持的完整命令名，
+由持有会话的 TUI 执行并把结果回传（不会发给模型）。规则：
+
+- 只认完整命令名：`/helpx`、`/Help`、`/`、前导空格的 `" /help"` 一律按普通文本交给模型。
+- 已识别命令逐项校验参数：`/help extra`、`/tasks status`（缺 task_id）等返回明确错误
+  （`stopReason=invalid_command`），既不跑模型也不当普通文本。
+- 可选参数按命令语义处理：`/cwd <路径>`（可含空格）、`/tasks wait <id> [秒]`、
+  `/stop [id|all]`、`/effort <档位|auto>`。
+- 面板/会话生命周期强绑定的命令（`/new` `/sessions` `/keys` `/delete` `/close` `/clear`
+  `/compact` `/archive` `/unarchive` `/model` `/reasoning` `/mcp` `/continue`）从会话间
+  消息执行时明确拒绝（`stopReason=unsupported_command`）：它们要么是 TUI 面板，要么需要
+  在会话空闲时才能安全执行（当前投递回合已占用互斥）。
+- `/review` 等价于把固定评审指令作为模型输入执行。
+- 无 UI 宿主（如 `serve` 自己持有会话）没有命令执行器时，已识别命令按普通文本交给模型。
+
+命令矩阵与参数协议在 `src/commands/slash-command.ts`（唯一事实源），TUI 输入与
+`session send` 共用同一份解析。
+
 ## 创建并执行（run）
 
 `session new` 只落 `session_created` 事件，不认领会话，因此随后 `session send` 会因为没有持有者而失败。

@@ -4,41 +4,16 @@ import { Key } from "@earendil-works/pi-tui";
 import type { SlashCommand } from "@earendil-works/pi-tui";
 import { skillRegistry } from "../skills/skill-registry.js";
 import { getAgentsSkillsDir, getUserSkillsDir } from "../utils/runtime-paths.js";
+import { isKnownSlashCommand, SLASH_COMMAND_SPECS } from "../commands/slash-command.js";
 
-export const SLASH_COMMANDS: SlashCommand[] = [
-    { name: "new", description: "新建会话" },
-    { name: "review", description: "发起 dev-review → 修复循环，通过后暂存并提交" },
-    { name: "sessions", description: "打开会话面板（搜索 / 切换 / 管理）" },
-    { name: "tasks", description: "查看或管理后台 shell 任务（list/status/wait/stop）" },
-    { name: "ps", description: "列出当前会话正在运行的后台任务" },
-    { name: "stop", description: "终止当前会话运行中的后台任务（可指定 id）" },
-    { name: "reload", description: "重新加载磁盘技能与 MCP 工具" },
-    { name: "keys", description: "显示全部快捷键（Ctrl+/ / F1）" },
-    { name: "continue", description: "继续执行未完成的任务" },
-    { name: "clear", description: "清空当前会话" },
-    { name: "archive", description: "归档当前会话（可在会话面板查看）" },
-    { name: "unarchive", description: "取消归档当前会话" },
-    { name: "delete", description: "彻底删除当前会话" },
-    { name: "close", description: "关闭当前会话（释放持有，数据保留）" },
-    { name: "compact", description: "压缩当前会话上下文" },
-    { name: "cwd", description: "查看或切换当前会话工作目录（支持 ~ 与相对路径）" },
-    { name: "effort", description: "查看或设置当前会话思考强度 [配置档位|auto]" },
-    { name: "thinking", description: "查看或设置思考强度 (/effort 别名)" },
-    { name: "model", description: "选择当前会话的协议与模型" },
-    { name: "reasoning", description: "展开 / 收起思考过程显示" },
-    { name: "system", description: "显示当前 system prompt" },
-    { name: "skills", description: "显示可用技能" },
-    { name: "mcp", description: "MCP 服务状态与 lazy 工具的会话级启用" },
-    { name: "help", description: "显示帮助" },
-];
+export { REVIEW_PROMPT } from "../commands/slash-command.js";
 
-/** /review 发送的固定指令：dev-review → 修复循环，通过后再暂存并提交。 */
-export const REVIEW_PROMPT = [
-    "Do dev-review-fix loop，until review pass, then commit.",
-    "Reuse same subagent, close(archive) it after review pass.",
-    "Keep content to be reviewed unstaged, stage them after each review, then fix, next review; so each review can read less diff.",
-    "Don't auto start this loop after your commit."
-].join("\n");
+export const SLASH_COMMANDS: SlashCommand[] = SLASH_COMMAND_SPECS.map(({ name, description }) => ({
+    name,
+    description,
+}));
+
+
 
 export const SESSION_SHORTCUTS = [
     Key.ctrl("1"),
@@ -96,8 +71,7 @@ export function wrapTabLink(text: string, sessionId: string): string {
 }
 
 export function isValidSlashCommand(text: string): boolean {
-    const command = text.trimStart().split(/\s+/, 1)[0];
-    return SLASH_COMMANDS.some((item) => `/${item.name}` === command);
+    return isKnownSlashCommand(text);
 }
 
 export function buildHelpText(): string {

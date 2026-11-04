@@ -94,6 +94,11 @@ export interface SessionCreateInit {
     origin?: SessionOrigin;
 }
 
+/** 前端执行会话间命令的结果：output 直接回传，prompt 改为模型指令。 */
+export type SlashCommandOutcome =
+    | { handled: true; output?: string; prompt?: string }
+    | { handled: false };
+
 export interface SessionHost {
     onEvent?: (requestId: number, sessionId: string, event: UIEvent) => void;
     /** 新建会话（内存态，未认领）；cwd 缺省用 TUI 启动目录，init 缺省表示不额外初始化。 */
@@ -157,6 +162,13 @@ export interface SessionHost {
     getInstanceNetworkStats(): InstanceNetworkStats;
     loadInputHistory(sessionId: string): string[];
     appendInputHistory(sessionId: string, text: string, ts?: string): Promise<void>;
+    /**
+     * 注册"会话间命令"执行器（TUI 注入）：解析层放行的 allow 命令由前端执行并回传输出。
+     * 未注册时（无 UI 宿主）命令按普通文本交给模型。
+     */
+    setSlashCommandHandler?(
+        handler: (sessionId: string, text: string) => SlashCommandOutcome | Promise<SlashCommandOutcome>,
+    ): void;
     /** 会话绑定的工作目录（无持久化记录时回退当前工具目录）。 */
     getSessionCwd(sessionId: string): Promise<string>;
     /** 改写会话工作目录（落盘 session_cwd_changed 事件）：之后的工具都在新目录执行。 */

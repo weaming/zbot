@@ -951,7 +951,10 @@ async function runSend(
         const result = await withTimeout(resultPromise, command.waitSeconds * 1000, sessionId, message.id);
         if (!result.ok) {
             // 失败也把已产出的部分输出带出来：人类模式进 stderr，--json 进 details
-            const partial = result.text ? `\n（部分输出）\n${result.text}` : "";
+            // 失败时 text 可能已是错误原因本身（命令拒绝/非法参数），别把它当"部分输出"再打一遍
+            const partial = result.text && result.text !== result.error
+                ? `\n（部分输出）\n${result.text}`
+                : "";
             throw new SessionCliError(
                 "peer_failed",
                 `${result.error ?? `会话 ${shortSessionId(sessionId)} 执行失败：${result.stopReason}`}${partial}`,

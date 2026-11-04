@@ -35,6 +35,8 @@ const { getUserQuestionChannel, setUserQuestionChannel } = await import("../../s
 
 const SESSION = "01JASKAPP000000000000000TEST";
 const OTHER = "01JASKAPP000000000000000OTHR";
+/** 记录真正发给模型的文本（斜杠命令测试用）。 */
+const sentTexts: string[] = [];
 
 let tmpDir: string;
 let originalStateDir: string | undefined;
@@ -51,6 +53,10 @@ function makeAgent() {
         getSessionModelSelection: async () => null,
         loadInputHistory: () => [],
         appendInputHistory: async () => {},
+        sendMessage: async (_sessionId: string, text: string) => {
+            sentTexts.push(text);
+            return {};
+        },
         readSessionEvents: async () => [],
         getSystemPrompt: async () => "",
         isSessionBusy: () => false,
@@ -334,6 +340,30 @@ describe("ChatApp 提问接线", () => {
         expect(lastHerdrState()).toEqual(["idle", undefined]);
     });
 
+    test("斜杠命令：非法参数报明确错误，未知命令/前导空格当普通文本", async () => {
+        sentTexts.length = 0;
+        const { app, store } = makeApp();
+        await app.init();
+        // 走编辑器提交口径，和真实输入一致（含前导空格）
+        const editor = (app as any).editor as {
+            onSubmitWithImages?: (value: string, images: unknown[]) => void;
+        };
+
+        editor.onSubmitWithImages?.("/help extra", []);
+        await waitFor(() => store.messages.some(message => message.text.includes("参数过多")));
+        expect(sentTexts).toEqual([]);
+
+        editor.onSubmitWithImages?.("/nope 这是什么", []);
+        await waitFor(() => sentTexts.length === 1);
+        expect(sentTexts[0]).toBe("/nope 这是什么");
+        expect(store.messages.some(message => message.text.includes("未知命令"))).toBe(false);
+
+        // 前导空格不是命令：原文交给模型
+        editor.onSubmitWithImages?.(" /help", []);
+        await waitFor(() => sentTexts.length === 2);
+        expect(sentTexts[1]).toBe("/help");
+    });
+
     test("openResumedSession：关掉启动选择面板并载入目标会话", async () => {
         const { app, store } = makeApp();
         await app.init();
@@ -347,6 +377,18 @@ describe("ChatApp 提问接线", () => {
         expect((app as any).panels.find("session")).toBeUndefined();
     });
 });
+
+function waitFor(check: () => boolean, timeoutMs = 1_000): Promise<void> {
+    return new Promise((resolve, reject) => {
+        const started = Date.now();
+        const tick = () => {
+            if (check()) return resolve();
+            if (Date.now() - started > timeoutMs) return reject(new Error("等待条件超时"));
+            setTimeout(tick, 5);
+        };
+        tick();
+    });
+}
 
 function lastHerdrState(): [string, string | undefined] {
     const event = [...herdrEvents].reverse().find(item => item.kind === "state");
