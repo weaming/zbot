@@ -141,4 +141,27 @@ describe("组合与清理", () => {
         expect(store.hasAnyActivity()).toBe(false);
         expect(store.activeSessionIds).toEqual([]);
     });
+
+    test("hasModelActivity 只认模型侧活动，不认纯 UI 占位", () => {
+        const store = new TurnStateStore();
+        expect(store.hasModelActivity()).toBe(false);
+
+        store.lock("a", "clearing");
+        store.lock("b", "switching");
+        store.lock("c", "reloading");
+        expect(store.hasModelActivity()).toBe(false);
+
+        store.lock("d", "compacting");
+        expect(store.hasModelActivity()).toBe(true);
+        store.unlock("d", "compacting");
+
+        store.lock("e", "resuming");
+        expect(store.hasModelActivity()).toBe(true);
+        store.unlock("e", "resuming");
+
+        store.setPhase("f", "tool", "bash");
+        expect(store.hasModelActivity()).toBe(true);
+        store.clearPhase("f");
+        expect(store.hasModelActivity()).toBe(false);
+    });
 });

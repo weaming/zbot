@@ -6,7 +6,6 @@ import dotenv from "dotenv";
 import os from "os";
 import path from "path";
 import { configureHostEnvironment, getStartupCwd, redirectLogsToFile } from "../host/runtime-context.js";
-import { herdrReporter } from "./herdr-reporter.js";
 import { officialDeepSeekCostYuan } from "../pricing/deepseek.js";
 import { isPrintCliInvocation } from "../cli/print.js";
 import { isSessionCliInvocation } from "../cli/session.js";
@@ -154,13 +153,12 @@ async function startChatApp(): Promise<void> {
         const startupMessage = providerError
             ? `⚠️ LLM provider 配置无效：${providerError}\n请检查配置文件：${envFile}`
             : undefined;
-        if (providerError) {
-            herdrReporter.report("blocked", providerError);
-        }
         const chatStore = new ChatStore({
             costFor: (usage, atMs) => officialDeepSeekCostYuan(usage, atMs, chatRuntime.getChatApiSettings()),
         });
         const app = new ChatApp(new LocalSessionHost(runtimeReady, { startupCwd: getStartupCwd() }), chatStore);
+        // 启动期阻断（provider 配置无效）由 app 统一维护 herdr 状态，避免后续同步把 blocked 覆盖成 idle
+        if (providerError) app.setHerdrBlocked(providerError);
         const removeSignalHandlers = installShutdownSignalHandlers(app);
         try {
             await app.init(startupMessage);
@@ -170,9 +168,6 @@ async function startChatApp(): Promise<void> {
             throw error;
         }
         started = true;
-        if (!providerError) {
-            herdrReporter.report("idle");
-        }
     } finally {
         if (!started) restoreConsole();
     }

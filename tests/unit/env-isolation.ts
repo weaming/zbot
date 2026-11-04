@@ -9,6 +9,12 @@ delete process.env.CONTEXT_WINDOW_TOKENS;
 delete process.env.ZBOT_IDENTITY_FILE;
 delete process.env.ZBOT_EXTRA_IDENTITY_FILE;
 
+// 宿主机可能本身跑在 herdr pane 里；测试若继承 HERDR_ENV，ChatApp 会真的向那个 pane
+// 上报状态/元数据，把用户的 agent 状态改掉。测试进程一律视为不在 herdr 内。
+delete process.env.HERDR_ENV;
+delete process.env.HERDR_BIN_PATH;
+delete process.env.HERDR_PANE_ID;
+
 // 单测默认关掉真实分词器：token 计数断言基于固定估算口径，
 // 真实分词的精度与回退由 tests/unit/tokenizer.test.ts 单独覆盖。
 process.env.ZBOT_TOKENIZER = "off";

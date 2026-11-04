@@ -71,6 +71,7 @@ import { PanelFrame } from "./panel-frame.js";
 import { ShortcutPanel } from "./shortcut-panel.js";
 import { ModelPanel } from "./model-panel.js";
 import {
+    questionLabel,
     setUserQuestionChannel,
     type UserAnswer,
     type UserQuestion,
@@ -92,6 +93,7 @@ import {
     getChatApiSettings,
     getChatModelOptions,
     setDefaultChatModelOption,
+    validateChatApiSettings,
 } from "../services/chat-runtime.js";
 import type { ChatModelSelection } from "../types/chat-model.js";
 import { getReasoningEffortChoices, getReasoningProvider } from "../utils/reasoning-effort.js";
@@ -238,6 +240,8 @@ export class ChatApp {
     /** 只在现有回合仍运行时注入的后台任务完成通知。 */
     private readonly activeTurnSessions = new Set<string>();
     private readonly pendingBackgroundResults = new Map<string, Array<{ text: string; trigger: "pending" }>>();
+    /** 启动期阻断原因（provider 配置无效等）：herdr 语义状态保持 blocked。 */
+    private herdrBlock: string | undefined;
     private readonly unsubscribeBackgroundTaskCompletion: () => void;
     private readonly unsubscribeBackgroundTaskStart: () => void;
     /** 等待用户作答的提问（按会话；同一个会话同时只会有一个回合在跑）。 */
@@ -430,6 +434,8 @@ export class ChatApp {
                     break;
                 case "turn_start":
                     this.setSessionPhase(sessionId, "waiting");
+                    // 群消息/续跑等不经 send() 的回合也要让 herdr 立刻看到 working
+                    this.syncHerdrState();
                     break;
                 case "progress":
                     if (event.message) this.setSessionProgress(sessionId, event.message);
@@ -510,6 +516,63 @@ export class ChatApp {
         if (startupMessage) {
             this.store.pushSystemMessage(startupMessage);
         }
+
+        this.syncHerdrState();
+        this.syncHerdrMetadata();
+    }
+
+    /**
+     * 启动期阻断（provider 配置无效等）：herdr 侧一直显示 blocked 并带原因。
+     * 该阻断不会在运行期解除，后续 sync 会优先保持 blocked。
+     */
+    setHerdrBlocked(reason: string): void {
+        this.herdrBlock = reason;
+        this.syncHerdrState();
+    }
+
+    /** 是否有任何会话在跑：turn 阶段、压缩/续跑与 send 中的回合一起算（不含 clearing/switching 等纯 UI 占位）。 */
+    private hasActiveTurn(): boolean {
+        return this.activeTurnSessions.size > 0 || this.turnState.hasModelActivity();
+    }
+
+    /** 挂着的提问：任意会话在等作答都优先于「运行中」。 */
+    private pendingQuestionMessage(): string | undefined {
+        for (const pending of this.pendingQuestions.values()) {
+            const first = pending.questions[0];
+            return first ? questionLabel(first) : "等待用户作答";
+        }
+        return undefined;
+    }
+
+    /**
+     * 把本实例的聚合状态上报给 herdr：阻塞 > 运行中 > 空闲。
+     * herdr 的 agent 状态是 pane 级，多会话并行时必须看全体而不是刚结束的那个会话。
+     */
+    private syncHerdrState(): void {
+        const block = this.herdrBlock ?? this.pendingQuestionMessage();
+        if (block) {
+            herdrReporter.report("blocked", block);
+            return;
+        }
+        herdrReporter.report(this.hasActiveTurn() ? "working" : "idle");
+    }
+
+    /** 当前会话的展示元数据：标题 + 显示名 + model/session token。 */
+    private syncHerdrMetadata(): void {
+        const sessionId = this.store.currentSessionId;
+        const session = sessionId
+            ? this.store.sessions.find(item => item.sessionId === sessionId)
+            : undefined;
+        const model = this.currentModelSelection?.model
+            ?? getChatApiSettings(this.currentModelSelection).model;
+        herdrReporter.reportMetadata({
+            title: session?.title ?? null,
+            displayAgent: "zbot",
+            tokens: {
+                model: model || null,
+                session: sessionId ? sessionId.slice(-8) : null,
+            },
+        });
     }
 
     private bindEditor(): void {
@@ -1010,6 +1073,12 @@ export class ChatApp {
         this.currentModelSelection = selected;
         const sessionSummary = this.store.sessions.find(session => session.sessionId === sessionId);
         if (sessionSummary) sessionSummary.modelSelection = selected;
+        this.syncHerdrMetadata();
+        // 换到可用模型后解除启动期阻断，否则 herdr 会一直显示 blocked
+        if (this.herdrBlock && !validateChatApiSettings(getChatApiSettings(selected))) {
+            this.herdrBlock = undefined;
+            this.syncHerdrState();
+        }
         let defaultFailure: string | undefined;
         if (makeDefault) {
             try {
@@ -1124,6 +1193,7 @@ export class ChatApp {
 
         this.store.setCurrentSession(null);
         this.currentModelSelection = undefined;
+        this.syncHerdrMetadata();
         this.clearMessages();
         this.renderTabBar();
         this.syncCurrentSessionState();
@@ -1743,8 +1813,8 @@ export class ChatApp {
         const sendStartTime = Date.now();
         let success = false;
         let turnError: string | undefined;
-        herdrReporter.report("working");
         this.activeTurnSessions.add(sessionId);
+        this.syncHerdrState();
         try {
             const result = await this.agent.sendMessage(sessionId, text, {
                 images,
@@ -1771,9 +1841,9 @@ export class ChatApp {
                 void this.driveIdleSession(sessionId, leftover.map(item => item.text));
             }
             const durationMs = Date.now() - sendStartTime;
-            herdrReporter.report("idle");
             // 阶段清除即表示本会话空闲：turnState 内部不再有「先复位谁」的顺序问题
             this.clearSessionPhase(sessionId);
+            this.syncHerdrState();
             if (this.store.currentSessionId === sessionId) {
                 this.editor.disableSubmit = false;
                 this.syncCurrentSessionState();
@@ -1994,6 +2064,7 @@ export class ChatApp {
             this.sendNextPending(sessionId);
             // 目标会话挂着未作答的提问：切进来就把浮层弹出来
             this.syncQuestionPanel();
+            this.syncHerdrMetadata();
         }
     }
 
@@ -2008,6 +2079,7 @@ export class ChatApp {
         this.turnState.unlock(sessionId, "resuming");
         // 兜底落定流式标记：漏掉 message_end 时消息会一直显示为运行中
         this.store.finishStreaming(sessionId);
+        this.syncHerdrState();
         if (this.store.currentSessionId === sessionId) {
             this.syncSubmitState();
             this.renderTabBar();
@@ -2436,6 +2508,7 @@ export class ChatApp {
                 this.closeQuestionPanel(request.sessionId);
                 this.renderTabBar();
                 this.renderStatusBar();
+                this.syncHerdrState();
                 resolve(answer);
             };
             const onAbort = (): void => settle({ cancelled: true });
@@ -2455,6 +2528,7 @@ export class ChatApp {
             });
             this.renderTabBar();
             this.renderStatusBar();
+            this.syncHerdrState();
 
             if (request.sessionId === this.store.currentSessionId) {
                 this.openQuestionPanel(request.sessionId);
@@ -2774,15 +2848,15 @@ export class ChatApp {
         if (!sessionId || this.agent.isSessionBusy(sessionId)) return;
         this.turnState.lock(sessionId, "compacting");
         this.syncSubmitState();
-        herdrReporter.report("working");
+        this.syncHerdrState();
         try {
             await this.agent.compactSession(sessionId);
             this.store.pushSystemMessage("🗜️ 已压缩上下文", sessionId);
         } catch (error: any) {
             this.store.pushSystemMessage(`⚠️ 压缩失败: ${error.message}`, sessionId);
         } finally {
-            herdrReporter.report("idle");
             this.turnState.unlock(sessionId, "compacting");
+            this.syncHerdrState();
             this.syncSubmitState();
             this.restoreFocus();
         }
@@ -2809,7 +2883,7 @@ export class ChatApp {
             this.turnState.lock(sessionId, "resuming");
             this.syncSubmitState();
         }
-        herdrReporter.report("working");
+        this.syncHerdrState();
         try {
             const result = await this.agent.resumeSession(sessionId, {
                 consumePendingMessages: () => this.consumePendingMessages(sessionId),
@@ -2822,9 +2896,9 @@ export class ChatApp {
         } catch (error: any) {
             this.store.pushSystemMessage(`⚠️ 继续失败: ${error.message}`, sessionId);
         } finally {
-            herdrReporter.report("idle");
             this.turnState.unlock(sessionId, "resuming");
             this.clearSessionPhase(sessionId);
+            this.syncHerdrState();
             if (this.store.currentSessionId === sessionId) {
                 this.editor.disableSubmit = false;
                 this.syncCurrentSessionState();
@@ -3019,6 +3093,7 @@ export class ChatApp {
         if (!firstLine) return;
         summary.title = firstLine;
         this.renderTabBar();
+        this.syncHerdrMetadata();
     }
 
     /** ⌘R：当前会话进入标题重命名（输入框预填当前标题，回车保存 / Esc 取消）。 */
@@ -3079,6 +3154,7 @@ export class ChatApp {
             await this.agent.renameSession(sessionId, cleanTitle);
             if (summary) summary.title = cleanTitle.slice(0, 200);
             this.renderTabBar();
+            this.syncHerdrMetadata();
             this.tui.flash(`✎ 标题已更新: ${truncateInline(cleanTitle, 20)}`);
         } catch (error: any) {
             this.tui.flash(`⚠️ 重命名失败: ${error.message}`);
@@ -3251,7 +3327,8 @@ export class ChatApp {
 
     forceShutdown(exitCode: number): void {
         this.stopSpinnerTimer();
-        herdrReporter.release();
+        // 强退前同步清状态：微任务队列没有机会在 process.exit 之后继续跑
+        herdrReporter.releaseSync();
         if (this.terminalStarted) {
             try {
                 this.tui.stop({ preserveScreen: true });

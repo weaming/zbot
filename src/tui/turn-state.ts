@@ -109,6 +109,18 @@ export class TurnStateStore {
         return this.phases.size > 0 || this.locks.size > 0;
     }
 
+    /**
+     * 是否有模型侧活动：回合阶段，或压缩/续跑这类占着模型的 UI 占位。
+     * clearing/switching/reloading 只是本端界面占位，不代表模型在工作。
+     */
+    hasModelActivity(): boolean {
+        if (this.phases.size > 0) return true;
+        for (const reasons of this.locks.values()) {
+            if (reasons.has("compacting") || reasons.has("resuming")) return true;
+        }
+        return false;
+    }
+
     /** 会话结束时清理：阶段与占位一起复位，避免残留让 tab 停在 spinner 上。 */
     reset(sessionId: string): void {
         this.phases.delete(sessionId);

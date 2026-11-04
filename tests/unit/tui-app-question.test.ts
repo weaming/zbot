@@ -17,6 +17,18 @@ mock.module("../../src/services/chat-runtime.js", () => ({
     runChatQuery: async () => ({ content: "stub", toolCalls: 0, messages: [] }),
 }));
 
+const herdrEvents: Array<{ kind: string; args: unknown[] }> = [];
+const realHerdrReporter = await import("../../src/tui/herdr-reporter.js");
+mock.module("../../src/tui/herdr-reporter.js", () => ({
+    ...realHerdrReporter,
+    herdrReporter: {
+        supported: true,
+        report: (state: string, message?: string) => herdrEvents.push({ kind: "state", args: [state, message] }),
+        reportMetadata: (metadata: unknown) => herdrEvents.push({ kind: "metadata", args: [metadata] }),
+        release: () => herdrEvents.push({ kind: "release", args: [] }),
+    },
+}));
+
 const { ChatApp } = await import("../../src/tui/app.js");
 const { ChatStore } = await import("../../src/tui/store.js");
 const { getUserQuestionChannel, setUserQuestionChannel } = await import("../../src/utils/user-question.js");
@@ -266,4 +278,64 @@ describe("ChatApp 提问接线", () => {
         expect((app as any).turnState.phase(SESSION)).toBeDefined();
         expect(visibleText()).toContain("这次部署走哪条路？ → 方案 A");
     });
+
+    test("herdr 状态：提问挂起时 blocked，作答后回到 idle", async () => {
+        const { app } = makeApp();
+        herdrEvents.length = 0;
+
+        const pending = getUserQuestionChannel()!.ask(request());
+        expect(lastHerdrState()).toEqual(["blocked", "部署方式 · 这次部署走哪条路？"]);
+
+        (app as any).handlePanelInput("\r");
+        await pending;
+        expect(lastHerdrState()).toEqual(["idle", undefined]);
+    });
+
+    test("herdr 状态：启动期阻断优先于提问与空闲", async () => {
+        const { app } = makeApp();
+        herdrEvents.length = 0;
+
+        app.setHerdrBlocked("provider 配置无效");
+        expect(lastHerdrState()).toEqual(["blocked", "provider 配置无效"]);
+
+        const pending = getUserQuestionChannel()!.ask(request());
+        expect(lastHerdrState()).toEqual(["blocked", "provider 配置无效"]);
+        (app as any).pendingQuestions.get(SESSION).settle({ cancelled: true });
+        await pending;
+        expect(lastHerdrState()).toEqual(["blocked", "provider 配置无效"]);
+    });
+
+    test("herdr metadata：当前会话标题、显示名与 session token", () => {
+        const { app } = makeApp();
+        herdrEvents.length = 0;
+
+        (app as any).syncHerdrMetadata();
+        const metadata = herdrEvents.find(event => event.kind === "metadata")!.args[0] as any;
+        expect(metadata.title).toBe("提问会话");
+        expect(metadata.displayAgent).toBe("zbot");
+        expect(metadata.tokens.session).toBe(SESSION.slice(-8));
+    });
+
+    test("herdr 状态：多会话并行，一个会话结束仍保持 working", async () => {
+        const { app, agent } = makeApp();
+        await app.init();
+        herdrEvents.length = 0;
+
+        agent.onEvent(1, SESSION, { type: "turn_start", iteration: 0 });
+        agent.onEvent(1, OTHER, { type: "turn_start", iteration: 0 });
+        expect(lastHerdrState()).toEqual(["working", undefined]);
+
+        agent.onEvent(1, SESSION, { type: "message_end" });
+        agent.onTurnFinished(SESSION);
+        expect(lastHerdrState()).toEqual(["working", undefined]);
+
+        agent.onEvent(1, OTHER, { type: "message_end" });
+        agent.onTurnFinished(OTHER);
+        expect(lastHerdrState()).toEqual(["idle", undefined]);
+    });
 });
+
+function lastHerdrState(): [string, string | undefined] {
+    const event = [...herdrEvents].reverse().find(item => item.kind === "state");
+    return event ? [event.args[0] as string, event.args[1] as string | undefined] : ["none", undefined];
+}
