@@ -6,6 +6,8 @@ import dotenv from "dotenv";
 import os from "os";
 import path from "path";
 import { configureHostEnvironment, getStartupCwd, redirectLogsToFile } from "../host/runtime-context.js";
+import type { SessionHost } from "../host/session-host.js";
+import type { ResumeArgs } from "../cli/resume.js";
 import { officialDeepSeekCostYuan } from "../pricing/deepseek.js";
 import { isPrintCliInvocation } from "../cli/print.js";
 import { isSessionCliInvocation } from "../cli/session.js";
@@ -47,21 +49,9 @@ if (isHelpCli) {
     try {
         const { runSessionCli } = await import("../cli/session.js");
         await runSessionCli(cliArgs.slice(1));
-    } catch (error: any) {
-        const message = error?.message ?? String(error);
-        process.exitCode = typeof error?.exitCode === "number" ? error.exitCode : 1;
-        if (cliArgs.includes("--json")) {
-            // 结构化错误也走 stdout，调用方不必解析本地化文案
-            process.stdout.write(`${JSON.stringify({
-                error: {
-                    ...(error?.details ?? {}),
-                    code: error?.code ?? "failed",
-                    message,
-                },
-            })}\n`);
-        } else {
-            process.stderr.write(`${message}\n`);
-        }
+    } catch (error) {
+        const { writeCliError } = await import("../utils/app-error.js");
+        writeCliError(error, cliArgs.includes("--json"));
     }
 } else if (isServeCli) {
     // 长驻宿主分支：与 TUI 并列，初始化同一套宿主环境后交给 serve 入口，不再进入 TUI。
@@ -135,10 +125,64 @@ function installShutdownSignalHandlers(app: ChatApp): () => void {
     };
 }
 
-async function startChatApp(): Promise<void> {
+/** TUI 恢复：宿主与认领在进入 alternate screen 之前就绪，失败能正常打印错误。 */
+interface PreparedTuiResume {
+    host: SessionHost;
+    runtimeReady: Promise<void>;
+    sessionId: string;
+    /** 恢复失败时的收尾：宿主与 MCP 一起关，否则进程会被连接句柄拖住。 */
+    dispose: () => Promise<void>;
+    /** prepare 阶段已接管日志，交给 TUI 启动流程继续沿用。 */
+    restoreConsole: () => void;
+}
+
+async function prepareTuiResume(args: ResumeArgs): Promise<PreparedTuiResume> {
+    const [{ LocalSessionHost, initializeSessionHostRuntime }, { prepareSessionResume }, { resolveResumeId }] =
+        await Promise.all([
+            import("../host/session-host.js"),
+            import("../host/session-resume.js"),
+            import("../cli/resume.js"),
+        ]);
+    // MCP 初始化会在 prepare 阶段就跑；日志必须在此之前重定向，避免污染主 buffer
+    const restoreConsole = redirectLogsToFile();
+    try {
+        const sessionId = resolveResumeId(args.id);
+        // 先用一个可控制的运行时门闩建宿主：归档/占用检查失败时不必拉起 MCP，
+        // 否则失败路径会被 MCP 连接挂住，命令迟迟不退出。
+        let openRuntime!: () => void;
+        let failRuntime!: (error: unknown) => void;
+        const runtimeGate = new Promise<void>((resolve, reject) => {
+            openRuntime = resolve;
+            failRuntime = reject;
+        });
+        // 初始化失败时 gate 会被 reject；没人接的话 Bun 会打出崩溃报告
+        void runtimeGate.catch(() => undefined);
+        const host = new LocalSessionHost(runtimeGate, { startupCwd: getStartupCwd() });
+        const dispose = async (): Promise<void> => {
+            await host.close().catch(() => undefined);
+            const mcp = await import("../mcp/client-manager.js");
+            await mcp.closeAllMcpClients().catch(() => undefined);
+        };
+        try {
+            await prepareSessionResume(host, sessionId, { unarchive: args.unarchive });
+        } catch (error) {
+            await dispose();
+            throw error;
+        }
+        const runtimeReady = initializeSessionHostRuntime();
+        runtimeReady.then(openRuntime, failRuntime);
+        void runtimeReady.catch(() => undefined);
+        return { host, runtimeReady, sessionId, dispose, restoreConsole };
+    } catch (error) {
+        restoreConsole();
+        throw error;
+    }
+}
+
+async function startChatApp(prepared?: PreparedTuiResume): Promise<void> {
     // 尽早重定向 console：import 阶段（如 ToolLRU 加载日志、MCP 初始化）的输出
     // 也会写入 TUI 日志文件，而不是污染进入 alternate screen 前的主 buffer。
-    const restoreConsole = redirectLogsToFile();
+    const restoreConsole = prepared?.restoreConsole ?? redirectLogsToFile();
     let started = false;
     try {
         const [{ ChatApp }, { LocalSessionHost, initializeSessionHostRuntime }, { ChatStore }, chatRuntime] = await Promise.all([
@@ -147,8 +191,8 @@ async function startChatApp(): Promise<void> {
             import("./store.js"),
             import("../services/chat-runtime.js"),
         ]);
-        const runtimeReady = initializeSessionHostRuntime();
-        void runtimeReady.catch(() => undefined);
+        const runtimeReady = prepared?.runtimeReady ?? initializeSessionHostRuntime();
+        if (!prepared) void runtimeReady.catch(() => undefined);
         const providerError = chatRuntime.validateChatApiSettings(chatRuntime.getChatApiSettings());
         const startupMessage = providerError
             ? `⚠️ LLM provider 配置无效：${providerError}\n请检查配置文件：${envFile}`
@@ -156,15 +200,19 @@ async function startChatApp(): Promise<void> {
         const chatStore = new ChatStore({
             costFor: (usage, atMs) => officialDeepSeekCostYuan(usage, atMs, chatRuntime.getChatApiSettings()),
         });
-        const app = new ChatApp(new LocalSessionHost(runtimeReady, { startupCwd: getStartupCwd() }), chatStore);
+        const host = prepared?.host
+            ?? new LocalSessionHost(runtimeReady, { startupCwd: getStartupCwd() });
+        const app = new ChatApp(host, chatStore);
         // 启动期阻断（provider 配置无效）由 app 统一维护 herdr 状态，避免后续同步把 blocked 覆盖成 idle
         if (providerError) app.setHerdrBlocked(providerError);
         const removeSignalHandlers = installShutdownSignalHandlers(app);
         try {
-            await app.init(startupMessage);
+            await app.init(startupMessage, { skipInitialView: prepared !== undefined });
             await runtimeReady;
+            if (prepared) await app.openResumedSession(prepared.sessionId);
         } catch (error) {
             removeSignalHandlers();
+            if (prepared) await prepared.dispose();
             throw error;
         }
         started = true;
@@ -174,6 +222,24 @@ async function startChatApp(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+    if (cliArgs[0] === "resume") {
+        try {
+            const { parseResumeArgs, runResumeCli } = await import("../cli/resume.js");
+            const resume = parseResumeArgs(cliArgs.slice(1));
+            if (resume.print) {
+                await runResumeCli(resume);
+            } else {
+                // 与普通 TUI 一致：MCP 重连等异步异常只记日志，不杀掉用户会话
+                installGlobalErrorGuards();
+                await startChatApp(await prepareTuiResume(resume));
+            }
+        } catch (error) {
+            const { writeCliError } = await import("../utils/app-error.js");
+            writeCliError(error, cliArgs.includes("--json"));
+        }
+        return;
+    }
+
     if (isPrintCliInvocation(cliArgs)) {
         try {
             const { runPrintCli } = await import("../cli/print.js");

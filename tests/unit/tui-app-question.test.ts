@@ -333,6 +333,19 @@ describe("ChatApp 提问接线", () => {
         agent.onTurnFinished(OTHER);
         expect(lastHerdrState()).toEqual(["idle", undefined]);
     });
+
+    test("openResumedSession：关掉启动选择面板并载入目标会话", async () => {
+        const { app, store } = makeApp();
+        await app.init();
+        // 既有测试的 fake agent 没有 listSessions，init 里的刷新会失败；这里直接铺开启动面板
+        (app as any).openInitialView();
+        expect((app as any).panels.find("session")).toBeDefined();
+
+        await app.openResumedSession(OTHER);
+
+        expect(store.currentSessionId).toBe(OTHER);
+        expect((app as any).panels.find("session")).toBeUndefined();
+    });
 });
 
 function lastHerdrState(): [string, string | undefined] {

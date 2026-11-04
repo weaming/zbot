@@ -417,7 +417,11 @@ export class ChatApp {
         setUserQuestionChannel({ ask: (request, signal) => this.askUser(request, signal) });
     }
 
-    async init(startupMessage?: string): Promise<void> {
+    /**
+     * `skipInitialView` 供 CLI 恢复会话：启动时不弹会话选择面板、不推「请选择会话」提示，
+     * 由 `openResumedSession` 直接切到目标会话。
+     */
+    async init(startupMessage?: string, options: { skipInitialView?: boolean } = {}): Promise<void> {
         // 恢复上次退出前各会话的输入草稿（切回对应会话时填回输入框）
         for (const [sessionId, draft] of loadRichDrafts()) {
             this.drafts.set(sessionId, typeof draft === "string" ? draft : draft.text, typeof draft === "string" ? [] : draft.images);
@@ -491,7 +495,7 @@ export class ChatApp {
             await this.refreshSessions();
             // 先取一份归属快照，面板首帧就能显示 ●/◎/◌ 与他实例的忙闲
             void this.refreshOwnership(true);
-            this.openInitialView();
+            if (!options.skipInitialView) this.openInitialView();
             this.renderStatusBar();
         } catch (error: any) {
             this.store.pushSystemMessage(`⚠️ TUI 初始化失败：${error?.message ?? error}`);
@@ -1946,6 +1950,20 @@ export class ChatApp {
             return;
         }
         this.store.pushSystemMessage("👋 还没有会话：⌃N 新建，或直接输入消息即新建。");
+    }
+
+    /**
+     * CLI `zbot resume <id>`：会话的归档恢复与认领已在进入 TUI 前完成，
+     * 这里关掉启动时的选择面板并切到目标会话。失败时留在 TUI 里提示，不弄脏终端。
+     */
+    async openResumedSession(sessionId: string): Promise<void> {
+        this.closeActivePanel();
+        try {
+            await this.selectSession(sessionId);
+        } catch (error: any) {
+            this.store.pushSystemMessage(`⚠️ 恢复会话失败：${error?.message ?? error}`);
+            this.openSessionPanel();
+        }
     }
 
     /** 确保会话由本实例持有；被其他实例占用时协商接管，失败抛出可读错误。 */

@@ -46,6 +46,7 @@ Responses API 和 Chat Completions 可使用各自的 `OPENAI_RESPONSES_*` 与 `
 ~/.bun/bin/zbot session list
 ~/.bun/bin/zbot session show <id>
 ~/.bun/bin/zbot session send <id> "跑一下测试" --wait
+~/.bun/bin/zbot resume <id> -p --json "继续"
 ```
 
 也可以常驻成无 UI 宿主，用 HTTP 发布任务、SSE 订阅进度：

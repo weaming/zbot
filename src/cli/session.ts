@@ -41,6 +41,7 @@ import type { SessionSummary } from "../host/session-host-types.js";
 import { MAX_SESSION_TITLE_LENGTH, type StoredChatMessage } from "../types/session.js";
 import type { ChatModelSelection } from "../types/chat-model.js";
 import type { UserContent } from "../types/image.js";
+import { AppError } from "../utils/app-error.js";
 import { SESSION_CLI_USAGE } from "./help.js";
 
 /** show 默认展示的轮数：够看上下文，又不至于刷屏。 */
@@ -70,14 +71,14 @@ export interface SessionListRow extends SessionOrderItem {
  * 带机器可读分类与退出码的 CLI 错误：`--json` 调用方靠 code / exitCode 判断下一步
  * （例如 wait_timeout 表示"消息已投递，不要重发"）。
  */
-export class SessionCliError extends Error {
+export class SessionCliError extends AppError {
     constructor(
-        readonly code: string,
+        code: string,
         message: string,
-        readonly exitCode = 1,
-        readonly details: Record<string, unknown> = {},
+        exitCode = 1,
+        details: Record<string, unknown> = {},
     ) {
-        super(message);
+        super(code, message, exitCode, details);
         this.name = "SessionCliError";
     }
 }

@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 import {
     MAIN_CLI_USAGE,
     PRINT_CLI_USAGE,
+    RESUME_CLI_USAGE,
     SERVE_CLI_USAGE,
     SESSION_CLI_USAGE,
     printCliHelp,
@@ -44,6 +45,7 @@ describe("printCliHelp", () => {
         expect(capture(() => printCliHelp(["serve", "-h"])).output.trim()).toBe(SERVE_CLI_USAGE);
         expect(capture(() => printCliHelp(["session", "-h"])).output.trim()).toBe(SESSION_CLI_USAGE);
         expect(capture(() => printCliHelp(["-p", "--help"])).output.trim()).toBe(PRINT_CLI_USAGE);
+        expect(capture(() => printCliHelp(["resume", "-h"])).output.trim()).toBe(RESUME_CLI_USAGE);
         expect(capture(() => printCliHelp(["mcp", "-h"])).output.trim()).toBe(MCP_CLI_USAGE);
     });
 
@@ -57,6 +59,7 @@ describe("printCliHelp", () => {
     test("help <子命令> 也能定位，未知主题回落到总览", () => {
         expect(capture(() => printCliHelp(["help", "serve"])).output.trim()).toBe(SERVE_CLI_USAGE);
         expect(capture(() => printCliHelp(["help", "sessions"])).output.trim()).toBe(SESSION_CLI_USAGE);
+        expect(capture(() => printCliHelp(["help", "resume"])).output.trim()).toBe(RESUME_CLI_USAGE);
         expect(capture(() => printCliHelp(["help", "mcp"])).output.trim()).toBe(MCP_CLI_USAGE);
         expect(capture(() => printCliHelp(["help", "nope"])).output.trim()).toBe(MAIN_CLI_USAGE);
     });
@@ -135,8 +138,16 @@ describe("用法文本与实现同步", () => {
     });
 
     test("总览列出全部分支入口", () => {
-        for (const entry of ["zbot -p", "zbot session", "zbot serve", "zbot mcp", "zbot help"]) {
+        for (const entry of ["zbot -p", "zbot resume", "zbot session", "zbot serve", "zbot mcp", "zbot help"]) {
             expect(MAIN_CLI_USAGE).toContain(entry);
         }
+    });
+
+    test("resume 用法与 parseResumeArgs 双向对齐", () => {
+        const implemented = implementedFlags("cli/resume.ts");
+
+        expect(implemented.length).toBeGreaterThan(0);
+        expect(documentedFlags(RESUME_CLI_USAGE)).toEqual(implemented);
+        expect(RESUME_CLI_USAGE).toContain("-p, --print");
     });
 });

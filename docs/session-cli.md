@@ -15,6 +15,8 @@ zbot session archive <id>
 zbot session unarchive <id>
 zbot session delete <id> --json
 zbot session send <id> "跑一下测试" --wait=300
+zbot resume <id>                       # 载入旧会话，打开 TUI
+zbot resume <id> -p --json "继续修 lint"  # 无 UI 续聊一轮，输出最终结果
 ```
 
 子命令别名：`ls` = `list`，`cat` = `show`，`rm` = `delete`。
@@ -26,6 +28,24 @@ zbot session send <id> "跑一下测试" --wait=300
 `show` 默认最近 3 轮，`--turns N` 指定轮数，`--all` 全部；非 `--full` 时单条消息按 200 列截断，`--full` 输出完整正文（仍会剥掉终端控制序列）。
 
 所有子命令都支持 `--json`（`show`/`list`/`new`/`send`/`rename`/`archive`/`unarchive`/`delete`）。
+
+## 恢复旧会话（resume）
+
+`zbot resume <id>` 用于「进入」已有会话，而不是新建：
+
+- 不带 `-p`：载入该会话并打开 TUI。
+- `zbot resume <id> -p [文本]`：无 UI 续聊一轮，把本回合最终 assistant 文本写到 stdout；
+  未给文本时从 stdin 读。加 `--json` 输出 `{sessionId, content, aborted, toolCalls}`。
+- 开关必须写在续聊文本之前：正文开始后不再解析开关（避免正文里的 `--json` 被吞掉）；
+  首个正文词以 `-` 开头时用 `--` 分隔，例如 `zbot resume <id> -p -- --json 是什么意思`。
+- `--unarchive`：目标会话已归档时先恢复；缺省拒绝，避免误改归档历史。
+- 恢复前会**不协商地**认领会话。被其他实例（TUI/serve）持有时直接失败，提示改用
+  `zbot session send`；不会抢锁造成双写。
+- `id` 规则与 `session` 子命令一致（完整 id / 唯一前缀 / 末几位）。
+
+无 UI 恢复的失败码：`not_found` / `ambiguous` / `usage` / `session_busy`（含 `holderPid` 与
+`reason`）/ `session_claim_failed`（bind 等内部错误）/ `session_archived` 等；
+`--json` 时错误对象与其他子命令同形。
 
 ## 读写规则
 

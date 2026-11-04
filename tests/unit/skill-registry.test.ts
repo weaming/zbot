@@ -57,6 +57,20 @@ describe("skill registry multi-source loading", () => {
         expect(registry.getSkillDir("gamma")).toBe(path.join(agentsSkillsDir, "gamma"));
     });
 
+    test("init({watch:false}) 只加载不挂监听，close 可摘掉监听", async () => {
+        makeSkill(userSkillsDir, "alpha", "user-alpha");
+
+        const registry = new SkillRegistry([userSkillsDir]);
+        await registry.init({ watch: false });
+        expect(registry.getSkillNames()).toEqual(["alpha"]);
+        expect((registry as any).fileWatcher).toBeNull();
+
+        await registry.init();
+        expect((registry as any).fileWatcher).not.toBeNull();
+        await registry.close();
+        expect((registry as any).fileWatcher).toBeNull();
+    });
+
     test("loads ~/.agents/skills in TUI and keeps local skills first", async () => {
         makeSkill(userSkillsDir, "local", "local-skill");
         makeSkill(agentsSkillsDir, "shared", "shared-skill");

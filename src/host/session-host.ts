@@ -79,9 +79,11 @@ const CANCEL_TURN_TIMEOUT_MS = 30_000;
 const PEER_RESULT_SCAN_EVENTS = 2_000;
 
 /** 初始化 TUI 所需的技能和 MCP 连接。 */
-export async function initializeSessionHostRuntime(): Promise<void> {
+export async function initializeSessionHostRuntime(
+    options: { watchSkills?: boolean } = {},
+): Promise<void> {
     const { skillRegistry } = await import("../skills/skill-registry.js");
-    await skillRegistry.init();
+    await skillRegistry.init({ watch: options.watchSkills !== false });
 
     const { initMcpClients } = await import("../mcp/client-manager.js");
     await initMcpClients({ mode: "tui" });
@@ -993,6 +995,9 @@ export class LocalSessionHost implements SessionHost {
         }
         for (const sessionId of this.activeSessions.keys()) closeChatSessionTransport(sessionId);
         backgroundTaskManager.stopAll();
+        // skillRegistry 是进程级单例，宿主代表进程生命周期：退出前把监听摘掉
+        const { skillRegistry } = await import("../skills/skill-registry.js");
+        await skillRegistry.close();
         // 释放全部 socket 与连接：让等待接管的实例能立刻认领
         this.control.close();
         if (this.inflightTurns.size === 0) return;

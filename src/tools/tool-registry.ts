@@ -90,7 +90,8 @@ const validateToolLimits = () => {
     }
 };
 
-setTimeout(validateToolLimits, 5000);
+// 只做一次开发期告警；unref 后不阻塞进程退出（CLI 子命令加载本模块后应立即结束）
+setTimeout(validateToolLimits, 5000).unref();
 
 export const executeMcpTool = async (name: string, args: any, signal?: AbortSignal): Promise<ToolExecutionResult> => {
     const tool = name === "use_skill" ? getUseSkillToolCached() : toolCatalog.getTool(name);

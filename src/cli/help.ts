@@ -13,6 +13,7 @@ export const MAIN_CLI_USAGE = [
     "",
     "  zbot                       启动 TUI 聊天界面（默认）",
     "  zbot -p <文本>             单次问答，回答后退出",
+    "  zbot resume <id>           载入旧会话：默认进 TUI，加 -p 则无 UI 续聊",
     "  zbot session <子命令>      会话管理：list/show/new/rename/archive/send/delete",
     "  zbot serve                 启动 Web 任务看板与 HTTP 接口",
     "  zbot mcp <子命令>          配置 MCP 服务：list/add/remove",
@@ -59,6 +60,19 @@ export const SESSION_CLI_USAGE = [
     "id 支持完整 id、唯一前缀或末几位；写操作要求会话未被其他实例持有。",
 ].join("\n");
 
+export const RESUME_CLI_USAGE = [
+    "用法：zbot resume <id> [选项]",
+    "",
+    "  <id>              会话 id：完整 id、唯一前缀或末几位",
+    "  -p, --print       无 UI 续聊：把本回合最终输出写到 stdout（不给文本时读 stdin）",
+    "  --json            与 -p 一起用：输出 {sessionId,content,aborted,toolCalls}",
+    "  --unarchive       目标会话已归档时先恢复再进入",
+    "",
+    "开关要写在续聊文本之前（正文开始后不再解析开关）；文本本身以 - 开头时用 `--` 分隔。",
+    "不带 -p 时载入旧会话并打开 TUI。会话被其他实例持有时直接失败；",
+    "如需让运行中的实例继续处理，请改用 `zbot session send` 投递消息。",
+].join("\n");
+
 const HELP_FLAGS = new Set(["-h", "--help"]);
 
 function usageFor(topic: string): string {
@@ -71,6 +85,8 @@ function usageFor(topic: string): string {
         case "session":
         case "sessions":
             return SESSION_CLI_USAGE;
+        case "resume":
+            return RESUME_CLI_USAGE;
         case "mcp":
             return MCP_CLI_USAGE;
         case "print":

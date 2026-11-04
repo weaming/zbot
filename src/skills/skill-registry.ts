@@ -22,6 +22,7 @@ export class SkillRegistry {
     private skills: Map<string, BaseSkill> = new Map();
     private skillMetas: Map<string, SkillMeta> = new Map();
     private skillDirs: Map<string, string> = new Map();
+    private fileWatcher: { close(): Promise<void> } | null = null;
 
     /**
      * dirs 缺省时按默认路径解析（用户级 → 共享）。
@@ -34,12 +35,25 @@ export class SkillRegistry {
         return this.dirs ? [...new Set(this.dirs.map((dir) => path.resolve(dir)))] : getSkillRegistryDirs();
     }
 
-    async init(): Promise<void> {
+    /**
+     * `watch: false` 供一次性 CLI 使用：只加载技能，不挂文件监听。
+     * 监听句柄会阻止进程退出，短命令不该为热更新付这个代价。
+     */
+    async init(options: { watch?: boolean } = {}): Promise<void> {
         await this.load();
-        this.startFileWatcher();
+        if (options.watch !== false) this.startFileWatcher();
+    }
+
+    /** 停止文件监听；宿主关闭时调用，避免残留句柄。 */
+    async close(): Promise<void> {
+        const watcher = this.fileWatcher;
+        this.fileWatcher = null;
+        await watcher?.close().catch(() => undefined);
     }
 
     private startFileWatcher(): void {
+        // init 可能被调用多次（启动重试）：已有监听就不再叠加
+        if (this.fileWatcher) return;
         const skillDirs = this.resolveDirs();
         const patterns = skillDirs.map((dir) => path.join(dir, "**", "SKILL.md"));
         if (patterns.length === 0) return;
@@ -52,6 +66,7 @@ export class SkillRegistry {
                     pollInterval: 100,
                 },
             });
+            this.fileWatcher = watcher;
 
             watcher
                 .on("add", () => {
