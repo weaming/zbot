@@ -17,7 +17,7 @@ import type { AgentEvent } from "../events/agent-events.js";
 import { EventLog } from "../events/event-log.js";
 import { listSavedSessionIds } from "../events/session-files.js";
 import { SessionReplay } from "../events/session-replay.js";
-import { summarizeEvents } from "../host/summary.js";
+import { SessionDigestReader } from "../host/summary.js";
 import { abbreviatePath } from "../format/path.js";
 import { describeOrigin } from "../format/session-origin.js";
 import { padColumns, truncatePlain } from "../format/text.js";
@@ -65,6 +65,8 @@ const DEFAULT_QUEUE_EXPIRES_SECONDS = 270;
 
 const eventLog = new EventLog();
 const replay = new SessionReplay(eventLog);
+/** 会话摘要缓存：`list` 会遍历全部会话，逐份全量解析事件日志是这里最贵的一步。 */
+const digests = new SessionDigestReader(eventLog);
 
 /** 列表行：摘要 + 归属（socket 探测结果）；排序键与摘要同源，供 sortSessions 使用。 */
 export interface SessionListRow extends SessionOrderItem {
@@ -1198,9 +1200,7 @@ async function runQueue(command: QueueCommand, write: (text: string) => void): P
 async function readSessionMeta(
     sessionId: string,
 ): Promise<{ summary: SessionSummary; createdAt?: string } | null> {
-    const events = await eventLog.read(sessionId);
-    if (events.length === 0) return null;
-    return { summary: summarizeEvents(sessionId, events), ...(events[0] ? { createdAt: events[0].ts } : {}) };
+    return digests.read(sessionId);
 }
 
 /** 事件日志文件的 mtime：日志损坏时唯一的"更新时间"来源。 */

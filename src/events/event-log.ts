@@ -48,6 +48,18 @@ interface StreamState {
  */
 export type EventLogListener = (sessionId: string, event: AgentEvent | null) => void;
 
+/**
+ * 轻量扫描得到的一条事件：行首字段总是可信，payload 只在调用方声明的类型上解码。
+ * 因此它不能当 AgentEvent 用，只能喂给「只读少数类型 payload」的投影（如会话摘要）。
+ */
+export interface ScannedEvent {
+    seq: number;
+    ts: string;
+    type: AgentEventType;
+    /** 仅当该类型在 decodeTypes 里才有值。 */
+    payload?: unknown;
+}
+
 export class EventLog {
     private readonly seqCache = new Map<string, number>();
     private readonly appendLocks = new Map<string, Promise<void>>();
@@ -332,6 +344,56 @@ export class EventLog {
         return readEventsBackward(this.eventFilePath(sessionId), beforeSeq, count);
     }
 
+    /**
+     * 轻量全量扫描主日志：逐行只解析行首（seq/ts/type），只对 decodeTypes 命中的行做完整解析。
+     *
+     * 给「需要每一行时间戳、但只关心少数事件类型 payload」的投影用（会话摘要）：真实日志里
+     * 约 99.9% 的字节属于 turn_message / turn_segment_start 这类与摘要无关的大事件，
+     * 逐行 JSON.parse 它们纯属浪费，而摘要要的 ts/type 在行首就能可靠读到。
+     *
+     * 返回 null 表示「行首形状不认识」（编码顺序变了、日志被外部按别的格式改写）：
+     * 调用方必须回退全量读取，不能拿半懂的数据当摘要。
+     *
+     * 语义与 read(..., { persistedOnly: true }) 对齐：不并入 pending 流片段；
+     * 空行忽略；损坏行跳过并告警（半行写不进去的尾部 append 是唯一现实来源）。
+     * 已知边界：极端截断恰好落在嵌套 `}` 之后时，行首仍然可读，这一行会被收下；
+     * 摘要只用该行的 ts（与同一回合其它事件同源），不会因此伪造出别的字段。
+     */
+    async scan(sessionId: string, decodeTypes: ReadonlySet<string>): Promise<ScannedEvent[] | null> {
+        const filePath = this.eventFilePath(sessionId);
+        const text = await readFileIfExists(filePath);
+        if (!text) return [];
+
+        const records: ScannedEvent[] = [];
+        for (const line of text.split("\n")) {
+            // 空行是常态（每行都以 \n 结尾），先走零分配的快路径，空白行再退回去 trim
+            if (line === "") continue;
+            const head = parseEventLineHead(line);
+            if (!head) {
+                if (line.trim() === "") continue;
+                return null;
+            }
+            // 行首可读但整行不完整（append 中断留下的半行）：与全量读取一致地跳过
+            if (!line.endsWith("}") && !line.trimEnd().endsWith("}")) {
+                console.warn(`[EventLog] 跳过损坏事件行 (${path.basename(filePath)}): ${line.slice(0, 120)}`);
+                continue;
+            }
+            if (!decodeTypes.has(head.type)) {
+                records.push(head);
+                continue;
+            }
+            let payload: unknown;
+            try {
+                payload = JSON.parse(line).payload;
+            } catch {
+                console.warn(`[EventLog] 跳过损坏事件行 (${path.basename(filePath)}): ${line.slice(0, 120)}`);
+                continue;
+            }
+            records.push({ ...head, payload });
+        }
+        return records;
+    }
+
     /** 截断日志到 upToSeq（时间点恢复 = 该点之后的未来全部作废）。 */
     async truncate(sessionId: string, upToSeq: number): Promise<void> {
         const filePath = this.eventFilePath(sessionId);
@@ -437,6 +499,19 @@ function parseEventLine(line: string | undefined): AgentEvent | undefined {
 /** 解析一行事件取出 seq；空行或损坏行返回 undefined。 */
 function parseSeq(line: string | undefined): number | undefined {
     return parseEventLine(line)?.seq;
+}
+
+/**
+ * append 写入的行首固定形状：`{"seq":N,"ts":"...","sessionId":"...","type":"...","payload":...}`。
+ * 只读前缀与 JSON.parse 后取这几个字段等价（同一份字节），因此不必解析整行。
+ * 形状不匹配（键序变化、外部改写、半行）一律返回 undefined，由调用方回退全量读取。
+ */
+function parseEventLineHead(line: string): ScannedEvent | undefined {
+    const match = /^\{"seq":(\d+),"ts":"([^"\\]*)","sessionId":"([^"\\]*)","type":"([A-Za-z0-9_]+)"/.exec(line);
+    if (!match) return undefined;
+    const seq = Number(match[1]);
+    if (!Number.isSafeInteger(seq)) return undefined;
+    return { seq, ts: match[2]!, type: match[4]! as AgentEventType };
 }
 
 /**

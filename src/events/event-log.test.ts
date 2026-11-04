@@ -7,6 +7,8 @@ import { SessionReplay, createEmptySession } from "./session-replay.js";
 import type { ChatMessage } from "../types/session.js";
 import type { UsageInfo } from "../types/chat.js";
 import { getSessionContextHistory } from "../utils/conversation-history.js";
+import { getSessionsDir } from "../utils/runtime-paths.js";
+import { sanitizeSessionId } from "../utils/session-id.js";
 
 let tmpDir: string;
 let savedEnv: Record<string, string | undefined> = {};
@@ -1165,5 +1167,80 @@ describe("EventLog 事件订阅与对外读口径", () => {
         const replayed = await new SessionReplay(log).replayTo(sessionId);
 
         expect(replayed.session.lazyMcpServers).toEqual(["rea"]);
+    });
+});
+
+describe("scan 轻量扫描", () => {
+    const decodeTypes = new Set(["session_created", "session_renamed"]);
+
+    it("行首总能读到 seq/ts/type，只有声明的类型带 payload", async () => {
+        const log = new EventLog();
+        const sessionId = "sess-scan-basic";
+        await log.append(sessionId, "session_created", { cwd: tmpDir });
+        await log.append(sessionId, "turn_message", { turnId: "T1", messages: [] } as any);
+        await log.append(sessionId, "session_renamed", { title: "新标题" });
+
+        const scanned = await log.scan(sessionId, decodeTypes);
+
+        expect(scanned?.map(record => [record.seq, record.type])).toEqual([
+            [1, "session_created"],
+            [2, "turn_message"],
+            [3, "session_renamed"],
+        ]);
+        // 未声明类型的 payload 不解码：日志里的大正文不进内存
+        expect(scanned?.[1]?.payload).toBeUndefined();
+        expect(scanned?.[2]?.payload).toEqual({ title: "新标题" });
+
+        // 行首字段与全量读取逐条一致（同一份字节，不该有任何偏差）
+        const full = await log.read(sessionId, 1, undefined, { persistedOnly: true });
+        expect(scanned?.map(record => [record.seq, record.ts, record.type]))
+            .toEqual(full.map(event => [event.seq, event.ts, event.type]));
+    });
+
+    it("不并入 pending 流片段（与 persistedOnly 读取同口径）", async () => {
+        const log = new EventLog();
+        const sessionId = "sess-scan-pending";
+        await log.append(sessionId, "session_created", { cwd: tmpDir });
+        await log.appendStreamDelta(sessionId, "T1", 1, { text: "片段" });
+
+        const scanned = await log.scan(sessionId, decodeTypes);
+
+        expect(scanned?.map(record => record.type)).toEqual(["session_created"]);
+        const lenient = await log.read(sessionId);
+        expect(lenient.some(event => event.type === "turn_stream_delta")).toBe(true);
+    });
+
+    it("行首形状不认识时返回 null，交给调用方回退全量读取", async () => {
+        const log = new EventLog();
+        const sessionId = "sess-scan-unknown-shape";
+        await log.append(sessionId, "session_created", { cwd: tmpDir });
+        const file = path.join(getSessionsDir("events"), `${sanitizeSessionId(sessionId)}.jsonl`);
+        // 键序与 append 不同：行首前缀不再可信，不能猜
+        fs.appendFileSync(
+            file,
+            `${JSON.stringify({ type: "session_renamed", payload: { title: "乱序" }, seq: 2, ts: "2026-01-01T00:00:00.000Z", sessionId })}\n`,
+            "utf8",
+        );
+
+        expect(await log.scan(sessionId, decodeTypes)).toBeNull();
+        // 全量读取照样能读出来（JSON 不关心键序），回退后摘要不会缺字段
+        const full = await log.read(sessionId, 1, undefined, { persistedOnly: true });
+        expect(full.map(event => event.type)).toEqual(["session_created", "session_renamed"]);
+    });
+
+    it("append 中断留下的半行按损坏行跳过，不影响前面的记录", async () => {
+        const log = new EventLog();
+        const sessionId = "sess-scan-truncated-tail";
+        await log.append(sessionId, "session_created", { cwd: tmpDir });
+        const file = path.join(getSessionsDir("events"), `${sanitizeSessionId(sessionId)}.jsonl`);
+        fs.appendFileSync(file, '{"seq":2,"ts":"2026-01-01T00:00:02.000Z","sessionId":"x","type":"turn_message","payload":{"text":"半', "utf8");
+
+        const scanned = await log.scan(sessionId, decodeTypes);
+
+        expect(scanned?.map(record => record.type)).toEqual(["session_created"]);
+    });
+
+    it("日志不存在时返回空数组（不是不确定）", async () => {
+        expect(await new EventLog().scan("sess-scan-missing", decodeTypes)).toEqual([]);
     });
 });

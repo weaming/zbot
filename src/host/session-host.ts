@@ -51,7 +51,7 @@ import type { UsageInfo } from "../types/chat.js";
 import type { AgentEvent, AgentEventPayloads } from "../events/agent-events.js";
 import { MAX_SESSION_TITLE_LENGTH, type Session } from "../types/session.js";
 import type { ChatModelSelection } from "../types/chat-model.js";
-import { aggregateInstanceUsage, summarizeEvents } from "./summary.js";
+import { aggregateInstanceUsage, SessionDigestReader } from "./summary.js";
 import { compactSessionContext, runSessionTurn, type TurnHost } from "./turn.js";
 import {
     executePeerCommand,
@@ -128,6 +128,8 @@ export class LocalSessionHost implements SessionHost {
     // TUI 会话数据直接使用 sessions/ 根目录。
     private readonly eventLog = new EventLog();
     private readonly replay = new SessionReplay(this.eventLog);
+    /** 会话摘要缓存：列表页与 peer 查询避免逐份全量解析事件日志。 */
+    private readonly digests = new SessionDigestReader(this.eventLog);
     private readonly activeSessions = new Map<string, ActiveSession>();
     private readonly pendingModelSelections = new Map<string, ChatModelSelection>();
     private readonly sessionOperations = new Set<string>();
@@ -293,8 +295,9 @@ export class LocalSessionHost implements SessionHost {
 
     /** 唤醒已归档会话并由当前实例认领，以便后续 session_send 继续工作。 */
     private async wakeArchivedSession(sessionId: string): Promise<void> {
-        const summary = (await this.listSessions()).find(session => session.sessionId === sessionId);
-        if (!summary) throw new Error(`会话不存在：${sessionId}`);
+        const digest = await this.digests.read(sessionId);
+        if (!digest) throw new Error(`会话不存在：${sessionId}`);
+        const summary = digest.summary;
         if (!summary.archived) throw new Error("目标会话未归档；直接使用 session_send 即可");
         if (this.isSessionBusy(sessionId)) throw new Error("目标会话正在执行，暂不能唤醒");
         if (!this.control.beginSessionWake(sessionId)) throw new Error("目标会话正在切换状态，请稍后重试");
@@ -832,10 +835,8 @@ export class LocalSessionHost implements SessionHost {
         for (const sessionId of this.activeSessions.keys()) ids.add(sessionId);
         const sessions: SessionSummary[] = [];
         for (const sessionId of ids) {
-            const events = await this.eventLog.read(sessionId);
-            if (events.length > 0) {
-                sessions.push(summarizeEvents(sessionId, events));
-            }
+            const digest = await this.digests.read(sessionId);
+            if (digest) sessions.push(digest.summary);
         }
         return sortSessions(sessions);
     }
@@ -878,6 +879,7 @@ export class LocalSessionHost implements SessionHost {
     /** 丢弃某会话的缓存事件（清理后调用，避免用旧缓存把它又列出来）。 */
     forgetSession(sessionId: string): void {
         this.eventLog.forget(sessionId);
+        this.digests.clear(sessionId);
     }
 
     /** 会话最近收到的会话间结果（供 session_status 回查）：只扫日志尾部窗口。 */
