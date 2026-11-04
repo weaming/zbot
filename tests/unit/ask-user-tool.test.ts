@@ -5,15 +5,29 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { executeMcpTool } from "../../src/tools/tool-registry.js";
 import { getAskUserToolNames } from "../../src/tools/ask-user-tool.js";
-import {
-    setUserQuestionChannel,
-    type UserAnswer,
-    type UserQuestionRequest,
-} from "../../src/utils/user-question.js";
+import { type UserAnswer, type UserQuestionRequest } from "../../src/utils/user-question.js";
+import { registerSessionRuntime } from "../../src/control/runtime.js";
 
 const SESSION = "01JASKU0000000000000000TEST";
 
-afterEach(() => setUserQuestionChannel(undefined));
+/** 本文件注册的"终端前端"能力：按会话解析，不再依赖进程级单槽。 */
+let unregisterRuntime: (() => void) | undefined;
+
+afterEach(() => {
+    unregisterRuntime?.();
+    unregisterRuntime = undefined;
+});
+
+/** 注册/替换提问通道；`channel` 为 undefined 表示本进程没人可回答。 */
+function installAskUserChannel(channel?: { ask(request: UserQuestionRequest, signal?: AbortSignal): Promise<UserAnswer> }): void {
+    unregisterRuntime?.();
+    unregisterRuntime = undefined;
+    if (!channel) return;
+    unregisterRuntime = registerSessionRuntime({
+        ownsSession: sessionId => sessionId === SESSION,
+        askUser: (request, signal) => channel.ask(request, signal),
+    });
+}
 
 function question(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
@@ -26,7 +40,7 @@ function question(overrides: Record<string, unknown> = {}): Record<string, unkno
 
 /** 桩通道：按题目顺序回第一个选项，第一题附带自填内容。 */
 function stubChannel(custom = ""): void {
-    setUserQuestionChannel({
+    installAskUserChannel({
         ask: async (request: UserQuestionRequest): Promise<UserAnswer> => ({
             cancelled: false,
             answers: request.questions.map((item, index) => ({
@@ -46,13 +60,29 @@ async function run(args: Record<string, unknown>, withSession = true) {
 
 describe("ask_user 下发条件", () => {
     test("没有提问通道时不下发，直接调用也会被拒绝", async () => {
-        // 通道是进程级单例：别的测试文件构造过 ChatApp 时可能残留，这里显式清掉
-        setUserQuestionChannel(undefined);
+        // 别的测试文件可能还注册着前端：这里显式清掉
+        installAskUserChannel(undefined);
         expect(getAskUserToolNames(SESSION)).toEqual([]);
 
         const result = await run({ questions: [question()] });
         expect(result.isError).toBe(true);
         expect(result.text).toContain("没有可交互的用户");
+    });
+
+    test("未知会话 id：按会话严格解析，不下发也不误投", async () => {
+        installAskUserChannel({ ask: async () => ({ cancelled: true }) });
+
+        // 通道只负责 SESSION：别的会话 id 解析不到，既不下发也不投递
+        expect(getAskUserToolNames("01JASKU0000000000000000UNKW")).toEqual([]);
+        const asked: string[] = [];
+        installAskUserChannel({ ask: async () => { asked.push("hit"); return { cancelled: true }; } });
+        const result = await executeMcpTool("ask_user", {
+            questions: [question()],
+            __sessionId: "01JASKU0000000000000000UNKW",
+        });
+        expect(result.isError).toBe(true);
+        expect(result.content[0]?.text).toContain("不在本实例的运行时上下文里");
+        expect(asked).toEqual([]);
     });
 
     test("装配通道且有会话上下文才下发", () => {
@@ -102,7 +132,7 @@ describe("ask_user 参数校验", () => {
 describe("ask_user 作答", () => {
     test("把问题交给通道，并把作答逐题回给模型", async () => {
         const requests: UserQuestionRequest[] = [];
-        setUserQuestionChannel({
+        installAskUserChannel({
             ask: async (request) => {
                 requests.push(request);
                 return {
@@ -139,7 +169,7 @@ describe("ask_user 作答", () => {
 
     test("缺省 header 留空（面板回退用题干），超长字段截断", async () => {
         const requests: UserQuestionRequest[] = [];
-        setUserQuestionChannel({
+        installAskUserChannel({
             ask: async (request) => {
                 requests.push(request);
                 return { cancelled: true };
@@ -152,7 +182,7 @@ describe("ask_user 作答", () => {
     });
 
     test("用户取消：回正常结果（非错误），并给出继续口径", async () => {
-        setUserQuestionChannel({ ask: async () => ({ cancelled: true }) });
+        installAskUserChannel({ ask: async () => ({ cancelled: true }) });
 
         const result = await run({ questions: [question()] });
         expect(result.isError).toBeUndefined();
@@ -162,7 +192,7 @@ describe("ask_user 作答", () => {
 
     test("同一会话并发提问被拒（面板一次只显示一组问题）", async () => {
         const releases: (() => void)[] = [];
-        setUserQuestionChannel({
+        installAskUserChannel({
             ask: () => new Promise<UserAnswer>(resolve => {
                 releases.push(() => resolve({ cancelled: true }));
             }),

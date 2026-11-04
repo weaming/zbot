@@ -29,9 +29,15 @@ export function formatDisplayPath(target: string, home: string | undefined = pro
 export function resolveCwdInput(input: string, base: string, home: string | undefined = process.env.HOME): string {
     const trimmed = input.trim();
     const homeDir = home || os.homedir();
-    if (trimmed === "~") return path.resolve(homeDir);
-    if (trimmed.startsWith("~/")) return path.resolve(homeDir, trimmed.slice(2));
+    if (trimmed === "~" || trimmed.startsWith("~/")) return path.resolve(expandHomePath(trimmed, homeDir));
     return path.resolve(base, trimmed);
+}
+
+/** 展开 `~` / `~/x` 为 home 绝对路径；其余输入原样返回（调用方自行决定相对基准）。 */
+export function expandHomePath(value: string, home: string = os.homedir()): string {
+    if (value === "~") return home;
+    if (value.startsWith("~/")) return path.join(home, value.slice(2));
+    return value;
 }
 
 let startupToolCwd: string | null = null;

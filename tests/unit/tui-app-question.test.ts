@@ -31,13 +31,15 @@ mock.module("../../src/tui/herdr-reporter.js", () => ({
 
 const { ChatApp } = await import("../../src/tui/app.js");
 const { ChatStore } = await import("../../src/tui/store.js");
-const { getUserQuestionChannel, setUserQuestionChannel } = await import("../../src/utils/user-question.js");
+const { getUserQuestionChannel } = await import("../../src/control/runtime.js");
 
 const SESSION = "01JASKAPP000000000000000TEST";
 const OTHER = "01JASKAPP000000000000000OTHR";
 /** 记录真正发给模型的文本（斜杠命令测试用）。 */
 const sentTexts: string[] = [];
 
+/** 本文件创建的 app：注册表按实例持有，afterAll 统一注销。 */
+const createdApps: unknown[] = [];
 let tmpDir: string;
 let originalStateDir: string | undefined;
 let originalTuiCwd: string | undefined;
@@ -82,6 +84,7 @@ function makeApp() {
     store.setCurrentSession(SESSION);
 
     const app = new ChatApp(agent as any, store);
+    createdApps.push(app);
     return { app, store, agent, tui: (app as any).tui };
 }
 
@@ -115,22 +118,54 @@ afterEach(() => {
 });
 
 afterAll(() => {
-    // 通道是进程级单例：本文件跑完必须撤掉，否则后续测试会看到「有人在场」
-    setUserQuestionChannel(undefined);
+    // 注册表按实例持有：本文件创建的 app 全部注销，否则后续测试会看到「有人在场」
+    for (const app of createdApps) (app as any).unregisterRuntime();
     mock.restore();
 });
 
 describe("ChatApp 提问接线", () => {
+    test("多 ChatApp：提问按会话路由到拥有该会话的前端，退出后不再接收", async () => {
+        const agent = makeAgent();
+        const storeA = new ChatStore();
+        storeA.setSessions([{ sessionId: SESSION, messageCount: 0, title: "A 的会话" }]);
+        storeA.setCurrentSession(SESSION);
+        const appA = new ChatApp(agent as any, storeA);
+        createdApps.push(appA);
+
+        const storeB = new ChatStore();
+        storeB.setSessions([{ sessionId: OTHER, messageCount: 0, title: "B 的会话" }]);
+        storeB.setCurrentSession(OTHER);
+        const appB = new ChatApp(agent as any, storeB);
+        createdApps.push(appB);
+
+        const answerA = getUserQuestionChannel(SESSION)!.ask(request(SESSION));
+        expect((appA as any).questions.pendingCount()).toBe(1);
+        expect((appB as any).questions.pendingCount()).toBe(0);
+
+        const answerB = getUserQuestionChannel(OTHER)!.ask(request(OTHER));
+        expect((appB as any).questions.pendingCount()).toBe(1);
+        expect((appA as any).questions.pendingCount()).toBe(1);
+
+        (appA as any).questions.pending(SESSION)!.settle({ cancelled: true });
+        (appB as any).questions.pending(OTHER)!.settle({ cancelled: true });
+        await Promise.all([answerA, answerB]);
+
+        // 退出即注销：之后的提问不会再投给这个已退出的前端
+        (appA as any).unregisterRuntime();
+        void getUserQuestionChannel(SESSION)?.ask(request(SESSION));
+        expect((appA as any).questions.pendingCount()).toBe(0);
+    });
+
     test("构造时装配提问通道", () => {
         makeApp();
-        expect(getUserQuestionChannel()).toBeDefined();
+        expect(getUserQuestionChannel(SESSION)).toBeDefined();
     });
 
     test("当前会话提问：弹出浮层，作答后结算并收起", async () => {
         const { app, tui } = makeApp();
         const focusCalls: unknown[] = [];
         tui.setFocus = (component: unknown) => focusCalls.push(component);
-        const pending = getUserQuestionChannel()!.ask(request());
+        const pending = getUserQuestionChannel(SESSION)!.ask(request());
 
         const entry = (app as any).panels.find("question");
         expect(entry.kind).toBe("question");
@@ -152,7 +187,7 @@ describe("ChatApp 提问接线", () => {
 
     test("别的会话提问：不抢当前界面，flash 提示；切过去自动弹层", async () => {
         const { app, tui, store } = makeApp();
-        const pending = getUserQuestionChannel()!.ask(request(OTHER));
+        const pending = getUserQuestionChannel(SESSION)!.ask(request(OTHER));
 
         expect((app as any).panels.find("question")).toBeUndefined();
         expect(tui.flashCalls.some((line: string) => line.includes("别的会话") && line.includes("等"))).toBe(true);
@@ -169,7 +204,7 @@ describe("ChatApp 提问接线", () => {
     test("signal 中止（⌃C / 退出 / 会话被释放）按取消结算并收起浮层", async () => {
         const { app } = makeApp();
         const controller = new AbortController();
-        const pending = getUserQuestionChannel()!.ask(request(), controller.signal);
+        const pending = getUserQuestionChannel(SESSION)!.ask(request(), controller.signal);
         expect((app as any).panels.find("question")).toBeDefined();
 
         controller.abort();
@@ -183,7 +218,7 @@ describe("ChatApp 提问接线", () => {
         const controller = new AbortController();
         controller.abort();
 
-        const answer = await getUserQuestionChannel()!.ask(request(), controller.signal);
+        const answer = await getUserQuestionChannel(SESSION)!.ask(request(), controller.signal);
         expect(answer).toEqual({ cancelled: true });
         expect((app as any).panels.find("question")).toBeUndefined();
         expect((app as any).questions.pendingCount()).toBe(0);
@@ -191,7 +226,7 @@ describe("ChatApp 提问接线", () => {
 
     test("tab 标记：等待作答的会话显示 ?（优先于运行中转圈）", async () => {
         const { app } = makeApp();
-        const pending = getUserQuestionChannel()!.ask(request(OTHER));
+        const pending = getUserQuestionChannel(SESSION)!.ask(request(OTHER));
 
         const tab = (app as any).buildSessionBarTabs().find((item: any) => item.sessionId === OTHER);
         expect(tab.question).toBe(true);
@@ -289,7 +324,7 @@ describe("ChatApp 提问接线", () => {
         const { app } = makeApp();
         herdrEvents.length = 0;
 
-        const pending = getUserQuestionChannel()!.ask(request());
+        const pending = getUserQuestionChannel(SESSION)!.ask(request());
         expect(lastHerdrState()).toEqual(["blocked", "部署方式 · 这次部署走哪条路？"]);
 
         (app as any).handlePanelInput("\r");
@@ -304,7 +339,7 @@ describe("ChatApp 提问接线", () => {
         app.setHerdrBlocked("provider 配置无效");
         expect(lastHerdrState()).toEqual(["blocked", "provider 配置无效"]);
 
-        const pending = getUserQuestionChannel()!.ask(request());
+        const pending = getUserQuestionChannel(SESSION)!.ask(request());
         expect(lastHerdrState()).toEqual(["blocked", "provider 配置无效"]);
         (app as any).questions.pending(SESSION)!.settle({ cancelled: true });
         await pending;

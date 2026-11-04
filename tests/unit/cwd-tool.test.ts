@@ -2,15 +2,18 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import {
-    cwdTool,
-    formatDisplayPath,
-    resolveCwdInput,
-    setSessionCwdHandler,
-} from "../../src/tools/cwd-tool.js";
+import { cwdTool, formatDisplayPath, resolveCwdInput } from "../../src/tools/cwd-tool.js";
+import { registerSessionRuntime } from "../../src/control/runtime.js";
 
 let root: string;
 let originalTuiCwd: string | undefined;
+/** 本文件注册的会话运行时（模拟宿主提供 cwd 落盘入口）。 */
+let unregisterRuntime: (() => void) | undefined;
+
+function registerCwdSetter(setter: (sessionId: string, cwd: string) => Promise<void>): void {
+    unregisterRuntime?.();
+    unregisterRuntime = registerSessionRuntime({ ownsSession: () => true, setSessionCwd: setter });
+}
 
 beforeEach(() => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), "zbot-cwd-tool-"));
@@ -22,7 +25,8 @@ beforeEach(() => {
 afterEach(() => {
     if (originalTuiCwd === undefined) delete process.env.TUI_CWD;
     else process.env.TUI_CWD = originalTuiCwd;
-    setSessionCwdHandler(null);
+    unregisterRuntime?.();
+    unregisterRuntime = undefined;
     fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -56,7 +60,7 @@ describe("cwd 工具", () => {
 
     test("set 相对路径：解析后交给会话落盘，并回报新目录", async () => {
         const calls: Array<{ sessionId: string; cwd: string }> = [];
-        setSessionCwdHandler(async (sessionId, cwd) => {
+        registerCwdSetter(async (sessionId, cwd) => {
             calls.push({ sessionId, cwd });
         });
 
@@ -69,13 +73,30 @@ describe("cwd 工具", () => {
 
     test("省略 action 时给 path 即视为 set", async () => {
         const calls: string[] = [];
-        setSessionCwdHandler(async (_sessionId, cwd) => {
+        registerCwdSetter(async (_sessionId, cwd) => {
             calls.push(cwd);
         });
 
         await run({ path: "sub", __sessionId: "s1" });
 
         expect(calls).toEqual([path.join(root, "project", "sub")]);
+    });
+
+    test("未知会话 id：严格拒绝，不落到唯一已注册的宿主", async () => {
+        const calls: string[] = [];
+        unregisterRuntime?.();
+        unregisterRuntime = registerSessionRuntime({
+            // 只负责 s1：s2 不在本实例的上下文里
+            ownsSession: sessionId => sessionId === "s1",
+            setSessionCwd: async (_sessionId, cwd) => { calls.push(cwd); },
+        });
+
+        const result = await run({ action: "set", path: "sub", __sessionId: "s2" });
+
+        expect(result.isError).toBe(true);
+        expect(textOf(result)).toContain("不在本实例的运行时上下文里");
+        expect(calls).toEqual([]);
+        expect(process.env.TUI_CWD).toBe(path.join(root, "project"));
     });
 
     test("没有会话上下文时回退进程级目录", async () => {
@@ -88,13 +109,14 @@ describe("cwd 工具", () => {
         expect(textOf(result)).toContain("未落盘");
     });
 
-    test("有会话但宿主未注入落盘入口时报错，不谎报切换", async () => {
-        setSessionCwdHandler(null);
+    test("有会话但宿主未注册落盘入口时报错，不谎报切换", async () => {
+        unregisterRuntime?.();
+        unregisterRuntime = undefined;
 
         const result = await run({ action: "set", path: "sub", __sessionId: "s1" });
 
         expect(result.isError).toBe(true);
-        expect(textOf(result)).toContain("未注入落盘入口");
+        expect(textOf(result)).toContain("未注册落盘入口");
         expect(process.env.TUI_CWD).toBe(path.join(root, "project"));
     });
 

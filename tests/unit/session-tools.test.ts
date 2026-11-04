@@ -7,16 +7,17 @@ import { MAX_SPAWNED_SESSIONS, SessionControl, type SessionControlHost } from ".
 import type { PeerMessage } from "../../src/control/protocol.js";
 import { forgetBound, locallyBoundSessionIds } from "../../src/control/registry.js";
 import {
-    setPeerResultHistory,
-    setSessionControl,
-    setSessionDirectory,
+    registerSessionRuntime,
     type PeerResultRecord,
+    type SessionDirectory,
 } from "../../src/control/runtime.js";
 import { getSessionToolNames, SESSION_TOOLS } from "../../src/tools/session-tools.js";
 import { useTmpStateDir, type TmpStateDir } from "./test-env.js";
 
 let stateDir: TmpStateDir;
 let control: SessionControl;
+/** 本文件注册的会话运行时（测试里等价于"唯一的宿主"）。 */
+let unregisterRuntime: () => void;
 const accepted: string[] = [];
 const outbound: PeerMessage[] = [];
 const busy = new Set<string>();
@@ -107,8 +108,12 @@ beforeEach(() => {
     peerResults.clear();
 
     control = new SessionControl(makeHost(), { probeTimeoutMs: 100, negotiateTimeoutMs: 200 });
-    setSessionControl(control);
-    setSessionDirectory({
+    registerRuntime();
+});
+
+/** 目录能力：唤醒用（走 control.claim + adoptSpawnedSession）。 */
+function defaultDirectory(): SessionDirectory {
+    return {
         list: async options => options?.includeArchived ? [...SESSIONS, ARCHIVED_SESSION] : SESSIONS,
         wake: async sessionId => {
             if (sessionId !== ARCHIVED_SESSION.sessionId) throw new Error("目标会话未归档");
@@ -120,17 +125,29 @@ beforeEach(() => {
             }
             woken.push(sessionId);
         },
+    };
+}
+
+/** 注册/重注册"唯一宿主"的能力；`omit` 精确去掉某项能力，模拟宿主没有它。 */
+function registerRuntime(options: {
+    directory?: SessionDirectory;
+    omit?: Array<"control" | "directory" | "recentPeerResults">;
+} = {}): void {
+    unregisterRuntime?.();
+    const omit = new Set(options.omit ?? []);
+    unregisterRuntime = registerSessionRuntime({
+        ownsSession: () => true,
+        ...(omit.has("control") ? {} : { control }),
+        ...(omit.has("directory") ? {} : { directory: options.directory ?? defaultDirectory() }),
+        ...(omit.has("recentPeerResults")
+            ? {}
+            : { recentPeerResults: async (sessionId, limit) => (peerResults.get(sessionId) ?? []).slice(-limit) }),
     });
-    setPeerResultHistory({
-        recentResults: async (sessionId, limit) => (peerResults.get(sessionId) ?? []).slice(-limit),
-    });
-});
+}
 
 afterEach(() => {
+    unregisterRuntime();
     control.close();
-    setSessionControl(undefined);
-    setSessionDirectory(undefined);
-    setPeerResultHistory(undefined);
     for (const sessionId of locallyBoundSessionIds()) forgetBound(sessionId);
     stateDir.cleanup();
 });
@@ -152,7 +169,7 @@ describe("下发条件", () => {
     });
 
     test("进程未装配控制通道时不注入", () => {
-        setSessionControl(undefined);
+        registerRuntime({ omit: ["control"] });
         expect(getSessionToolNames(SESSIONS[0]!.sessionId)).toEqual([]);
     });
 });
@@ -442,7 +459,7 @@ describe("session_wake", () => {
     });
 
     test("缺少 TUI 恢复能力时返回明确错误", async () => {
-        setSessionDirectory({ list: async () => [...SESSIONS, ARCHIVED_SESSION] });
+        registerRuntime({ directory: { list: async () => [...SESSIONS, ARCHIVED_SESSION] } });
         const result = await tool("session_wake").execute({
             session: ARCHIVED_SESSION.sessionId,
             __sessionId: SESSIONS[0]!.sessionId,
@@ -454,6 +471,26 @@ describe("session_wake", () => {
 });
 
 describe("session_send", () => {
+    test("未知 caller：严格拒绝，不把调用路由到本实例唯一的宿主", async () => {
+        const unknown = "01JUNKNOWNCALLER0000000000";
+        // 只负责 SESSIONS[0]：未知 caller 不在本实例上下文里
+        unregisterRuntime();
+        unregisterRuntime = registerSessionRuntime({
+            ownsSession: sessionId => sessionId === SESSIONS[0]!.sessionId,
+            control,
+        });
+
+        expect(getSessionToolNames(unknown)).toEqual([]);
+        const result = await tool("session_send").execute({
+            session: SESSIONS[1]!.sessionId,
+            text: "hi",
+            __sessionId: unknown,
+        });
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0]?.text).toContain("不在本实例的运行时上下文里");
+    });
+
     test("缺少会话上下文时报错", async () => {
         const result = await tool("session_send").execute({ session: "…1", text: "hi" });
         expect(result.isError).toBe(true);
@@ -673,7 +710,7 @@ describe("session_status", () => {
     });
 
     test("没有会话目录时报错", async () => {
-        setSessionDirectory(undefined);
+        registerRuntime({ omit: ["directory"] });
         const result = await tool("session_status").execute({});
         expect(result.isError).toBe(true);
     });
@@ -749,7 +786,7 @@ describe("session_status", () => {
     });
 
     test("未装配结果历史时提示不可查", async () => {
-        setPeerResultHistory(undefined);
+        registerRuntime({ omit: ["recentPeerResults"] });
         const result = await tool("session_status").execute({
             session: SESSIONS[1]!.sessionId.slice(-8),
             include_result: true,

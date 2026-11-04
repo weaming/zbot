@@ -55,27 +55,3 @@ export interface UserQuestionRequest {
     sessionId: string;
     questions: UserQuestion[];
 }
-
-export interface UserQuestionChannel {
-    /**
-     * 把问题交给用户，用户作答或取消后 resolve。
-     * `signal` 中止（⌃C 中止回合、进程退出、会话被释放）时按取消结算。
-     */
-    ask(request: UserQuestionRequest, signal?: AbortSignal): Promise<UserAnswer>;
-}
-
-let activeChannel: UserQuestionChannel | undefined;
-
-/** 由运行时入口（TUI）装配；传 undefined 表示本进程没有可交互的用户。 */
-export function setUserQuestionChannel(channel?: UserQuestionChannel): void {
-    activeChannel = channel;
-}
-
-export function getUserQuestionChannel(): UserQuestionChannel | undefined {
-    return activeChannel;
-}
-
-/** 当前进程是否有人在回答问题（决定 `ask_user` 是否下发）。 */
-export function canAskUser(): boolean {
-    return activeChannel !== undefined;
-}

@@ -5,7 +5,7 @@
  * - set：接受 `~`、相对路径（相对当前目录）与绝对路径，目标必须是已存在的目录
  * - 切换落盘为 session_cwd_changed 事件：恢复会话后仍是新目录，其它工具也一起换基准
  *
- * 宿主（TUI）通过 setSessionCwdHandler 注入真正的落盘与刷新逻辑；
+ * 落盘入口按会话从运行时注册表解析（宿主注册），因此 TUI 与 serve 行为一致；
  * 没有会话上下文时（本地 CLI / 单测）退回进程级 TUI_CWD。
  */
 
@@ -13,19 +13,10 @@ import fs from "node:fs";
 import type { ExecutableTool, ToolExecutionResult } from "./tool-interface.js";
 import { err, ok } from "./tool-interface.js";
 import { formatDisplayPath, getToolCwd, resolveCwdInput } from "../utils/runtime-paths.js";
+import { getSessionCwdSetter, hasSessionCapabilityProvider } from "../control/runtime.js";
 
 // 路径解析与展示在 utils/runtime-paths 实现（身份文件插值等非工具层也要用）；这里继续对外导出。
 export { formatDisplayPath, resolveCwdInput };
-
-/** 会话 cwd 落盘入口：由宿主注入，工具层不直接触碰事件日志。 */
-export type SessionCwdSetter = (sessionId: string, cwd: string) => Promise<void>;
-
-let sessionCwdSetter: SessionCwdSetter | null = null;
-
-/** 注入/清除会话 cwd 落盘入口（TUI 启动时注入，测试可替换）。 */
-export function setSessionCwdHandler(setter: SessionCwdSetter | null): void {
-    sessionCwdSetter = setter;
-}
 
 /** 解析并校验目标目录：工具与 /cwd 命令共用，避免两处判定与文案漂移。 */
 export type ResolvedDir = { cwd: string } | { error: string };
@@ -85,11 +76,15 @@ export const cwdTool: ExecutableTool = {
             process.env.TUI_CWD = target;
             return ok(`已切换工作目录：${formatDisplayPath(target)}（仅本进程生效，未落盘）`);
         }
-        if (!sessionCwdSetter) {
+        // 按会话解析落盘入口：多宿主同进程时不会切到别人的会话上
+        const setter = getSessionCwdSetter(sessionId);
+        if (!setter) {
             // 有会话却不落盘会成为"假切换"：恢复后回退，别让模型误以为生效
-            return err("当前运行模式不支持切换会话目录（宿主未注入落盘入口）");
+            return err(hasSessionCapabilityProvider("setSessionCwd")
+                ? `会话 ${sessionId.slice(-8)} 不在本实例的运行时上下文里，无法切换工作目录`
+                : "当前运行模式不支持切换会话目录（宿主未注册落盘入口）");
         }
-        await sessionCwdSetter(sessionId, target);
+        await setter(target);
         return ok(`已切换工作目录：${formatDisplayPath(target)}`);
     },
 };

@@ -2,6 +2,7 @@ import path from "node:path";
 import os from "node:os";
 import { DEFAULT_MEMORY_USER_ID } from "../utils/runtime-paths.js";
 import { redirectLogsToFile } from "../host/runtime-context.js";
+import { readStdinText } from "../utils/stdin.js";
 
 export interface PrintArgs {
     prompt: string[];
@@ -48,15 +49,9 @@ export function parsePrintArgs(argv: string[]): PrintArgs {
     return args;
 }
 
-async function readStdin(): Promise<string> {
-    const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
-    return Buffer.concat(chunks).toString("utf8");
-}
-
 export async function runPrintCli(argv: string[]): Promise<void> {
     const args = parsePrintArgs(argv);
-    const prompt = (args.prompt.length > 0 ? args.prompt.join(" ") : await readStdin()).trim();
+    const prompt = (args.prompt.length > 0 ? args.prompt.join(" ") : await readStdinText()).trim();
     if (!prompt) throw new Error("请提供任务文本，或通过 stdin 输入任务");
 
     const restoreConsole = redirectLogsToFile();

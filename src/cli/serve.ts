@@ -6,7 +6,6 @@
  */
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { initializeSessionHostRuntime, LocalSessionHost } from "../host/session-host.js";
@@ -16,7 +15,7 @@ import { pushLiveEnd, pushLiveText, pushLiveThinking } from "../server/live-stre
 import { startHttpServer, type HttpServerHandle } from "../server/http-server.js";
 import { joinInputs, takeInputs } from "../server/pending-inputs.js";
 import { setJobCommentWriter } from "../tools/job-context.js";
-import { getStateDir, setStartupToolCwd } from "../utils/runtime-paths.js";
+import { expandHomePath, getStateDir, setStartupToolCwd } from "../utils/runtime-paths.js";
 import { discardPendingInput } from "../utils/tty-input.js";
 import { createUlid } from "../utils/ulid.js";
 
@@ -42,12 +41,6 @@ export interface ServeArgs {
     bind: string;
     cwd: string;
     token?: string;
-}
-
-function expandHome(value: string): string {
-    if (value === "~") return os.homedir();
-    if (value.startsWith("~/")) return path.join(os.homedir(), value.slice(2));
-    return value;
 }
 
 export function parseServeArgs(argv: string[]): ServeArgs {
@@ -78,7 +71,7 @@ export function parseServeArgs(argv: string[]): ServeArgs {
                 break;
             case "--cwd":
                 if (!value) throw new Error("--cwd 需要路径");
-                args.cwd = path.resolve(expandHome(value));
+                args.cwd = path.resolve(expandHomePath(value));
                 index += 1;
                 break;
             case "--token":

@@ -36,7 +36,6 @@ mock.module("../../src/services/chat-runtime.js", () => ({
 }));
 
 const { LocalSessionHost } = await import("../../src/host/session-host.js");
-const { setSessionControl, setSessionDirectory } = await import("../../src/control/runtime.js");
 
 let tmpDir: string;
 let originalStateDir: string | undefined;
@@ -65,8 +64,6 @@ afterEach(async () => {
     turnGate = null;
     turnGateSession = null;
     await agent.close();
-    setSessionControl(undefined);
-    setSessionDirectory(undefined);
     if (originalStateDir === undefined) delete process.env.ZBOT_STATE_DIR;
     else process.env.ZBOT_STATE_DIR = originalStateDir;
     fs.rmSync(tmpDir, { recursive: true, force: true });

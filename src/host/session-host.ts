@@ -29,12 +29,7 @@ import {
     type ClaimResult,
     type SessionControlHost,
 } from "../control/channel.js";
-import {
-    setPeerResultHistory,
-    setSessionControl,
-    setSessionDirectory,
-    type PeerResultRecord,
-} from "../control/runtime.js";
+import { registerSessionRuntime, type PeerResultRecord } from "../control/runtime.js";
 import type { PeerAcceptOutcome, PeerMessage, PeerResult } from "../control/protocol.js";
 import type { PeerOwnership } from "../control/registry.js";
 import { sortSessions } from "../utils/session-order.js";
@@ -126,6 +121,8 @@ export class LocalSessionHost implements SessionHost {
      * 这里只按它的决策做副作用（落盘、回传、抢互斥、跑回合）。
      */
     private readonly peerInbox = new PeerInbox();
+    /** 运行时能力注册的注销函数：close() 时按身份注销，避免留下指向已退出宿主的引用。 */
+    private readonly unregisterRuntime: () => void;
     private nextRequestId = 1;
     /**
      * 宿主启动目录：新建会话（未显式给 cwd）时的默认基准。
@@ -211,23 +208,27 @@ export class LocalSessionHost implements SessionHost {
             onReleased: (sessionId) => this.unloadSession(sessionId),
         };
         this.control = new SessionControl(host);
-        // 会话间工具通过进程级单例取通道与目录，必须在任何请求前就位
-        setSessionControl(this.control);
-        setSessionDirectory({
-            list: async (options = {}) => {
-                const sessions = await this.listSessions();
-                return sessions
-                    .filter(session => options.includeArchived || !session.archived)
-                    .map(session => ({
-                        sessionId: session.sessionId,
-                        ...(session.title ? { title: session.title } : {}),
-                        ...(session.archived ? { archived: true } : {}),
-                    }));
+        // 会话运行时能力按实例注册：引擎按 sessionId 解析到这一个是它负责的会话，
+        // 多宿主同进程时不互相覆盖；close() 时按身份注销。必须在任何请求前就位。
+        this.unregisterRuntime = registerSessionRuntime({
+            // 会话间工具由"正在跑回合的宿主"处理：活跃会话与已认领会话都算自己的
+            ownsSession: sessionId => this.activeSessions.has(sessionId) || this.control.isClaimed(sessionId),
+            control: this.control,
+            setSessionCwd: (sessionId, cwd) => this.setSessionCwd(sessionId, cwd),
+            directory: {
+                list: async (options = {}) => {
+                    const sessions = await this.listSessions();
+                    return sessions
+                        .filter(session => options?.includeArchived || !session.archived)
+                        .map(session => ({
+                            sessionId: session.sessionId,
+                            ...(session.title ? { title: session.title } : {}),
+                            ...(session.archived ? { archived: true } : {}),
+                        }));
+                },
+                wake: sessionId => this.wakeArchivedSession(sessionId),
             },
-            wake: sessionId => this.wakeArchivedSession(sessionId),
-        });
-        setPeerResultHistory({
-            recentResults: (sessionId, limit) => this.recentPeerResults(sessionId, limit),
+            recentPeerResults: (sessionId, limit) => this.recentPeerResults(sessionId, limit),
         });
     }
 
@@ -1386,6 +1387,8 @@ export class LocalSessionHost implements SessionHost {
         this.peerInbox.clear();
         // 释放全部 socket 与连接：让等待接管的实例能立刻认领
         this.control.close();
+        // 注销本实例的运行时能力：关闭后不该再有工具解析到这个宿主
+        this.unregisterRuntime();
         if (this.inflightTurns.size === 0) return;
         const inflight = Promise.allSettled([...this.inflightTurns]);
         const timeout = new Promise<void>(resolve => {

@@ -8,8 +8,8 @@
  */
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { expandHomePath } from "../utils/runtime-paths.js";
 import type { SessionHost } from "../host/session-host-types.js";
 import type { JobRunner } from "../jobs/runner.js";
 import type { JobStore } from "../jobs/store.js";
@@ -112,12 +112,6 @@ async function applyToBoundSessions(
     }
 }
 
-function expandHome(value: string): string {
-    if (value === "~") return os.homedir();
-    if (value.startsWith("~/")) return path.join(os.homedir(), value.slice(2));
-    return value;
-}
-
 function isDirectory(target: string): boolean {
     try {
         return fs.statSync(target).isDirectory();
@@ -155,7 +149,7 @@ function applyInputFields(target: JobInput, body: Record<string, unknown>): { ok
     if (typeof body.workspace === "string") {
         const raw = body.workspace.trim();
         if (!raw) return { error: "workspace 不能为空" };
-        const resolved = path.resolve(expandHome(raw));
+        const resolved = path.resolve(expandHomePath(raw));
         if (!isDirectory(resolved)) return { error: `工作目录不存在或不是目录: ${resolved}` };
         target.workspace = resolved;
     }
@@ -215,7 +209,7 @@ function parseCreateRequest(body: Record<string, unknown>): { input: JobInput; s
     if (!prompt) return { error: "prompt 必填" };
 
     const workspaceRaw = typeof body.workspace === "string" && body.workspace.trim() ? body.workspace.trim() : process.cwd();
-    const workspace = path.resolve(expandHome(workspaceRaw));
+    const workspace = path.resolve(expandHomePath(workspaceRaw));
     if (!isDirectory(workspace)) return { error: `工作目录不存在或不是目录: ${workspace}` };
 
     const input: JobInput = { prompt, workspace };

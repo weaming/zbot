@@ -17,6 +17,7 @@ import type { AgentEvent } from "../events/agent-events.js";
 import { EventLog } from "../events/event-log.js";
 import { listSavedSessionIds } from "../events/session-files.js";
 import { SessionReplay } from "../events/session-replay.js";
+import { readStdinText as readPipeStdin } from "../utils/stdin.js";
 import { SessionDigestReader } from "../host/summary.js";
 import { abbreviatePath } from "../format/path.js";
 import { describeOrigin } from "../format/session-origin.js";
@@ -521,11 +522,11 @@ export async function runSessionCli(argv: string[], io: SessionCliIO = {}): Prom
         case "delete":
             return runDelete(command, write);
         case "send":
-            return runSend(command, write, io.readStdin ?? readStdin, io);
+            return runSend(command, write, io.readStdin ?? readSessionStdin, io);
         case "queue":
             return runQueue(command, write);
         case "run":
-            return runSessionTask(command, write, io.readStdin ?? readStdin, io);
+            return runSessionTask(command, write, io.readStdin ?? readSessionStdin, io);
     }
 }
 
@@ -1196,6 +1197,11 @@ async function runQueue(command: QueueCommand, write: (text: string) => void): P
     }
 }
 
+/** 默认 stdin 读取：交互式终端下不等 stdin（没有正文应立刻报用法错误，而不是挂住进程）。 */
+function readSessionStdin(): Promise<string> {
+    return readPipeStdin({ tty: "empty" });
+}
+
 /** 会话摘要 + 真实创建时间（取首条事件 ts；Session.createdAt 是重放时刻，不能代表创建时间）。 */
 async function readSessionMeta(
     sessionId: string,
@@ -1497,12 +1503,4 @@ function isDirectory(target: string): boolean {
     } catch {
         return false;
     }
-}
-
-async function readStdin(): Promise<string> {
-    // 交互式终端下不等 stdin：没有正文时应立刻报用法错误，而不是挂住进程
-    if (process.stdin.isTTY) return "";
-    const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
-    return Buffer.concat(chunks).toString("utf8");
 }

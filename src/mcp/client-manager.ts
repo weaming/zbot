@@ -14,6 +14,8 @@ import { loadMcpServersConfig, resolveMcpOAuthConfig, type McpServerConfig, type
 import { McpOAuthClient } from "./oauth.js";
 
 import type { ExecutableTool } from "../tools/tool-interface.js";
+import type { McpNotice } from "../types/mcp.js";
+import { notifyMcpNotice, onSessionRuntimeRegistered } from "../control/runtime.js";
 
 const PERIODIC_SYNC_INTERVAL_MS = 15 * 1000;
 const RECONNECT_INITIAL_DELAY_MS = 5 * 1000;
@@ -41,45 +43,34 @@ interface McpClientContext {
     authError?: string;
 }
 
-/** TUI / 宿主展示的 MCP 通知（授权链接、连接结果） */
-type McpNoticeLevel = "info" | "warn" | "error";
-
-export interface McpNotice {
-    level: McpNoticeLevel;
-    server: string;
-    text: string;
-    /** 需要用户打开的授权链接 */
-    url?: string;
-}
-
 const activeContexts = new Map<string, McpClientContext>();
+/** 界面注册前积压的通知（TUI 启动阶段早于界面就绪）；按界面可用性补发。 */
 const pendingNotices: McpNotice[] = [];
-let noticeHandler: ((notice: McpNotice) => void) | null = null;
 let shutdownHookInstalled = false;
 
-/**
- * 注册通知处理器；注册时补发注册前积压的通知（TUI 启动阶段早于界面就绪）
- */
-export function setMcpNoticeHandler(handler: ((notice: McpNotice) => void) | null): void {
-    noticeHandler = handler;
-    if (!handler) return;
+export type { McpNotice };
 
+/** 有界面注册时补发积压通知：通知是会话无关的展示事件，走运行时注册表广播。 */
+onSessionRuntimeRegistered((caps) => {
+    if (!caps.notifyMcpNotice) return;
     while (pendingNotices.length > 0) {
-        handler(pendingNotices.shift()!);
+        const notice = pendingNotices.shift()!;
+        try {
+            caps.notifyMcpNotice(notice);
+        } catch (error) {
+            console.error(`⚠️ [MCP] 补发通知失败 (${notice.server}):`, error);
+        }
     }
-}
+});
 
 function emitNotice(notice: McpNotice): void {
     console.log(`[MCP:${notice.server}] ${notice.text}${notice.url ? ` ${notice.url}` : ""}`);
 
-    if (!noticeHandler) {
-        pendingNotices.push(notice);
-        // 界面注册前只保留最近若干条，避免无限堆积
-        while (pendingNotices.length > 20) pendingNotices.shift();
-        return;
-    }
+    if (notifyMcpNotice(notice) > 0) return;
 
-    noticeHandler(notice);
+    pendingNotices.push(notice);
+    // 界面注册前只保留最近若干条，避免无限堆积
+    while (pendingNotices.length > 20) pendingNotices.shift();
 }
 
 function isUnauthorizedError(error: any): boolean {

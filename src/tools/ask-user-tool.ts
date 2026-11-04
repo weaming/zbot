@@ -7,13 +7,12 @@
  */
 
 import {
-    canAskUser,
     CUSTOM_ANSWER_PREFIX,
-    getUserQuestionChannel,
     type UserAnswer,
     type UserQuestion,
     type UserQuestionOption,
 } from "../utils/user-question.js";
+import { canAskUser, getUserQuestionChannel, hasSessionCapabilityProvider } from "../control/runtime.js";
 import { createUlid } from "../utils/ulid.js";
 import { err, ok, type ExecutableTool } from "./tool-interface.js";
 import { toolCatalog } from "./tool-catalog.js";
@@ -79,9 +78,12 @@ const askUserTool: ExecutableTool = {
         required: ["questions"],
     },
     execute: async (args: AskUserArgs, signal?: AbortSignal) => {
-        const channel = getUserQuestionChannel();
         const sessionId = args.__sessionId;
+        const channel = getUserQuestionChannel(sessionId);
         if (!channel || !sessionId) {
+            if (sessionId && hasSessionCapabilityProvider("askUser")) {
+                return err(`会话 ${sessionId.slice(-8)} 不在本实例的运行时上下文里，没有可交互的用户；请直接按默认方案继续。`);
+            }
             return err("当前环境没有可交互的用户（提问通道未装配 / 缺少会话上下文），请直接按默认方案继续。");
         }
 
@@ -180,6 +182,6 @@ toolCatalog.registerLocalTools([askUserTool]);
  * 没人在场的进程里不下发，模型也就不会提无效的问题。
  */
 export function getAskUserToolNames(sessionId?: string): string[] {
-    if (!sessionId || !canAskUser()) return [];
+    if (!sessionId || !canAskUser(sessionId)) return [];
     return [askUserTool.name];
 }

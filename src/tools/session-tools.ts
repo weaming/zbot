@@ -18,9 +18,24 @@ import {
 import { describeOwnership } from "../control/registry.js";
 import { isCancelledStopReason } from "../control/protocol.js";
 import { shortSessionId } from "../utils/session-id.js";
-import { getPeerResultHistory, getSessionControl, getSessionDirectory } from "../control/runtime.js";
+import {
+    getPeerResultHistory,
+    getSessionControl,
+    getSessionDirectory,
+    hasSessionCapabilityProvider,
+} from "../control/runtime.js";
 import { err, ok, type ExecutableTool, type ToolExecutionResult } from "./tool-interface.js";
 import { toolCatalog } from "./tool-catalog.js";
+
+/** 会话间工具的控制通道：按 caller 会话严格解析，区分"进程没装配"与"会话不归本实例"。 */
+function requireControl(sessionId?: string): { control: SessionControl } | { error: ToolExecutionResult } {
+    const control = getSessionControl(sessionId);
+    if (control) return { control };
+    if (sessionId && hasSessionCapabilityProvider("control")) {
+        return { error: err(`会话 ${shortSessionId(sessionId)} 不在本实例的运行时上下文里，无法使用会话间工具`) };
+    }
+    return { error: err("会话间通信未启用") };
+}
 
 const SESSION_TOOL_NAMES = ["session_spawn", "session_send", "session_status", "session_close", "session_cancel", "session_wake"];
 
@@ -95,10 +110,11 @@ const sessionSpawnTool: ExecutableTool = {
         },
     },
     execute: async (args: SessionSpawnArgs) => {
-        const control = getSessionControl();
         const from = args.__sessionId;
-        if (!control) return err("会话间通信未启用");
         if (!from) return err("session_spawn 需要会话上下文（缺少 __sessionId）");
+        const resolvedControl = requireControl(from);
+        if ("error" in resolvedControl) return resolvedControl.error;
+        const control = resolvedControl.control;
 
         const title = (args.title ?? "").trim();
         const text = (args.text ?? "").trim();
@@ -176,17 +192,18 @@ const sessionSendTool: ExecutableTool = {
         required: ["session", "text"],
     },
     execute: async (args: SessionSendArgs, signal?: AbortSignal) => {
-        const control = getSessionControl();
         const from = args.__sessionId;
-        if (!control) return err("会话间通信未启用");
         if (!from) return err("session_send 需要会话上下文（缺少 __sessionId）");
+        const resolvedControl = requireControl(from);
+        if ("error" in resolvedControl) return resolvedControl.error;
+        const control = resolvedControl.control;
 
         const target = (args.session ?? "").trim();
         if (!target) return err("session 必填：填目标会话 id，可用末几位");
         const text = (args.text ?? "").trim();
         if (!text) return err("text 必填");
 
-        const resolved = await resolveSessionId(target);
+        const resolved = await resolveSessionId(target, {}, args.__sessionId);
         if (!resolved.ok) return err(resolved.error);
 
         const waitSeconds = normalizeWaitSeconds(args.wait_seconds);
@@ -253,9 +270,10 @@ const sessionStatusTool: ExecutableTool = {
         },
     },
     execute: async (args: SessionStatusArgs) => {
-        const control = getSessionControl();
-        if (!control) return err("会话间通信未启用");
         const caller = args.__sessionId;
+        const resolvedControl = requireControl(caller);
+        if ("error" in resolvedControl) return resolvedControl.error;
+        const control = resolvedControl.control;
 
         const target = (args.session ?? "").trim();
         if (!target) return describeAll(control, caller, args.include_result === true);
@@ -263,7 +281,7 @@ const sessionStatusTool: ExecutableTool = {
             return describeOne(control, caller ?? target, caller, args.include_result === true);
         }
 
-        const resolved = await resolveSessionId(target);
+        const resolved = await resolveSessionId(target, {}, args.__sessionId);
         if (!resolved.ok) return err(resolved.error);
         return describeOne(control, resolved.sessionId, caller, args.include_result === true);
     },
@@ -286,13 +304,14 @@ const sessionCloseTool: ExecutableTool = {
         required: ["session"],
     },
     execute: async (args: SessionCloseArgs) => {
-        const control = getSessionControl();
-        if (!control) return err("会话间通信未启用");
         if (!args.__sessionId) return err("session_close 需要会话上下文（缺少 __sessionId）");
+        const resolvedControl = requireControl(args.__sessionId);
+        if ("error" in resolvedControl) return resolvedControl.error;
+        const control = resolvedControl.control;
 
         const target = (args.session ?? "").trim();
         if (!target) return err("session 必填：填 session_spawn 返回的会话 id");
-        const resolved = await resolveSessionId(target);
+        const resolved = await resolveSessionId(target, {}, args.__sessionId);
         if (!resolved.ok) return err(resolved.error);
 
         const result = await control.closeSpawnedSession(resolved.sessionId);
@@ -319,13 +338,14 @@ const sessionCancelTool: ExecutableTool = {
         required: ["session"],
     },
     execute: async (args: SessionCancelArgs) => {
-        const control = getSessionControl();
-        if (!control) return err("会话间通信未启用");
         if (!args.__sessionId) return err("session_cancel 需要会话上下文（缺少 __sessionId）");
+        const resolvedControl = requireControl(args.__sessionId);
+        if ("error" in resolvedControl) return resolvedControl.error;
+        const control = resolvedControl.control;
 
         const target = (args.session ?? "").trim();
         if (!target) return err("session 必填：填子会话 id");
-        const resolved = await resolveSessionId(target);
+        const resolved = await resolveSessionId(target, {}, args.__sessionId);
         if (!resolved.ok) return err(resolved.error);
 
         const result = await control.cancelSpawnedSession(resolved.sessionId, { close: args.close === true });
@@ -359,15 +379,16 @@ const sessionWakeTool: ExecutableTool = {
         required: ["session"],
     },
     execute: async (args: SessionWakeArgs) => {
-        const control = getSessionControl();
         if (!args.__sessionId) return err("session_wake 需要会话上下文（缺少 __sessionId）");
-        if (!control) return err("会话间通信未启用");
+        const resolvedControl = requireControl(args.__sessionId);
+        if ("error" in resolvedControl) return resolvedControl.error;
+        const control = resolvedControl.control;
         const target = (args.session ?? "").trim();
         if (!target) return err("session 必填：填要恢复的归档会话 id");
 
-        const directory = getSessionDirectory();
+        const directory = getSessionDirectory(args.__sessionId);
         if (!directory?.wake) return err("当前环境未提供唤醒归档会话的能力（仅在 TUI 内可用）");
-        const resolved = await resolveSessionId(target, { includeArchived: true });
+        const resolved = await resolveSessionId(target, { includeArchived: true }, args.__sessionId);
         if (!resolved.ok) return err(resolved.error);
 
         try {
@@ -401,7 +422,7 @@ async function describeAll(
     caller?: string,
     includeResult = false,
 ): Promise<ToolExecutionResult> {
-    const directory = getSessionDirectory();
+    const directory = getSessionDirectory(caller);
     if (!directory) return err("当前环境没有会话目录（仅在 TUI 内可用）");
 
     const entries = await directory.list();
@@ -459,7 +480,7 @@ async function describeOne(
 
 /** 最近收到的会话间结果原文（include_result 时附带）。 */
 async function recentResultLines(sessionId: string): Promise<string[]> {
-    const history = getPeerResultHistory();
+    const history = getPeerResultHistory(sessionId);
     if (!history) return ["", "最近结果：本实例未装配结果历史"];
 
     const latest = (await history.recentResults(sessionId, 1)).at(-1);
@@ -482,8 +503,9 @@ async function recentResultLines(sessionId: string): Promise<string[]> {
 async function resolveSessionId(
     input: string,
     options: { includeArchived?: boolean } = {},
+    caller?: string,
 ): Promise<{ ok: true; sessionId: string } | { ok: false; error: string }> {
-    const directory = getSessionDirectory();
+    const directory = getSessionDirectory(caller);
     if (!directory) return { ok: true, sessionId: input };
 
     const entries = await directory.list({ includeArchived: options.includeArchived === true });
@@ -519,5 +541,5 @@ toolCatalog.registerLocalTools(SESSION_TOOLS);
  */
 export function getSessionToolNames(sessionId?: string): string[] {
     if (!sessionId) return [];
-    return getSessionControl() ? [...SESSION_TOOL_NAMES] : [];
+    return getSessionControl(sessionId) ? [...SESSION_TOOL_NAMES] : [];
 }

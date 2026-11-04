@@ -5,7 +5,7 @@ import embeddedIdentity from "./AGENTS.md" with { type: "text" };
 import { setEmbeddedIdentity } from "../skills/base-skill.js";
 import { getSessionLogFile, getStartupLogFile } from "../utils/state-paths.js";
 import { CONSOLE_TIMESTAMP_MARK } from "../utils/logger.js";
-import { setStartupToolCwd } from "../utils/runtime-paths.js";
+import { expandHomePath, setStartupToolCwd } from "../utils/runtime-paths.js";
 
 const DEFAULT_HOST_STATE_DIR = path.join(os.homedir(), ".zbot");
 const DEFAULT_HOST_SRC_ROOT = "src";
@@ -15,12 +15,6 @@ const STARTUP_LOG_KEEP_LINES = 100;
 const STARTUP_LOG_TRIM_INTERVAL_MS = 60_000;
 const LOG_TAIL_CHUNK_BYTES = 64 * 1024;
 
-function expandHome(value: string): string {
-    if (value === "~") return os.homedir();
-    if (value.startsWith("~/")) return path.join(os.homedir(), value.slice(2));
-    return value;
-}
-
 function isContainerPath(value: string | undefined): boolean {
     return !value || value.startsWith(CONTAINER_PATH_PREFIX);
 }
@@ -28,7 +22,7 @@ function isContainerPath(value: string | undefined): boolean {
 function resolveHostSrcRoot(): string {
     const configuredSrcRoot = process.env.TUI_SRC_ROOT || process.env.SRC_ROOT;
     if (configuredSrcRoot && !isContainerPath(configuredSrcRoot)) {
-        return path.resolve(expandHome(configuredSrcRoot));
+        return path.resolve(expandHomePath(configuredSrcRoot));
     }
 
     return path.join(os.homedir(), DEFAULT_HOST_SRC_ROOT);

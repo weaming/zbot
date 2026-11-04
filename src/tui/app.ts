@@ -86,7 +86,7 @@ import { isAskUserTool } from "./tool-block-parse.js";
 import { PanelFrame } from "./panel-frame.js";
 import { ShortcutPanel } from "./shortcut-panel.js";
 import { ModelPanel } from "./model-panel.js";
-import { setUserQuestionChannel } from "../utils/user-question.js";
+
 
 import { getWheelLogFile } from "../utils/state-paths.js";
 import { discardPendingInput } from "../utils/tty-input.js";
@@ -112,12 +112,12 @@ import {
     buildMcpStatusHelpText,
     defaultMcpSelection,
     getMcpServersStatus,
-    setMcpNoticeHandler,
     type McpNotice,
 } from "../mcp/client-manager.js";
+import { registerSessionRuntime } from "../control/runtime.js";
 import { isToolSearchEnabled } from "../tools/orchestrator/turn-request.js";
 import { McpPanel } from "./mcp-panel.js";
-import { formatDisplayPath, resolveExistingDir, setSessionCwdHandler } from "../tools/cwd-tool.js";
+import { formatDisplayPath, resolveExistingDir } from "../tools/cwd-tool.js";
 import {
     createMessageComponent,
     messageRenderKey,
@@ -229,6 +229,8 @@ export class ChatApp {
      * 这里只提供 tui/面板栈/重绘等窄接口。
      */
     private readonly questions: QuestionCoordinator;
+    /** 运行时能力注册的注销函数：退出时按身份注销，不留指向已退出前端的引用。 */
+    private readonly unregisterRuntime: () => void;
     /**
      * 会话归属快照（探测/节流/在途去重/面板期间轮询 + 展示文案都在 tracker 内）。
      * 面板与切换入口必须让用户看得见归属，这里只负责把它接上宿主能力。
@@ -400,6 +402,14 @@ export class ChatApp {
             },
         });
 
+        // 终端前端提供的能力：提问通道 + MCP 通知（会话无关的通知按注册表广播）
+        this.unregisterRuntime = registerSessionRuntime({
+            ownsSession: sessionId => this.store.currentSessionId === sessionId
+                || this.store.hasSessionView(sessionId)
+                || this.store.sessions.some(session => session.sessionId === sessionId),
+            askUser: (request, signal) => this.questions.ask(request, signal),
+            notifyMcpNotice: notice => this.handleMcpNotice(notice),
+        });
 
         this.modelMcp = new ModelMcpPanels({
             panels: this.panels,
@@ -467,8 +477,6 @@ export class ChatApp {
                 console.error("⚠️ [TUI] 处理后台任务完成通知失败:", error);
             }
         });
-        // 提问通道装配后 `ask_user` 才会下发给模型。
-        setUserQuestionChannel({ ask: (request, signal) => this.questions.ask(request, signal) });
     }
 
     /**
@@ -541,9 +549,6 @@ export class ChatApp {
         installTerminalExitGuard();
         this.tui.start();
 
-        // MCP 授权/连接通知：启动阶段积压的通知在注册时补发
-        setMcpNoticeHandler((notice) => this.handleMcpNotice(notice));
-
         this.renderStatusBar();
         try {
             await this.refreshSessions();
@@ -566,7 +571,6 @@ export class ChatApp {
         this.agent.onSessionCwdChanged = (sessionId, cwd) => {
             this.handleSessionCwdChanged(sessionId, cwd);
         };
-        setSessionCwdHandler((sessionId, cwd) => this.agent.setSessionCwd(sessionId, cwd));
         this.agent.onSessionWoken = sessionId => {
             void this.handleSessionWoken(sessionId);
         };
@@ -3073,6 +3077,7 @@ export class ChatApp {
     }
 
     forceShutdown(exitCode: number): void {
+        this.unregisterRuntime();
         this.stopSpinnerTimer();
         // 强退前同步清状态：微任务队列没有机会在 process.exit 之后继续跑
         herdrReporter.releaseSync();
@@ -3095,6 +3100,8 @@ export class ChatApp {
     private async exit(exitCode = 0): Promise<void> {
         if (this.exiting) return;
         this.exiting = true;
+        // 前端能力先下线：退出过程中不该再有工具把提问/通知投给这个实例
+        this.unregisterRuntime();
         this.unsubscribeBackgroundTaskCompletion();
         this.unsubscribeBackgroundTaskStart();
         // 先释放本实例持有的会话 socket：让等待中的其他实例能立刻接管

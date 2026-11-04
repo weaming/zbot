@@ -25,7 +25,6 @@ mock.module("../../src/services/chat-runtime.js", () => ({
 }));
 
 const { LocalSessionHost } = await import("../../src/host/session-host.js");
-const { setSessionControl, setSessionDirectory } = await import("../../src/control/runtime.js");
 const { runSessionCli } = await import("../../src/cli/session.js");
 const { REVIEW_PROMPT } = await import("../../src/commands/slash-command.js");
 
@@ -40,8 +39,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-    setSessionControl(undefined);
-    setSessionDirectory(undefined);
     if (previousStateDir === undefined) delete process.env.ZBOT_STATE_DIR;
     else process.env.ZBOT_STATE_DIR = previousStateDir;
     fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -115,8 +112,6 @@ describe("本地接管的命令路径", () => {
         await owner.claimSession(target);
         await owner.renameSession(target, "review-local");
         await owner.close();
-        setSessionControl(undefined);
-        setSessionDirectory(undefined);
 
         const startupDirs: string[] = [];
         const out = await runWithStartupDirs(["send", target, "/review 重点看并发", "--wait=5"], startupDirs);
@@ -128,6 +123,19 @@ describe("本地接管的命令路径", () => {
         expect(query).toContain("重点看并发");
     }, 20_000);
 
+    test("一次性宿主先认领再执行：/sessions 能解析本实例的控制通道与目录", async () => {
+        const owner = new LocalSessionHost();
+        const { sessionId } = await owner.createSession();
+        await owner.claimSession(sessionId);
+        await owner.renameSession(sessionId, "oneshot-sessions");
+        await owner.close();
+
+        const out = await cli(["send", sessionId, "/sessions", "--wait=5"]);
+
+        // 未认领前运行时注册表解析不到该会话；能列出目录说明接管路径先 claim 再执行
+        expect(out).toContain("oneshot-sessions");
+    }, 20_000);
+
     test("/clear confirm 保留会话自己的 cwd", async () => {
         const owner = new LocalSessionHost();
         const { sessionId: target } = await owner.createSession();
@@ -136,8 +144,6 @@ describe("本地接管的命令路径", () => {
         await owner.setSessionCwd(target, workdir);
         await owner.renameSession(target, "clear-cwd");
         await owner.close();
-        setSessionControl(undefined);
-        setSessionDirectory(undefined);
 
         expect(await cli(["send", target, "/clear confirm", "--wait=5"])).toContain("已清空");
         const probe = JSON.parse(await cli(["show", target, "--json"]));
@@ -153,8 +159,6 @@ describe("一次性宿主的模型设置", () => {
         // 先落盘一个事实（空会话只在内存里，换进程后就查不到）
         await owner.renameSession(target, "model-set-test");
         await owner.close();
-        setSessionControl(undefined);
-        setSessionDirectory(undefined);
 
         const savedModels = {
             chat: process.env.OPENAI_CHAT_MODEL,
@@ -198,8 +202,6 @@ describe("归档生命周期里的 send", () => {
 
         // 2) 模拟 TUI 退出：会话无人持有
         await owner.close();
-        setSessionControl(undefined);
-        setSessionDirectory(undefined);
 
         // 3) send /unarchive：本进程临时接管执行
         expect(await cli(["send", target, "/unarchive", "--wait=5"])).toContain("已取消归档");

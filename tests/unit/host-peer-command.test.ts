@@ -22,7 +22,6 @@ mock.module("../../src/services/chat-runtime.js", () => ({
 }));
 
 const { LocalSessionHost } = await import("../../src/host/session-host.js");
-const { setSessionControl, setSessionDirectory } = await import("../../src/control/runtime.js");
 const { REVIEW_PROMPT, SLASH_COMMAND_SPECS } = await import("../../src/commands/slash-command.js");
 
 let tmpDir: string;
@@ -50,8 +49,6 @@ beforeEach(async () => {
 
 afterEach(async () => {
     await agent.close();
-    setSessionControl(undefined);
-    setSessionDirectory(undefined);
     if (originalStateDir === undefined) delete process.env.ZBOT_STATE_DIR;
     else process.env.ZBOT_STATE_DIR = originalStateDir;
     if (originalModel === undefined) delete process.env.OPENAI_CHAT_MODEL;

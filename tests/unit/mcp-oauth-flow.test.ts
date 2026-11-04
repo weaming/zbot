@@ -14,9 +14,9 @@ import {
     closeAllMcpClients,
     getMcpServersStatus,
     initMcpClients,
-    setMcpNoticeHandler,
     type McpNotice,
 } from "../../src/mcp/client-manager.js";
+import { registerSessionRuntime } from "../../src/control/runtime.js";
 import { toolCatalog } from "../../src/tools/tool-catalog.js";
 
 interface MockState {
@@ -136,6 +136,8 @@ describe("mcp oauth 端到端", () => {
     const storePath = path.join(tmpRoot, "mock-oauth.json");
     const configPath = path.join(tmpRoot, "mcp-servers.yaml");
     const notices: McpNotice[] = [];
+/** 本文件注册的通知接收者（等价于"有一个终端界面在场"）。 */
+let unregisterNotices: (() => void) | undefined;
 
     beforeAll(() => {
         fs.writeFileSync(
@@ -155,14 +157,17 @@ describe("mcp oauth 端到端", () => {
     });
 
     afterAll(async () => {
-        setMcpNoticeHandler(null);
+        unregisterNotices?.();
         await closeAllMcpClients();
         mock.server.stop(true);
         fs.rmSync(tmpRoot, { recursive: true, force: true });
     });
 
     test("401 触发授权，回环回调完成 PKCE 换令牌后自动重连并同步工具", async () => {
-        setMcpNoticeHandler((notice) => notices.push(notice));
+        unregisterNotices = registerSessionRuntime({
+            ownsSession: () => false,
+            notifyMcpNotice: (notice) => notices.push(notice),
+        });
 
         await initMcpClients({ configPath }).catch(() => undefined);
 

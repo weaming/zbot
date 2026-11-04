@@ -39,7 +39,7 @@ mock.module("../../src/services/chat-runtime.js", () => ({
 }));
 
 const { LocalSessionHost } = await import("../../src/host/session-host.js");
-const { getSessionDirectory, setSessionControl, setSessionDirectory } = await import("../../src/control/runtime.js");
+const { getSessionDirectory } = await import("../../src/control/runtime.js");
 const { getSocketPath } = await import("../../src/control/paths.js");
 
 let tmpDir: string;
@@ -66,8 +66,6 @@ beforeEach(async () => {
 afterEach(async () => {
     turnGate = null;
     await agent.close();
-    setSessionControl(undefined);
-    setSessionDirectory(undefined);
     if (originalStateDir === undefined) delete process.env.ZBOT_STATE_DIR;
     else process.env.ZBOT_STATE_DIR = originalStateDir;
     fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -373,7 +371,8 @@ describe("结果到达即驱动请求方", () => {
 
         let wokenSession = "";
         agent.onSessionWoken = sessionId => { wokenSession = sessionId; };
-        const directory = getSessionDirectory();
+        // 目录是宿主级能力，按 caller 会话解析：spawned 已归档释放，不能拿它的 id 去问
+        const directory = getSessionDirectory(sessionA);
         expect(directory?.wake).toBeDefined();
         await directory!.wake!(spawned.sessionId);
 
