@@ -34,7 +34,7 @@ const control = new SessionControl({
                 });
             }, turnMs);
         }
-        return true;
+        return { status: "accepted" as const };
     },
     onOutbound: () => {},
     onResult: () => {},

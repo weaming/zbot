@@ -45,9 +45,9 @@ function makeHost(): Recorder {
         sessionCwd: async (sessionId) => `/cwd/${sessionId}`,
         onSessionSpawned: () => {},
         accept: (message) => {
-            if (host.busy.has(message.to)) return false;
+            if (host.busy.has(message.to)) return { status: "busy" as const };
             host.accepted.push(message);
-            return true;
+            return { status: "accepted" as const };
         },
         onOutbound: () => {},
         onResult: (requester, _message, result) => host.results.push({ requester, result }),
@@ -114,7 +114,7 @@ describe("不变量：结果四态互斥", () => {
         // 目标必须是本实例持有的会话，投递才走进程内路径
         await control.claim("sess-to");
 
-        const message = await control.send("sess-from", "sess-to", "干活", { expectResult: true });
+        const { message } = await control.send("sess-from", "sess-to", "干活", { expectResult: true });
         expect(control.awaitingResults("sess-from")).toBe(1);
 
         control.completeInbound("sess-to", message, { msgId: message.id, ok: true, text: "完成", stopReason: "stop" });
@@ -133,7 +133,7 @@ describe("不变量：结果四态互斥", () => {
         // 目标必须是本实例持有的会话，投递才走进程内路径
         await control.claim("sess-to");
 
-        const message = await control.send("sess-from", "sess-to", "干活", { expectResult: true });
+        const { message } = await control.send("sess-from", "sess-to", "干活", { expectResult: true });
         const result = { msgId: message.id, ok: true, text: "完成", stopReason: "stop" };
 
         control.completeInbound("sess-to", message, result);
@@ -240,7 +240,7 @@ describe("不变量：登记表不泄漏", () => {
         const control = makeControl(host);
         await control.claim("sess-to");
 
-        const message = await control.send("sess-from", "sess-to", "hi", { expectResult: true });
+        const { message } = await control.send("sess-from", "sess-to", "hi", { expectResult: true });
         const waiting = control.waitForResult(message.id, 60_000);
 
         control.close();

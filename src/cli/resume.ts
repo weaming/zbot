@@ -7,7 +7,6 @@
  * `session send`，避免两个进程同时写同一份事件日志。
  */
 
-import type { AgentEvent } from "../events/agent-events.js";
 import { listSavedSessionIds } from "../events/session-files.js";
 import { redirectLogsToFile } from "../host/runtime-context.js";
 import { prepareSessionResume } from "../host/session-resume.js";
@@ -15,6 +14,7 @@ import { LocalSessionHost, initializeSessionHostRuntime } from "../host/session-
 import type { SessionHost } from "../host/session-host-types.js";
 import { AppError } from "../utils/app-error.js";
 import { readStdinText } from "../utils/stdin.js";
+import { extractTurnResult, runHostTurn } from "./session-turn.js";
 import { resolveSessionIdFrom } from "./session.js";
 
 export interface ResumeArgs {
@@ -99,21 +99,8 @@ export function resolveResumeId(input: string): string {
     return resolveSessionIdFrom(input, listSavedSessionIds());
 }
 
-/** 从一个回合新落盘的事件里取最终 assistant 文本与工具调用次数。 */
-export function extractResumeResult(events: AgentEvent[]): { content: string; toolCalls: number } {
-    let content = "";
-    let toolCalls = 0;
-    for (const event of events) {
-        if (event.type !== "turn_message") continue;
-        const message = event.payload.message;
-        if (message.role !== "assistant") continue;
-        if (typeof message.content === "string" && message.content.trim()) {
-            content = message.content;
-        }
-        toolCalls += message.tool_calls?.length ?? 0;
-    }
-    return { content, toolCalls };
-}
+/** 保留旧导出名：测试与其他调用方沿用它。 */
+export const extractResumeResult = extractTurnResult;
 
 /** 交互式终端下等待 stdin 时给一行提示，避免用户以为命令卡住。 */
 const readStdin = (): Promise<string> => readStdinText({ hint: "从 stdin 读取续聊文本，^D 结束" });
@@ -132,7 +119,7 @@ export async function runResumeCli(args: ResumeArgs, io: ResumeCliIO = {}): Prom
         const injected = await io.createHost();
         try {
             await prepareSessionResume(injected.host, sessionId, { unarchive: args.unarchive });
-            await runTurnInHost(injected.host, sessionId, prompt, args, write);
+            await runHostTurn({ host: injected.host, sessionId, prompt, json: args.json, write });
         } finally {
             await injected.close();
         }
@@ -159,7 +146,7 @@ export async function runResumeCli(args: ResumeArgs, io: ResumeCliIO = {}): Prom
             runtimeReady.then(openRuntime, failRuntime);
             void runtimeReady.catch(() => undefined);
             await runtimeReady;
-            await runTurnInHost(host, sessionId, prompt, args, write);
+            await runHostTurn({ host, sessionId, prompt, json: args.json, write });
         } finally {
             await host.close().catch((error) => {
                 console.error("⚠️ [resume] 关闭会话宿主失败:", error);
@@ -170,46 +157,5 @@ export async function runResumeCli(args: ResumeArgs, io: ResumeCliIO = {}): Prom
         }
     } finally {
         restoreConsole();
-    }
-}
-
-/** 续聊一轮 + 输出；认领与宿主生命周期由调用方负责。 */
-async function runTurnInHost(
-    host: ResumeSessionHost,
-    sessionId: string,
-    prompt: string,
-    args: ResumeArgs,
-    write: (text: string) => void,
-): Promise<void> {
-    const events: AgentEvent[] = [];
-    const unsubscribe = host.subscribeEvents((id, event) => {
-        if (id === sessionId && event) events.push(event);
-    });
-    const abort = (code: 130 | 143) => () => {
-        process.exitCode = code;
-        void host.abortSession(sessionId);
-    };
-    const onSigint = abort(130);
-    const onSigterm = abort(143);
-    process.once("SIGINT", onSigint);
-    process.once("SIGTERM", onSigterm);
-    try {
-        const result = await host.sendMessage(sessionId, prompt);
-        unsubscribe();
-        const { content, toolCalls } = extractResumeResult(events);
-        if (args.json) {
-            write(`${JSON.stringify({
-                sessionId,
-                content,
-                aborted: result.aborted === true,
-                toolCalls,
-            })}\n`);
-        } else {
-            write(`${content}\n`);
-        }
-    } finally {
-        unsubscribe();
-        process.removeListener("SIGINT", onSigint);
-        process.removeListener("SIGTERM", onSigterm);
     }
 }

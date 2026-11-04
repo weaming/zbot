@@ -67,6 +67,10 @@ export interface AgentEventPayloads {
         expectResult?: boolean;
         /** 在回应哪条消息。 */
         replyTo?: string;
+        /** 入站消息因目标忙被排队：仅标记“入队”，是否已执行需结合后续 user_message/peer_result 判断。 */
+        queued?: boolean;
+        /** 排队截止时间（ISO）。 */
+        expiresAt?: string;
         createdAt: string;
     };
     /** 会话间结果事实源（UI 时间线专用）：对方回合的产出回传，或等待失败。 */

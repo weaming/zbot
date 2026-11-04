@@ -62,7 +62,7 @@ function makeHost(): SessionControlHost {
             return true;
         },
         accept: (message) => {
-            if (busy.has(message.to)) return false;
+            if (busy.has(message.to)) return { status: "busy" as const };
             accepted.push(message.id);
             const reply = replies.get(message.to);
             if (reply !== undefined) {
@@ -75,7 +75,7 @@ function makeHost(): SessionControlHost {
                     });
                 }, 0);
             }
-            return true;
+            return { status: "accepted" as const };
         },
         onOutbound: (_from, message) => {
             outbound.push(message);

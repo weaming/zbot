@@ -26,6 +26,8 @@ const SESSION_TOOL_NAMES = ["session_spawn", "session_send", "session_status", "
 
 /** `wait_seconds` 的上限：别让一次工具调用把回合占死太久。 */
 const MAX_WAIT_SECONDS = 600;
+/** 工具排队投递的有效期：短于结果等待上限，避免等待先被判丢失。 */
+const QUEUE_EXPIRES_MS = 270_000;
 
 interface SessionSpawnArgs {
     title?: string;
@@ -40,6 +42,7 @@ interface SessionSendArgs {
     expect_result?: boolean;
     wait_seconds?: number;
     reply_to?: string;
+    queue_if_busy?: boolean;
     __sessionId?: string;
 }
 
@@ -142,7 +145,8 @@ const sessionSendTool: ExecutableTool = {
         `wait_seconds>0 时本次调用就地等待对方这轮的结果（隐含 expect_result，最长 ${MAX_WAIT_SECONDS} 秒）：`,
         "命中即作为本次工具结果返回，超时先返回提示、结果到了仍会自动继续一轮。",
         "等待期间用户可以按 ⌃B 把等待放入后台，你会立刻拿到提示、继续做别的。",
-        "对方未认领或正在执行时本调用会直接失败——把错误告诉用户，稍后再试即可。",
+        "对方未认领或正在执行时默认直接失败；queue_if_busy=true 时改为排队（有界、按 msgId 幂等），",
+        "空闲后自动执行。",
         "回应别人的消息时用 reply_to 填那条消息的 id。",
     ].join(""),
     tags: ["chat"],
@@ -164,6 +168,10 @@ const sessionSendTool: ExecutableTool = {
                 ].join(""),
             },
             reply_to: { type: "string", description: "在回应哪条消息的 id（回信时填）" },
+            queue_if_busy: {
+                type: "boolean",
+                description: "目标正在执行时是否排队等待（默认 false：直接报错）。排队上限 8 条/会话。",
+            },
         },
         required: ["session", "text"],
     },
@@ -185,27 +193,32 @@ const sessionSendTool: ExecutableTool = {
         const expectResult = args.expect_result === true || waitSeconds > 0;
 
         try {
-            const message = await control.send(from, resolved.sessionId, text, {
+            const outcome = await control.send(from, resolved.sessionId, text, {
                 ...(expectResult ? { expectResult: true } : {}),
                 ...(args.reply_to ? { replyTo: args.reply_to } : {}),
+                ...(args.queue_if_busy === true
+                    ? { queueIfBusy: true, expiresAt: new Date(Date.now() + QUEUE_EXPIRES_MS).toISOString() }
+                    : {}),
             });
-            const sent = `已发送到会话 ${shortSessionId(resolved.sessionId)}（msgId=${message.id}）`;
+            const sent = outcome.queued
+                ? `已排队到会话 ${shortSessionId(resolved.sessionId)}（第 ${outcome.position ?? "?"} 位，msgId=${outcome.message.id}）`
+                : `已发送到会话 ${shortSessionId(resolved.sessionId)}（msgId=${outcome.message.id}）`;
             if (waitSeconds === 0) {
                 return ok(`${sent}${expectResult ? "，结果稍后自动回传" : ""}`);
             }
 
-            const outcome = await control.waitForResult(message.id, Math.round(waitSeconds * 1000), signal);
-            if (outcome.ok) return ok(formatResultText(resolved.sessionId, outcome.result));
-            if (outcome.reason === "timeout") {
+            const wait = await control.waitForResult(outcome.message.id, Math.round(waitSeconds * 1000), signal);
+            if (wait.ok) return ok(formatResultText(resolved.sessionId, wait.result));
+            if (wait.reason === "timeout") {
                 return ok(`${sent}，等待 ${waitSeconds}s 未见结果；结果到达后会自动继续，不要重复发送`);
             }
-            if (outcome.reason === "none") {
+            if (wait.reason === "none") {
                 return ok(`${sent}，结果已就绪，会在后续自动附加`);
             }
-            if (outcome.reason === "detached") {
+            if (wait.reason === "detached") {
                 return ok(`${sent}，等待已由用户放入后台：先继续手头的事，结果到达后会自动继续一轮`);
             }
-            if (outcome.reason === "aborted") return err(`${sent}，但等待结果被中止`);
+            if (wait.reason === "aborted") return err(`${sent}，但等待结果被中止`);
             return err(`${sent}，但结果已丢失（会话 ${shortSessionId(resolved.sessionId)} 不可达），不要重复发送`);
         } catch (error) {
             if (error instanceof PeerSendFailure) return err(error.message);
@@ -367,12 +380,12 @@ const sessionWakeTool: ExecutableTool = {
         if (!text) return ok(`已唤醒并认领会话 ${shortSessionId(resolved.sessionId)}；用 session_send 继续工作。`);
 
         try {
-            const message = await control.send(args.__sessionId, resolved.sessionId, text, {
+            const sent = await control.send(args.__sessionId, resolved.sessionId, text, {
                 expectResult: true,
                 ...(args.close !== false ? { closeOnResult: true } : {}),
             });
             return ok([
-                `已唤醒会话 ${shortSessionId(resolved.sessionId)} 并发送输入（msgId=${message.id}）。`,
+                `已唤醒会话 ${shortSessionId(resolved.sessionId)} 并发送输入（msgId=${sent.message.id}）。`,
                 "任务结果稍后会自动回传。",
                 ...(args.close === false ? ["收到结果后会话保持打开。"] : ["收到结果后会自动重新归档。"]),
             ].join("\n"));

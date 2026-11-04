@@ -15,6 +15,12 @@ zbot session archive <id>
 zbot session unarchive <id>
 zbot session delete <id> --json
 zbot session send <id> "跑一下测试" --wait=300
+zbot session send <id> "顺便修下 lint" --wait=300      # 目标忙时排队，回合结束后执行
+zbot session send <id> --cancel=<msgId>               # 撤销排队中的消息
+zbot session queue <id> --json                        # 查看排队中的消息
+zbot session run "跑测试并修 lint" --json          # 新建会话并立即执行（原子认领）
+zbot session show <id> --json --since=<seq>           # 事件级增量读取
+zbot session show <id> --json --lite                  # 精简视图（不含完整消息）
 zbot resume <id>                       # 载入旧会话，打开 TUI
 zbot resume <id> -p --json "继续修 lint"  # 无 UI 续聊一轮，输出最终结果
 ```
@@ -28,6 +34,61 @@ zbot resume <id> -p --json "继续修 lint"  # 无 UI 续聊一轮，输出最�
 `show` 默认最近 3 轮，`--turns N` 指定轮数，`--all` 全部；非 `--full` 时单条消息按 200 列截断，`--full` 输出完整正文（仍会剥掉终端控制序列）。
 
 所有子命令都支持 `--json`（`show`/`list`/`new`/`send`/`rename`/`archive`/`unarchive`/`delete`）。
+
+## 排队投递（send）
+
+目标会话正在跑回合时，`send` 默认**排队**而不是拒绝：消息落盘为 `peer_message`（带 `queued`），
+当前回合结束、会话空闲后自动执行本轮，结果照常回传。
+
+```sh
+zbot session send <id> "改完记得跑测试" --json
+# {"sessionId":"…","msgId":"…","delivered":true,"queued":true,"position":1,"expiresAt":"…"}
+zbot session send <id> "再补一条" --wait=300 --json   # 排队 + 执行都计入 --wait
+zbot session send <id> "紧急纠偏" --no-queue          # 忙时立即失败（旧行为）
+zbot session send <id> --cancel=<msgId> --json        # {"cancelled":true}
+zbot session queue <id> --json                        # 队列快照（position/msgId/from/queuedAt/expiresAt）
+```
+
+- **有界**：每会话最多 8 条排队；满了返回 `queue_full`（`delivered:false`），不静默丢。
+- **幂等**：`msgId` 由发送方生成；重复投递同一 `msgId` 不会重复执行，ack 仍返回 `queued`/已受理状态。
+- **超时**：`--expires=秒`（默认 270）是排队有效期，不是执行时限；到期未执行会回传
+  `stopReason:"expired"` 的结果，并从队列移除。
+- **取消**：`--cancel=<msgId>` 只对仍在排队的消息生效；已在执行返回 `cancelled:false, reason:"running"`。
+- **返回值**：`queued:false` 表示已在本轮执行；`queued:true` 表示已受理待执行；两者都 `delivered:true`。
+  等待结果时（`--wait`）统一按结果回传处理；取消/过期会得到 `ok:false` 的结果。
+- **边界**：队列在持有会话的进程内；宿主进程退出时队列随之消失（事件日志仍可复盘）。
+  跨进程可靠投递仍以 `--wait` 拿到明确结果为准，不做重启后自动重放。
+
+## 创建并执行（run）
+
+`session new` 只落 `session_created` 事件，不认领会话，因此随后 `session send` 会因为没有持有者而失败。
+`session run` 把「新建 → 认领 → 执行一轮 → 释放」合成一条命令，适合 AI 一次性派活：
+
+```sh
+zbot session run "跑测试并修掉失败用例" --title "修 CI" --cwd ~/src/infra --json
+# {"sessionId":"…","content":"…","aborted":false,"toolCalls":12}
+```
+
+- 与 `resume -p` 共用执行骨架；会话在命令结束后保留（可继续 `show` / `resume`）。
+- 认领是原子的：创建后立即 bind 控制 socket，其他实例无法并发认领，不存在双写竞态。
+- 失败语义同 `resume -p`：`--json` 输出结构化错误，退出码 0/1/130/143。
+- 需要「先建会话、稍后再派活」时仍用 `session new` + `resume`。
+
+## 增量读取（show）
+
+长会话不必每次取全量：
+
+```sh
+zbot session show <id> --json --since=1200      # 只取 seq > 1200 的事件（含 lastSeq，可直接续读）
+zbot session show <id> --json --after-turn=40   # 只取第 40 轮之后的回合
+zbot session show <id> --json --lite            # 回合只给摘要：messageCount/lastAssistant/toolNames
+zbot session show <id> --all --full --json      # 完整历史（原有能力）
+```
+
+- `--since` 切到**事件视图**：`{sessionId, lastSeq, events:[{seq,ts,type,summary}]}`，适合按游标轮询。
+- 回合视图（默认/`--turns`/`--all`/`--after-turn`）始终带顶层 `lastSeq` 与 `totalTurns`；
+  `--lite` 不含 `messages`，单条消息摘要在 300 字内截断。
+- 人类模式同样支持：`--since` 每个事件一行，`--lite` 每轮一行摘要。
 
 ## 恢复旧会话（resume）
 

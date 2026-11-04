@@ -13,10 +13,12 @@ import { isLocallyBound, PROCESS_INSTANCE_ID, probeOwnership, registerBound, rel
 import {
     encodeFrame,
     splitFrames,
+    type PeerAcceptOutcome,
     type PeerErrorCode,
     type PeerFrame,
     type PeerMessage,
     type PeerOwnerInfo,
+    type PeerQueuedEntry,
     type PeerResult,
 } from "./protocol.js";
 
@@ -29,10 +31,14 @@ export interface PeerServerHandlers {
     /** 是否正在跑 turn。 */
     isBusy(): boolean;
     /**
-     * 原子地受理一条入站消息：抢不到互斥返回 false（调用方据此回 busy）。
-     * 返回 true 表示消息已落地且本回合已启动，结果稍后由 pushResult 回传。
+     * 原子受理一条入站消息：accepted 立即执行，queued 已入队，full/busy 拒绝。
+     * 受理成功时结果稍后由 pushResult 回传。
      */
-    accept(message: PeerMessage): Promise<boolean> | boolean;
+    accept(message: PeerMessage): Promise<PeerAcceptOutcome> | PeerAcceptOutcome;
+    /** 撤销排队中的消息（只对仍在队列里的生效）。 */
+    cancelQueued?(msgId: string): { ok: true } | { ok: false; reason: "not_found" | "running" };
+    /** 当前排队快照（观测用）。 */
+    queueState?(): PeerQueuedEntry[];
     /** 协商释放：忙时返回 false，持有者只在空闲时放行。 */
     release(): Promise<boolean> | boolean;
     /** 断线重连后查询：done = 已就绪但未送达的结果，pending = 仍在处理中的 msgId。 */
@@ -202,6 +208,12 @@ export class PeerServer {
             case "query_pending":
                 this.handleQueryPending(socket, frame.id, frame.msgIds);
                 return;
+            case "queue_state":
+                writeFrame(socket, { type: "queue_state", id: frame.id, entries: this.handlers.queueState?.() ?? [] });
+                return;
+            case "cancel_queued":
+                this.handleCancelQueued(socket, frame.id, frame.msgId);
+                return;
             case "deliver":
                 await this.handleDeliver(socket, frame.id, frame.message);
                 return;
@@ -220,7 +232,18 @@ export class PeerServer {
             ...(title ? { title } : {}),
             busy: this.handlers.isBusy(),
             pending: this.deliveries.size,
+            queued: this.handlers.queueState?.().length ?? 0,
         };
+    }
+
+    private handleCancelQueued(socket: net.Socket, id: string, msgId: string): void {
+        const result = this.handlers.cancelQueued?.(msgId) ?? { ok: false as const, reason: "not_found" as const };
+        writeFrame(socket, {
+            type: "cancel_queued_result",
+            id,
+            ok: result.ok,
+            ...(result.ok ? {} : { reason: result.reason }),
+        });
     }
 
     private async handleRelease(socket: net.Socket, id: string): Promise<void> {
@@ -255,17 +278,23 @@ export class PeerServer {
         this.deliveries.set(message.id, { from: message.from, socket });
         this.evictDeliveries();
 
-        let accepted = false;
+        let outcome: PeerAcceptOutcome = { status: "busy" };
         try {
-            accepted = await this.handlers.accept(message);
+            outcome = await this.handlers.accept(message);
         } catch {
-            accepted = false;
+            outcome = { status: "busy" };
         }
 
-        if (!accepted) {
+        // 白名单：未知/旧式返回值一律按拒绝处理，不能误判成“已受理”
+        if (outcome.status !== "accepted" && outcome.status !== "queued") {
             this.deliveries.delete(message.id);
-            const error: PeerErrorCode = "busy";
+            const error: PeerErrorCode = outcome.status === "full" ? "queue_full" : "busy";
             writeFrame(socket, { type: "ack", id, ok: false, error });
+            return;
+        }
+
+        if (outcome.status === "queued") {
+            writeFrame(socket, { type: "ack", id, ok: true, queued: true, position: outcome.position });
             return;
         }
 

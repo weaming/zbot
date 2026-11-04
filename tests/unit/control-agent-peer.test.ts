@@ -409,7 +409,7 @@ describe("结果到达即驱动请求方", () => {
             let releaseTurn: (() => void) | undefined;
             turnGate = new Promise<void>(resolve => { releaseTurn = resolve; });
             turnGateSession = spawned.sessionId;
-            const sent = await agent.sessionControl.send(sessionA, spawned.sessionId, "运行可取消任务", {
+            const { message: sent } = await agent.sessionControl.send(sessionA, spawned.sessionId, "运行可取消任务", {
                 expectResult: true,
             });
             await waitFor(() => startedSessions.includes(spawned.sessionId));

@@ -46,7 +46,16 @@ async function run(argv: string[], stdinText = ""): Promise<string> {
 /** 造一个只认 who / deliver 的假会话服务端；用于验证 send 的投递与结果等待。 */
 function startFakePeer(
     sessionId: string,
-    options: { busy?: boolean; resultText?: string; replyWithResult?: boolean; resultOk?: boolean } = {},
+    options: {
+        busy?: boolean;
+        resultText?: string;
+        replyWithResult?: boolean;
+        resultOk?: boolean;
+        /** busy 时返回排队 ack（位次）。 */
+        queuePosition?: number;
+        queueEntries?: Array<Record<string, unknown>>;
+        cancelResult?: { ok: boolean; reason?: "not_found" | "running" };
+    } = {},
 ): Promise<void> {
     const socketPath = getSocketPath(sessionId);
     fs.mkdirSync(path.dirname(socketPath), { recursive: true });
@@ -65,8 +74,32 @@ function startFakePeer(
                     }));
                     continue;
                 }
+                if (frame.type === "queue_state") {
+                    socket.write(encodeFrame({ type: "queue_state", id: frame.id, entries: options.queueEntries ?? [] }));
+                    continue;
+                }
+                if (frame.type === "cancel_queued") {
+                    const result = options.cancelResult ?? { ok: true };
+                    socket.write(encodeFrame({
+                        type: "cancel_queued_result",
+                        id: frame.id,
+                        ok: result.ok,
+                        ...(result.reason ? { reason: result.reason } : {}),
+                    }));
+                    continue;
+                }
                 if (frame.type !== "deliver") continue;
                 if (options.busy) {
+                    if (options.queuePosition !== undefined) {
+                        socket.write(encodeFrame({
+                            type: "ack",
+                            id: frame.id,
+                            ok: true,
+                            queued: true,
+                            position: options.queuePosition,
+                        }));
+                        continue;
+                    }
                     socket.write(encodeFrame({ type: "ack", id: frame.id, ok: false, error: "busy" }));
                     continue;
                 }
@@ -111,8 +144,18 @@ describe("parseSessionArgs", () => {
             all: false,
             full: true,
             json: true,
+            lite: false,
+            turnsSpecified: true,
         });
         expect(parseSessionArgs(["show", "abc", "--turns=2"])).toMatchObject({ turns: 2 });
+        expect(parseSessionArgs(["show", "abc", "--since=1200"])).toMatchObject({ sinceSeq: 1200 });
+        expect(parseSessionArgs(["show", "abc", "--since=0"])).toMatchObject({ sinceSeq: 0 });
+        expect(parseSessionArgs(["show", "abc", "--after-turn=3", "--lite"]))
+            .toMatchObject({ afterTurn: 3, lite: true });
+        expect(() => parseSessionArgs(["show", "abc", "--since=1", "--after-turn=3"])).toThrow("不能同时使用");
+        expect(() => parseSessionArgs(["show", "abc", "--since=1", "--lite"])).toThrow("不能与 --lite 同用");
+        expect(() => parseSessionArgs(["show", "abc", "--since=1", "--turns=2"])).toThrow("不能与 --turns 同用");
+        expect(() => parseSessionArgs(["show", "abc", "--since", "12"])).toThrow("--since=N");
         expect(() => parseSessionArgs(["show"])).toThrow("zbot session show");
     });
 
@@ -139,9 +182,37 @@ describe("parseSessionArgs", () => {
             text: "帮我 看看",
             waitSeconds: undefined,
             json: false,
+            queue: true,
+            expiresSeconds: 270,
         });
         expect(parseSessionArgs(["send", "abc", "hi", "--wait"])).toMatchObject({ waitSeconds: 300 });
         expect(parseSessionArgs(["send", "abc", "hi", "--wait=12"])).toMatchObject({ waitSeconds: 12 });
+    });
+
+    test("send 支持排队开关、有效期与撤销", () => {
+        expect(parseSessionArgs(["send", "abc", "hi", "--no-queue", "--expires=60"]))
+            .toMatchObject({ queue: false, expiresSeconds: 60 });
+        expect(parseSessionArgs(["send", "abc", "--cancel=01MSG"]))
+            .toMatchObject({ cancelMsgId: "01MSG", text: "" });
+        expect(parseSessionArgs(["send", "abc", "--cancel=01MSG", "--json"])).toMatchObject({ json: true });
+        expect(() => parseSessionArgs(["send", "abc", "--cancel=01MSG", "多余正文"])).toThrow("--cancel 不需要正文");
+        expect(() => parseSessionArgs(["send", "abc", "hi", "--expires=0"])).toThrow("--expires");
+    });
+
+    test("queue 子命令解析", () => {
+        expect(parseSessionArgs(["queue", "abc"])).toEqual({ kind: "queue", id: "abc", json: false });
+        expect(parseSessionArgs(["queue", "abc", "--json"])).toMatchObject({ json: true });
+        expect(() => parseSessionArgs(["queue"])).toThrow("zbot session queue");
+        expect(() => parseSessionArgs(["queue", "abc", "--nope"])).toThrow("queue 不支持参数");
+    });
+
+    test("run 解析正文与标题/目录", () => {
+        expect(parseSessionArgs(["run", "跑测试"])).toEqual({ kind: "run", text: "跑测试", json: false });
+        expect(parseSessionArgs(["run", "跑测试", "--title", "修 CI", "--cwd=/tmp", "--json"]))
+            .toMatchObject({ text: "跑测试", title: "修 CI", cwd: "/tmp", json: true });
+        expect(parseSessionArgs(["run", "--", "-开头的正文"])).toMatchObject({ text: "-开头的正文" });
+        expect(() => parseSessionArgs(["run"])).toThrow("zbot session run");
+        expect(() => parseSessionArgs(["run", "hi", "--nope"])).toThrow("run 不支持参数");
     });
 
     test("未知子命令给出用法", () => {
@@ -239,11 +310,47 @@ describe("会话命令行端到端", () => {
         expect(payload).toMatchObject({ sessionId, ok: true, text: "做完了" });
     });
 
-    test("对方忙时 send 报可读错误", async () => {
+    test("对方忙时 --no-queue 报可读错误", async () => {
         const created = await run(["new", "--json"]);
         const { sessionId } = JSON.parse(created) as { sessionId: string };
         await startFakePeer(sessionId, { busy: true });
-        await expect(run(["send", sessionId, "hi", "--wait=5"])).rejects.toThrow("正在执行中");
+        await expect(run(["send", sessionId, "hi", "--wait=5", "--no-queue"])).rejects.toThrow("正在执行中");
+    });
+
+    test("对方忙时默认排队：返回 queued 与位次，可查队列与撤销", async () => {
+        const created = await run(["new", "--json"]);
+        const { sessionId } = JSON.parse(created) as { sessionId: string };
+        await startFakePeer(sessionId, {
+            busy: true,
+            queuePosition: 2,
+            queueEntries: [{
+                msgId: "01QUEUED",
+                from: "cli-1",
+                queuedAt: "2026-01-01T00:00:00.000Z",
+                position: 2,
+            }],
+        });
+
+        const queued = JSON.parse(await run(["send", sessionId, "追加指令", "--json"])) as Record<string, unknown>;
+        expect(queued).toMatchObject({ sessionId, delivered: true, queued: true, position: 2 });
+        expect(await run(["send", sessionId, "追加指令"])).toContain("已排队到");
+
+        const snapshot = JSON.parse(await run(["queue", sessionId, "--json"])) as Record<string, unknown>;
+        expect(snapshot).toMatchObject({ holding: true });
+        expect((snapshot.entries as unknown[])).toHaveLength(1);
+        expect(await run(["queue", sessionId])).toContain("#2 01QUEUED");
+
+        expect(JSON.parse(await run(["send", sessionId, "--cancel=01QUEUED", "--json"])))
+            .toMatchObject({ sessionId, msgId: "01QUEUED", cancelled: true });
+    });
+
+    test("撤销已在执行的消息返回 send_running", async () => {
+        const created = await run(["new", "--json"]);
+        const { sessionId } = JSON.parse(created) as { sessionId: string };
+        await startFakePeer(sessionId, { cancelResult: { ok: false, reason: "running" } });
+        const error = await run(["send", sessionId, "--cancel=01RUNNING"]).catch(item => item);
+        expect(error).toBeInstanceOf(SessionCliError);
+        expect((error as SessionCliError).code).toBe("send_running");
     });
 
     test("被持有时的写操作一律拒绝，且不落任何事件", async () => {
@@ -324,6 +431,50 @@ describe("会话命令行端到端", () => {
             expect(Object.prototype.hasOwnProperty.call(shown, key)).toBe(true);
         }
         expect(shown).toMatchObject({ status: "idle", holderPid: null, modelSelection: null });
+    });
+
+    test("show 增量读取：--since 事件视图、--lite 精简回合、lastSeq 游标", async () => {
+        const sessionId = "01M5ZJSHOWINCR0000000000001";
+        const eventsDir = path.join(tmpDir, "sessions", "events");
+        fs.mkdirSync(eventsDir, { recursive: true });
+        const line = (seq: number, event: Record<string, unknown>) =>
+            JSON.stringify({ seq, ts: "2026-10-28T00:00:00.000Z", sessionId, ...event });
+        fs.writeFileSync(path.join(eventsDir, `${sessionId}.jsonl`), [
+            line(1, { type: "session_created", payload: { cwd: tmpDir } }),
+            line(2, { type: "user_message", payload: { text: "第一问", turnId: "t1", trigger: "user" } }),
+            line(3, { type: "turn_message", payload: { turnId: "t1", message: { role: "assistant", content: "第一答" } } }),
+            line(4, { type: "turn_commit", payload: { turnId: "t1" } }),
+            line(5, { type: "user_message", payload: { text: "第二问", turnId: "t2", trigger: "user" } }),
+            line(6, { type: "turn_message", payload: { turnId: "t2", message: { role: "assistant", content: "第二答" } } }),
+            line(7, { type: "turn_commit", payload: { turnId: "t2" } }),
+        ].join("\n") + "\n");
+
+        const incremental = JSON.parse(await run(["show", sessionId, "--json", "--since=4"])) as Record<string, any>;
+        expect(incremental.lastSeq).toBe(7);
+        expect(incremental.events.map((event: any) => event.seq)).toEqual([5, 6, 7]);
+        expect(incremental.events[0].summary.text).toBe("第二问");
+
+        // 没有新事件时不报错，lastSeq 仍可续读
+        const empty = JSON.parse(await run(["show", sessionId, "--json", "--since=7"])) as Record<string, any>;
+        expect(empty.events).toEqual([]);
+        expect(empty.lastSeq).toBe(7);
+
+        const full = JSON.parse(await run(["show", sessionId, "--json"])) as Record<string, any>;
+        expect(full.lastSeq).toBe(7);
+        expect(full.totalTurns).toBe(2);
+
+        const lite = JSON.parse(await run(["show", sessionId, "--json", "--lite", "--all"])) as Record<string, any>;
+        expect(lite.turnDetails[0]).toMatchObject({ messageCount: 2, lastAssistant: "第一答" });
+        expect(lite.turnDetails[0].messages).toBeUndefined();
+
+        // 回合游标：只返回第 1 轮之后的回合
+        const afterTurn = JSON.parse(await run(["show", sessionId, "--json", "--after-turn=1"])) as Record<string, any>;
+        expect(afterTurn.turnDetails.map((turn: any) => turn.index)).toEqual([2]);
+
+        const human = await run(["show", sessionId, "--since=5"]);
+        expect(human).toContain("#6");
+        expect(human).not.toContain("#5 ");
+        expect(await run(["show", sessionId, "--lite"])).toContain("assistant: 第二答");
     });
 
     test("--full 也剥掉控制序列，未知 role 不抛裸 JS 错误", async () => {

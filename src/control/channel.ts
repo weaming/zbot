@@ -14,13 +14,21 @@
 import { PeerClientPool, PeerConnectError, requestOnce } from "./client.js";
 import { OutboxLedger, type WaitOutcome } from "./outbox-ledger.js";
 import { getSocketPath } from "./paths.js";
-import { createPeerMessage, isCancelledStopReason, type PeerMessage, type PeerResult } from "./protocol.js";
+import {
+    createFrameId,
+    createPeerMessage,
+    isCancelledStopReason,
+    type PeerAcceptOutcome,
+    type PeerMessage,
+    type PeerQueuedEntry,
+    type PeerResult,
+} from "./protocol.js";
 import { listOwnership, probeOwnership, type PeerOwnership } from "./registry.js";
 import { PeerServer } from "./server.js";
 import type { SessionOrigin } from "../types/session.js";
 
 /** `session_send` 的失败原因：只有 unreachable 表示目标不在线，busy 由调用方决定是否重试。 */
-export type PeerSendError = "unreachable" | "busy" | "internal";
+export type PeerSendError = "unreachable" | "busy" | "queue_full" | "internal";
 
 export class PeerSendFailure extends Error {
     constructor(
@@ -30,6 +38,13 @@ export class PeerSendFailure extends Error {
         super(message);
         this.name = "PeerSendFailure";
     }
+}
+
+/** 投递结果：queued 表示目标忙、消息已排队，等待空闲后执行。 */
+export interface PeerSendOutcome {
+    message: PeerMessage;
+    queued: boolean;
+    position?: number;
 }
 
 export type ClaimResult =
@@ -64,10 +79,14 @@ export interface SessionControlHost {
     /** 中止本实例管理的子会话；close=true 时等待当前 turn 收尾后归档并释放。 */
     cancelSpawnedSession?(sessionId: string, close: boolean): Promise<boolean>;
     /**
-     * 原子受理一条入站消息：抢不到互斥则返回 false（通道据此回 busy，且不落任何事实）。
-     * 实现方负责落盘与启动回合；回合结束后调用 completeInbound 回传结果。
+     * 原子受理一条入站消息：accepted 立即执行，queued 入队（忙时排队投递），
+     * full/busy 拒绝且不落任何事实。实现方负责落盘与启动回合。
      */
-    accept(message: PeerMessage): Promise<boolean> | boolean;
+    accept(message: PeerMessage): Promise<PeerAcceptOutcome> | PeerAcceptOutcome;
+    /** 撤销排队中的消息（只对仍在队列里的生效）。 */
+    cancelQueued?(sessionId: string, msgId: string): { ok: true } | { ok: false; reason: "not_found" | "running" };
+    /** 指定会话的排队快照（who / queue_state 观测用）。 */
+    queueState?(sessionId: string): PeerQueuedEntry[];
     /** 出站消息已成功投递（落时间线用）。 */
     onOutbound(from: string, message: PeerMessage): void;
     /** 结果到达请求者会话：已进结果队列，宿主负责落时间线与提示。 */
@@ -160,7 +179,11 @@ export class SessionControl {
             {
                 title: () => this.host.title(sessionId),
                 isBusy: () => this.closingSpawned.has(sessionId) || this.host.isBusy(sessionId),
-                accept: (message) => this.closingSpawned.has(sessionId) ? false : this.host.accept(message),
+                accept: (message) => this.closingSpawned.has(sessionId)
+                    ? { status: "busy" as const }
+                    : this.host.accept(message),
+                cancelQueued: (msgId) => this.host.cancelQueued?.(sessionId, msgId) ?? { ok: false, reason: "not_found" },
+                queueState: () => this.host.queueState?.(sessionId) ?? [],
                 release: () => {
                     if (this.host.isBusy(sessionId)) return false;
                     this.servers.delete(sessionId);
@@ -355,27 +378,38 @@ export class SessionControl {
     // ── 消息 ────────────────────────────────────────────────────
 
     /**
-     * 发一条消息。目标不可达或正忙时抛 PeerSendFailure（不排队、不重试）。
+     * 发一条消息。目标不可达时抛 PeerSendFailure；忙时按 queueIfBusy 决定排队还是报错。
      * `expect_result` 时结果稍后自动回传，进请求者的结果队列。
      */
     async send(
         from: string,
         to: string,
         text: string,
-        options: { expectResult?: boolean; replyTo?: string; closeOnResult?: boolean } = {},
-    ): Promise<PeerMessage> {
+        options: {
+            expectResult?: boolean;
+            replyTo?: string;
+            closeOnResult?: boolean;
+            queueIfBusy?: boolean;
+            expiresAt?: string;
+            /** 固定消息 id：重试同一投递时复用，服务端按 msgId 幂等。 */
+            messageId?: string;
+        } = {},
+    ): Promise<PeerSendOutcome> {
         if (from === to) throw new PeerSendFailure("internal", "不能给自己发消息");
         if (this.closingSpawned.has(to)) {
             throw new PeerSendFailure("busy", `会话 ${to} 正在取消/关闭，请稍后重试`);
         }
 
         const message = createPeerMessage({
+            ...(options.messageId ? { id: options.messageId } : {}),
             from,
             to,
             text,
             ...(options.replyTo ? { replyTo: options.replyTo } : {}),
             ...(options.expectResult ? { expectResult: true } : {}),
             ...(options.closeOnResult ? { closeOnResult: true } : {}),
+            ...(options.queueIfBusy ? { queueIfBusy: true } : {}),
+            ...(options.expiresAt ? { expiresAt: options.expiresAt } : {}),
         });
 
         if (message.expectResult) {
@@ -383,22 +417,34 @@ export class SessionControl {
             this.outbox.addAwaiting({ msgId: message.id, requester: from, target: to, message });
         }
 
+        let queued = false;
+        let position: number | undefined;
         try {
             if (this.servers.has(to)) {
                 // 同进程直投：不经过 socket，省一次序列化与连接
                 this.localInbound.add(message.id);
-                let accepted = false;
+                let outcome: PeerAcceptOutcome = { status: "busy" };
                 try {
-                    accepted = await this.host.accept(message);
+                    outcome = await this.host.accept(message);
                 } catch {
-                    accepted = false;
+                    outcome = { status: "busy" };
                 }
-                if (!accepted) {
+                // 白名单：未知/旧式返回值一律按忙处理，不能误判成“已受理”
+                if (outcome.status !== "accepted" && outcome.status !== "queued") {
                     this.localInbound.delete(message.id);
-                    throw new PeerSendFailure("busy", `会话 ${to} 正在执行中，请稍后重试`);
+                    throw new PeerSendFailure(
+                        outcome.status === "full" ? "queue_full" : "busy",
+                        outcome.status === "full"
+                            ? `会话 ${to} 的排队已满，请稍后重试`
+                            : `会话 ${to} 正在执行中，请稍后重试`,
+                    );
                 }
+                queued = outcome.status === "queued";
+                if (outcome.status === "queued") position = outcome.position;
             } else {
-                await this.deliverRemote(to, message);
+                const remote = await this.deliverRemote(to, message);
+                queued = remote.queued;
+                position = remote.position;
             }
         } catch (error) {
             if (message.expectResult) this.outbox.removeAwaiting(message.id);
@@ -407,7 +453,31 @@ export class SessionControl {
 
         if (message.expectResult) this.startExpectationTimeout(from, message, to);
         this.host.onOutbound(from, message);
-        return message;
+        return { message, queued, ...(position !== undefined ? { position } : {}) };
+    }
+
+    /** 撤销排队中的消息；跨进程走 socket，同进程直接问宿主。 */
+    async cancelQueued(
+        sessionId: string,
+        msgId: string,
+    ): Promise<{ ok: boolean; reason?: "not_found" | "running" }> {
+        if (this.servers.has(sessionId)) {
+            return this.host.cancelQueued?.(sessionId, msgId) ?? { ok: false, reason: "not_found" };
+        }
+        const reply = await requestOnce(getSocketPath(sessionId), {
+            type: "cancel_queued",
+            id: createFrameId(),
+            msgId,
+        });
+        if (reply.type !== "cancel_queued_result") return { ok: false, reason: "not_found" };
+        return { ok: reply.ok, ...(reply.reason ? { reason: reply.reason } : {}) };
+    }
+
+    /** 读排队快照；跨进程走 socket，同进程直接问宿主。 */
+    async queueState(sessionId: string): Promise<PeerQueuedEntry[]> {
+        if (this.servers.has(sessionId)) return this.host.queueState?.(sessionId) ?? [];
+        const reply = await requestOnce(getSocketPath(sessionId), { type: "queue_state", id: createFrameId() });
+        return reply.type === "queue_state" ? reply.entries : [];
     }
 
     /**
@@ -521,7 +591,7 @@ export class SessionControl {
 
     // ── 内部 ────────────────────────────────────────────────────
 
-    private async deliverRemote(to: string, message: PeerMessage): Promise<void> {
+    private async deliverRemote(to: string, message: PeerMessage): Promise<{ queued: boolean; position?: number }> {
         let reply;
         try {
             reply = await this.pool.deliver(to, message);
@@ -536,9 +606,14 @@ export class SessionControl {
             throw new PeerSendFailure("internal", `会话 ${to} 返回了非预期的应答`);
         }
         if (!reply.ok) {
+            if (reply.error === "queue_full") throw new PeerSendFailure("queue_full", `会话 ${to} 的排队已满，请稍后重试`);
             if (reply.error === "busy") throw new PeerSendFailure("busy", `会话 ${to} 正在执行中，请稍后重试`);
             throw new PeerSendFailure("unreachable", `会话 ${to} 拒绝了消息（${reply.error}）`);
         }
+        return {
+            queued: reply.queued === true,
+            ...(reply.position !== undefined ? { position: reply.position } : {}),
+        };
     }
 
     /** 向持有者发起协商释放；持有者忙或无应答都算失败（不夺权）。 */

@@ -111,7 +111,7 @@ function createHost(sessionId: string) {
     const control = new SessionControl({
         title: () => "parent",
         isBusy: () => false,
-        accept: () => true,
+        accept: () => ({ status: "accepted" as const }),
         onOutbound: () => {},
         onResult: (requester, message, result) => state.results.push({ requester, message, result }),
         onLost: (requester, msgIds, target) => state.lost.push({ requester, msgIds, target }),
@@ -169,7 +169,7 @@ describe("跨进程归属", () => {
 
 describe("跨进程消息与结果回传", () => {
     test("发消息到另一进程并拿回结果（结果进请求者队列）", async () => {
-        const message = await parent.control.send(SESSION_PARENT, SESSION_CHILD, "你好", { expectResult: true });
+        const { message } = await parent.control.send(SESSION_PARENT, SESSION_CHILD, "你好", { expectResult: true });
 
         expect(parent.control.awaitingResults(SESSION_PARENT)).toBe(1);
 
@@ -195,7 +195,7 @@ describe("跨进程消息与结果回传", () => {
 
     test("阻塞等待时结果直接返回，不入请求者队列", async () => {
         const resultsBefore = parent.state.results.length;
-        const message = await parent.control.send(SESSION_PARENT, SESSION_CHILD, "快点", { expectResult: true });
+        const { message } = await parent.control.send(SESSION_PARENT, SESSION_CHILD, "快点", { expectResult: true });
 
         const outcome = await parent.control.waitForResult(message.id, 5_000);
 
@@ -208,7 +208,7 @@ describe("跨进程消息与结果回传", () => {
     });
 
     test("等待超时只解除等待，结果照旧进队列", async () => {
-        const message = await parent.control.send(SESSION_PARENT, SESSION_CHILD, "慢慢来", { expectResult: true });
+        const { message } = await parent.control.send(SESSION_PARENT, SESSION_CHILD, "慢慢来", { expectResult: true });
 
         expect(await parent.control.waitForResult(message.id, 1)).toEqual({ ok: false, reason: "timeout" });
 

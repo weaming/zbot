@@ -52,9 +52,9 @@ function makeHandlers(overrides: Partial<PeerServerHandlers> = {}): RecordingHan
         title: () => "会话一号",
         isBusy: () => state.busy,
         accept: (message) => {
-            if (state.busy) return false;
+            if (state.busy) return { status: "busy" as const };
             state.accepted.push(message.id);
-            return true;
+            return { status: "accepted" as const };
         },
         release: () => {
             if (state.busy) return false;

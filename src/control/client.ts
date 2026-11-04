@@ -96,6 +96,16 @@ export class PeerConnection {
         return reply;
     }
 
+    /** 撤销排队中的消息。 */
+    cancelQueued(msgId: string): Promise<PeerReply> {
+        return this.request({ type: "cancel_queued", id: createFrameId(), msgId });
+    }
+
+    /** 读取持有者的排队快照。 */
+    queueState(): Promise<PeerReply> {
+        return this.request({ type: "queue_state", id: createFrameId() });
+    }
+
     /** 可以安全回收：无等待中的应答、无 pending 结果，且空闲超过阈值。 */
     isIdle(now: number, idleMs: number): boolean {
         return this.waiters.size === 0 && this.pending.size === 0 && now - this.lastUsedAt > idleMs;

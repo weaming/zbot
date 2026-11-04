@@ -35,7 +35,12 @@ import {
     setSessionDirectory,
     type PeerResultRecord,
 } from "../control/runtime.js";
-import type { PeerMessage, PeerResult } from "../control/protocol.js";
+import type {
+    PeerAcceptOutcome,
+    PeerMessage,
+    PeerQueuedEntry,
+    PeerResult,
+} from "../control/protocol.js";
 import type { PeerOwnership } from "../control/registry.js";
 import { sortSessions } from "../utils/session-order.js";
 import { createUlid } from "../utils/ulid.js";
@@ -77,6 +82,12 @@ const CLOSE_FLUSH_TIMEOUT_MS = 3_000;
 const CANCEL_TURN_TIMEOUT_MS = 30_000;
 /** 回查会话间结果时扫描的日志尾部窗口：结果事件稀疏，多读一点免得漏。 */
 const PEER_RESULT_SCAN_EVENTS = 2_000;
+/** 每会话排队投递上限：满了回 queue_full，不静默丢消息。 */
+const MAX_QUEUED_PEER_MESSAGES = 8;
+/** msgId 幂等窗口：近期受理/排队过的消息不再重复执行。 */
+const MAX_SEEN_PEER_MESSAGES = 512;
+/** 已完成结果缓存上限：只服务重推，不追全历史。 */
+const MAX_COMPLETED_PEER_RESULTS = 64;
 
 /** 初始化 TUI 所需的技能和 MCP 连接。 */
 export async function initializeSessionHostRuntime(
@@ -93,6 +104,17 @@ interface RuntimeReloadResult {
     skillCount: number;
     mcpServerCount: number;
     mcpToolCount: number;
+}
+
+/** 排队等待执行的入站消息。 */
+interface QueuedPeerMessage {
+    message: PeerMessage;
+    queuedAt: string;
+}
+
+/** 幂等键：同一会话内同一 msgId 才算同一条消息。 */
+function peerMessageKey(message: PeerMessage): string {
+    return `${message.to}:${message.id}`;
 }
 
 export class LocalSessionHost implements SessionHost {
@@ -112,6 +134,15 @@ export class LocalSessionHost implements SessionHost {
     private readonly cancellingSessions = new Set<string>();
     /** 已进入退出流程：不再接受新的驱动回合（结果留在队列里即可）。 */
     private isClosing = false;
+    /** 每会话的有界排队投递队列（FIFO）。 */
+    private readonly peerQueues = new Map<string, QueuedPeerMessage[]>();
+    /**
+     * msgId → 受理状态：重复投递同一条消息时按原状态应答，避免重复执行。
+     * Map 保序，超上限时淘汰最早的一条。
+     */
+    private readonly seenPeerMessages = new Map<string, "accepted" | "queued" | "done">();
+    /** 已完成的入站消息结果：重复投递同一 msgId 时重推结果而不是重复执行。 */
+    private readonly completedPeerResults = new Map<string, PeerResult>();
     private nextRequestId = 1;
     /**
      * 宿主启动目录：新建会话（未显式给 cwd）时的默认基准。
@@ -170,6 +201,8 @@ export class LocalSessionHost implements SessionHost {
             },
             cancelSpawnedSession: (sessionId, close) => this.cancelSpawnedSession(sessionId, close),
             accept: (message) => this.acceptPeerMessage(message),
+            cancelQueued: (sessionId, msgId) => this.cancelQueuedPeerMessage(sessionId, msgId),
+            queueState: (sessionId) => this.peerQueueState(sessionId),
             onOutbound: (from, message) => {
                 void this.recordPeerMessage(from, message, "out").catch((error) => {
                     console.error("⚠️ [host] 会话间消息落盘失败:", error);
@@ -284,6 +317,8 @@ export class LocalSessionHost implements SessionHost {
     }
 
     releaseSession(sessionId: string, options: { cause?: SessionReleaseCause } = {}): void {
+        this.dropAllQueuedPeerMessages(sessionId);
+        this.forgetSessionPeerResults(sessionId);
         this.control.release(sessionId);
         this.unloadSession(sessionId, options.cause ?? "peer");
     }
@@ -322,15 +357,44 @@ export class LocalSessionHost implements SessionHost {
     }
 
     /**
-     * 受理一条入站消息：先原子占住会话互斥（抢不到即忙，不落任何事实），
-     * 再落盘时间线并启动本回合；回合结束时把最终输出回传给发起方。
+     * 受理一条入站消息：先原子占住会话互斥，抢不到时按 queueIfBusy 入队或回 busy。
+     * 排队消息在回合结束后由 drainPeerQueue 依次执行；msgId 幂等，重复投递不会重复执行。
      */
-    private async acceptPeerMessage(message: PeerMessage): Promise<boolean> {
+    private async acceptPeerMessage(message: PeerMessage): Promise<PeerAcceptOutcome> {
         const sessionId = message.to;
+        const key = peerMessageKey(message);
+        const seen = this.seenPeerMessages.get(key);
+        if (seen === "queued") {
+            const position = this.peerQueueState(sessionId).find(entry => entry.msgId === message.id)?.position;
+            // 仍在队列里就返回原位次；已出队说明正在执行（或刚执行完）
+            return position !== undefined ? { status: "queued", position } : { status: "accepted" };
+        }
+        if (seen === "accepted") return { status: "accepted" };
+        if (seen === "done") {
+            const completed = this.completedPeerResults.get(key);
+            if (completed) {
+                // 客户端重试用同一 msgId：把上次结果重推一份，不重复执行
+                try {
+                    this.control.completeInbound(sessionId, message, completed);
+                } catch (error) {
+                    console.error("⚠️ [host] 重推已完成消息结果失败:", error);
+                }
+                return { status: "accepted" };
+            }
+            // 结果缓存已淘汰：宁可重执一次，也不能返回一个永远等不到结果的 accepted
+            this.forgetPeerMessage(key);
+        }
+
+        // 同步占位：同一 msgId 的并发重投只有第一个能继续，其余按已受理/已排队应答
+        this.rememberPeerMessage(key, "accepted");
         try {
             this.beginSessionOperation(sessionId);
         } catch {
-            return false;
+            if (message.queueIfBusy !== true) {
+                this.forgetPeerMessage(key);
+                return { status: "busy" };
+            }
+            return this.enqueuePeerMessage(sessionId, message);
         }
 
         try {
@@ -338,12 +402,176 @@ export class LocalSessionHost implements SessionHost {
             await this.requireActiveSession(sessionId);
             await this.recordPeerMessage(sessionId, message, "in");
         } catch (error) {
+            this.forgetPeerMessage(key);
             this.endSessionOperation(sessionId);
             throw error;
         }
 
         this.trackTurn(sessionId, this.runPeerTurn(sessionId, message));
-        return true;
+        return { status: "accepted" };
+    }
+
+    /** 忙时入队：同步占位后落盘，失败回滚，避免并发投递互相覆盖。 */
+    private async enqueuePeerMessage(sessionId: string, message: PeerMessage): Promise<PeerAcceptOutcome> {
+        const queue = this.peerQueues.get(sessionId) ?? [];
+        if (queue.length >= MAX_QUEUED_PEER_MESSAGES) {
+            // 满队列也要回滚占位：否则同 msgId 重投会被当成“已受理”却永不执行
+            this.forgetPeerMessage(peerMessageKey(message));
+            return { status: "full" };
+        }
+
+        // await 之前先占位：并发投递各自 get 到的可能是同一个数组，必须同步 push+set
+        const entry: QueuedPeerMessage = { message, queuedAt: getShanghaiISOString() };
+        queue.push(entry);
+        this.peerQueues.set(sessionId, queue);
+        this.rememberPeerMessage(peerMessageKey(message), "queued");
+        const position = queue.length;
+
+        try {
+            await this.requireActiveSession(sessionId);
+            await this.recordPeerMessage(sessionId, message, "in", {
+                queued: true,
+                ...(message.expiresAt ? { expiresAt: message.expiresAt } : {}),
+            });
+        } catch (error) {
+            const index = queue.indexOf(entry);
+            if (index !== -1) queue.splice(index, 1);
+            if (queue.length === 0) this.peerQueues.delete(sessionId);
+            this.forgetPeerMessage(peerMessageKey(message));
+            throw error;
+        }
+
+        return { status: "queued", position };
+    }
+
+    /** 回合结束后尝试执行队首：FIFO、过期即丢弃并回传结果。 */
+    private drainPeerQueue(sessionId: string): void {
+        const queue = this.peerQueues.get(sessionId);
+        if (!queue || queue.length === 0 || this.isClosing) return;
+
+        void (async () => {
+            while (queue.length > 0 && !this.isClosing && !this.isSessionBusy(sessionId)) {
+                const head = queue.shift()!;
+                if (this.isPeerMessageExpired(head.message)) {
+                    this.dropQueuedPeerMessage(sessionId, head.message, "expired");
+                    continue;
+                }
+
+                try {
+                    this.beginSessionOperation(sessionId);
+                } catch {
+                    // 竞态：又被占用，放回队首等下一轮
+                    queue.unshift(head);
+                    break;
+                }
+                this.rememberPeerMessage(peerMessageKey(head.message), "accepted");
+                this.trackTurn(sessionId, this.runPeerTurn(sessionId, head.message));
+            }
+            if (queue.length === 0) this.peerQueues.delete(sessionId);
+        })().catch((error) => {
+            console.error("⚠️ [host] 排队消息执行失败:", error);
+        });
+    }
+
+    private isPeerMessageExpired(message: PeerMessage): boolean {
+        if (!message.expiresAt) return false;
+        const deadline = Date.parse(message.expiresAt);
+        return Number.isFinite(deadline) && deadline <= Date.now();
+    }
+
+    /** 出队丢弃（过期/取消）：回传失败结果，让发送方拿到明确终态而不是一直等。 */
+    private dropQueuedPeerMessage(sessionId: string, message: PeerMessage, reason: "expired" | "cancelled"): void {
+        const result: PeerResult = {
+            msgId: message.id,
+            ok: false,
+            text: "",
+            stopReason: reason,
+            error: reason === "expired" ? "排队超时未执行" : "排队消息已取消",
+        };
+        // 终态也进幂等窗口：同 msgId 重试能拿到同一结果，且不会再次入队
+        this.rememberCompletedPeerResult(message, result);
+        try {
+            this.control.completeInbound(sessionId, message, result);
+        } catch (error) {
+            console.error("⚠️ [host] 排队消息丢弃结果回传失败:", error);
+        }
+    }
+
+    /** 会话不再可执行时，把队列里的消息统一按 cancelled 收尾（必须在摘 socket 之前调用）。 */
+    private dropAllQueuedPeerMessages(sessionId: string): void {
+        const queue = this.peerQueues.get(sessionId);
+        if (!queue || queue.length === 0) return;
+        this.peerQueues.delete(sessionId);
+        for (const item of queue) this.dropQueuedPeerMessage(sessionId, item.message, "cancelled");
+    }
+
+    /** 撤销排队中的消息；已在执行返回 running。 */
+    private cancelQueuedPeerMessage(
+        sessionId: string,
+        msgId: string,
+    ): { ok: true } | { ok: false; reason: "not_found" | "running" } {
+        const queue = this.peerQueues.get(sessionId);
+        const index = queue?.findIndex(item => item.message.id === msgId) ?? -1;
+        if (!queue || index === -1) {
+            const seen = this.seenPeerMessages.get(`${sessionId}:${msgId}`);
+            return seen === "accepted"
+                ? { ok: false, reason: "running" }
+                : { ok: false, reason: "not_found" };
+        }
+
+        const [item] = queue.splice(index, 1);
+        if (queue.length === 0) this.peerQueues.delete(sessionId);
+        if (item) this.dropQueuedPeerMessage(sessionId, item.message, "cancelled");
+        return { ok: true };
+    }
+
+    /** 排队快照（观测用）。 */
+    private peerQueueState(sessionId: string): PeerQueuedEntry[] {
+        return (this.peerQueues.get(sessionId) ?? []).map((item, index) => ({
+            msgId: item.message.id,
+            from: item.message.from,
+            queuedAt: item.queuedAt,
+            ...(item.message.expiresAt ? { expiresAt: item.message.expiresAt } : {}),
+            position: index + 1,
+        }));
+    }
+
+    /** 记录 msgId 幂等状态，超出窗口淘汰最早一条。 */
+    private rememberPeerMessage(key: string, status: "accepted" | "queued" | "done"): void {
+        this.seenPeerMessages.delete(key);
+        this.seenPeerMessages.set(key, status);
+        while (this.seenPeerMessages.size > MAX_SEEN_PEER_MESSAGES) {
+            const oldest = this.seenPeerMessages.keys().next().value;
+            if (oldest === undefined) break;
+            this.seenPeerMessages.delete(oldest);
+        }
+    }
+
+    /** 回滚幂等占位（受理失败/入队回滚时用）。 */
+    private forgetPeerMessage(key: string): void {
+        this.seenPeerMessages.delete(key);
+    }
+
+    /** 记录一条入站消息的最终结果，供同 msgId 重试时重推（只缓存需要回传结果的）。 */
+    private rememberCompletedPeerResult(message: PeerMessage, result: PeerResult): void {
+        const key = peerMessageKey(message);
+        this.rememberPeerMessage(key, "done");
+        if (!message.expectResult) return;
+        this.completedPeerResults.delete(key);
+        this.completedPeerResults.set(key, result);
+        while (this.completedPeerResults.size > MAX_COMPLETED_PEER_RESULTS) {
+            const oldest = this.completedPeerResults.keys().next().value;
+            if (oldest === undefined) break;
+            this.completedPeerResults.delete(oldest);
+        }
+    }
+
+    /** 会话释放/归档时清掉该会话的结果缓存，避免长进程里按会话累积。 */
+    private forgetSessionPeerResults(sessionId: string): void {
+        const prefix = `${sessionId}:`;
+        for (const key of [...this.completedPeerResults.keys()]) {
+            if (key.startsWith(prefix)) this.completedPeerResults.delete(key);
+        }
     }
 
     /** 跑一轮"对方交付的"回合，并把最终输出作为结果回传。 */
@@ -386,6 +614,8 @@ export class LocalSessionHost implements SessionHost {
                 stopReason,
                 ...(failure ? { error: failure } : {}),
             };
+            // 先记终态再回传：重试同一 msgId 时能重推结果，且不会重复执行
+            this.rememberCompletedPeerResult(message, result);
             try {
                 this.control.completeInbound(sessionId, message, result);
             } catch (error) {
@@ -395,7 +625,12 @@ export class LocalSessionHost implements SessionHost {
     }
 
     /** 落盘一条会话间消息并推给 UI：时间线在重启后也能还原。 */
-    private async recordPeerMessage(sessionId: string, message: PeerMessage, direction: "in" | "out"): Promise<void> {
+    private async recordPeerMessage(
+        sessionId: string,
+        message: PeerMessage,
+        direction: "in" | "out",
+        options: { queued?: boolean; expiresAt?: string } = {},
+    ): Promise<void> {
         const peerId = direction === "in" ? message.from : message.to;
         const peerTitle = this.activeSessions.get(peerId)?.session.title;
         const payload: AgentEventPayloads["peer_message"] = {
@@ -406,6 +641,8 @@ export class LocalSessionHost implements SessionHost {
             text: message.text,
             ...(message.expectResult ? { expectResult: true } : {}),
             ...(message.replyTo ? { replyTo: message.replyTo } : {}),
+            ...(options.queued ? { queued: true } : {}),
+            ...(options.expiresAt ? { expiresAt: options.expiresAt } : {}),
             createdAt: message.createdAt,
         };
 
@@ -778,6 +1015,8 @@ export class LocalSessionHost implements SessionHost {
         let lock: SessionLockHandle | undefined;
         try {
             lock = await acquireSessionLock(sessionId);
+            this.dropAllQueuedPeerMessages(sessionId);
+            this.forgetSessionPeerResults(sessionId);
             if ((await this.eventLog.lastSeq(sessionId, { forceRefresh: true })) > 0) {
                 await this.eventLog.append(sessionId, "session_archived", {});
             }
@@ -898,6 +1137,8 @@ export class LocalSessionHost implements SessionHost {
             if (!closeAfterCancel && didCancel && turnSettled) {
                 this.onTurnFinished?.(sessionId);
                 this.driveQueuedResults(sessionId);
+                // 取消也是一种回合结束：队首消息要能接着执行
+                this.drainPeerQueue(sessionId);
             }
         }
     }
@@ -998,6 +1239,9 @@ export class LocalSessionHost implements SessionHost {
         // skillRegistry 是进程级单例，宿主代表进程生命周期：退出前把监听摘掉
         const { skillRegistry } = await import("../skills/skill-registry.js");
         await skillRegistry.close();
+        // 排队消息在宿主退出时按 cancelled 收尾：必须在关 socket 之前回传
+        for (const sessionId of [...this.peerQueues.keys()]) this.dropAllQueuedPeerMessages(sessionId);
+        this.completedPeerResults.clear();
         // 释放全部 socket 与连接：让等待接管的实例能立刻认领
         this.control.close();
         if (this.inflightTurns.size === 0) return;
@@ -1057,6 +1301,8 @@ export class LocalSessionHost implements SessionHost {
                 }
                 // 回合执行期间到达、当时没能驱动的结果，在这里补一次
                 this.driveQueuedResults(sessionId);
+                // 排队投递：队首在会话空闲后依次执行
+                this.drainPeerQueue(sessionId);
             }
         }
     }

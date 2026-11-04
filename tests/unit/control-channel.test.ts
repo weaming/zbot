@@ -154,9 +154,9 @@ function makeHost(): RecordingHost {
             host.archivedSessions.push({ sessionId, automatic });
         },
         accept: (message) => {
-            if (host.busy.has(message.to)) return false;
+            if (host.busy.has(message.to)) return { status: "busy" as const };
             host.accepted.push(message);
-            return true;
+            return { status: "accepted" as const };
         },
         onOutbound: (_from, message) => host.outbound.push(message),
         onResult: (requester, _message, result, options) => host.results.push({
@@ -296,7 +296,7 @@ describe("同进程直投", () => {
         await control.claim("a");
         await control.claim("b");
 
-        const message = await control.send("a", "b", "帮我看下日志");
+        const { message } = await control.send("a", "b", "帮我看下日志");
         expect(host.accepted.map((item) => item.id)).toEqual([message.id]);
         expect(host.outbound.map((item) => item.id)).toEqual([message.id]);
     });
@@ -313,7 +313,7 @@ describe("同进程直投", () => {
 
         // 解忙后可再次投递（说明上一次没有留下脏状态）
         host.busy.delete("b");
-        const message = await control.send("a", "b", "在吗");
+        const { message } = await control.send("a", "b", "在吗");
         expect(host.accepted.map((item) => item.id)).toEqual([message.id]);
     });
 
@@ -323,7 +323,7 @@ describe("同进程直投", () => {
         await control.claim("a");
         await control.claim("b");
 
-        const message = await control.send("a", "b", "跑一下", { expectResult: true });
+        const { message } = await control.send("a", "b", "跑一下", { expectResult: true });
         expect(control.awaitingResults("a")).toBe(1);
 
         control.completeInbound("b", message, { msgId: message.id, ok: true, text: "跑完了", stopReason: "stop" });
@@ -344,7 +344,7 @@ describe("同进程直投", () => {
         await control.claim("a");
         await control.claim("b");
 
-        const message = await control.send("a", "b", "跑一下", { expectResult: true });
+        const { message } = await control.send("a", "b", "跑一下", { expectResult: true });
         control.completeInbound("b", message, {
             msgId: message.id,
             ok: true,
@@ -367,12 +367,12 @@ describe("同进程直投", () => {
                 text: "立即完成",
                 stopReason: "stop",
             });
-            return true;
+            return { status: "accepted" as const };
         };
         control = makeControl(host);
         await control.claim("target");
 
-        const message = await control.send("requester", "target", "快速任务", { expectResult: true });
+        const { message } = await control.send("requester", "target", "快速任务", { expectResult: true });
 
         expect(control.queuedResults("requester")).toBe(1);
         expect(host.results[0]?.result.msgId).toBe(message.id);
@@ -480,7 +480,7 @@ describe("同进程直投", () => {
         expect(spawned.ok).toBe(true);
         if (!spawned.ok) return;
 
-        const message = await control.send("parent", spawned.sessionId, "执行任务", { expectResult: true });
+        const { message } = await control.send("parent", spawned.sessionId, "执行任务", { expectResult: true });
         await waitFor(() => host.lost.length === 1);
         control.completeInbound(spawned.sessionId, message, {
             msgId: message.id,
@@ -539,7 +539,7 @@ describe("同进程直投", () => {
         await control.claim("a");
         await control.claim("b");
 
-        const message = await control.send("a", "b", "通知一下");
+        const { message } = await control.send("a", "b", "通知一下");
         control.completeInbound("b", message, { msgId: message.id, ok: true, text: "收到", stopReason: "stop" });
 
         expect(control.awaitingResults("a")).toBe(0);
@@ -587,7 +587,7 @@ describe("跨进程投递", () => {
         const control = makeControl(host);
         await control.claim("a");
 
-        const message = await control.send("a", "g", "跑个任务", { expectResult: true });
+        const { message } = await control.send("a", "g", "跑个任务", { expectResult: true });
         expect(fake.delivered.map((item) => item.id)).toEqual([message.id]);
         expect(host.outbound.map((item) => item.id)).toEqual([message.id]);
         expect(control.awaitingResults("a")).toBe(1);
@@ -601,7 +601,7 @@ describe("等待超时", () => {
         await control.claim("a");
         await control.claim("b");
 
-        const message = await control.send("a", "b", "慢慢来", { expectResult: true });
+        const { message } = await control.send("a", "b", "慢慢来", { expectResult: true });
         await waitFor(() => host.lost.length > 0);
 
         expect(host.lost[0]?.msgIds).toEqual([message.id]);
@@ -615,7 +615,7 @@ describe("阻塞等待结果", () => {
     async function sendExpecting(control: SessionControl) {
         await control.claim("a");
         await control.claim("b");
-        const message = await control.send("a", "b", "跑一下", { expectResult: true });
+        const { message } = await control.send("a", "b", "跑一下", { expectResult: true });
         return message;
     }
 
