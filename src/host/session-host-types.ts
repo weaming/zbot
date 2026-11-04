@@ -96,15 +96,18 @@ export interface SessionCreateInit {
     title?: string;
 }
 
-export interface SessionHost {
+/**
+ * 会话事件流：持久化事实源的读取与订阅。
+ * TUI 与 HTTP 前端共用同一份事实源，不需要各自轮询日志文件。
+ */
+export interface SessionEventSource {
+    /** 回合内的实时事件（打字机/工具流）；持久化事件走 subscribeEvents。 */
     onEvent?: (requestId: number, sessionId: string, event: UIEvent) => void;
-    /** 新建会话（内存态，未认领）；cwd 缺省用 TUI 启动目录，init 缺省表示不额外初始化。 */
-    createSession(cwd?: string, init?: SessionCreateInit): Promise<{ sessionId: string }>;
-    listSessions(): Promise<SessionSummary[]>;
-    /** 本进程内存里正在使用的会话 id（清理时必须跳过，避免删掉活跃会话）。 */
-    listActiveSessionIds(): string[];
-    /** 丢弃该会话的进程内缓存（磁盘上的日志已删除时调用）。 */
-    forgetSession(sessionId: string): void;
+    /**
+     * 订阅持久化事件流：新增一条即推送一次，返回取消函数。
+     * event 为 null 表示该会话时间轴被重置（truncate / delete），订阅者须丢弃已有游标。
+     */
+    subscribeEvents(listener: (sessionId: string, event: AgentEvent | null) => void): () => void;
     readSessionEvents(sessionId: string): Promise<AgentEvent[]>;
     /** 读该会话 seq > after 的持久化事件（客户端断线续传按游标补齐）。 */
     readSessionEventsSince(sessionId: string, after: number): Promise<AgentEvent[]>;
@@ -113,25 +116,77 @@ export interface SessionHost {
      * 时间线首屏与上翻分页用它，避免为了最后一屏把整份日志都传到浏览器。
      */
     readSessionEventsBefore(sessionId: string, beforeSeq: number, count: number): Promise<AgentEvent[]>;
+}
+
+/** 会话只读视图：列表、忙闲、归档态，以及会话各项设置的当前值。 */
+export interface SessionQuery {
+    listSessions(): Promise<SessionSummary[]>;
+    /** 本进程内存里正在使用的会话 id（清理时必须跳过，避免删掉活跃会话）。 */
+    listActiveSessionIds(): string[];
     /** 会话是否已归档（只读尾部事件）。 */
     isSessionArchived(sessionId: string): Promise<boolean>;
-    /**
-     * 订阅持久化事件流：新增一条即推送一次，返回取消函数。
-     * TUI 与 HTTP 前端共用同一份事实源，不需要各自轮询日志文件。
-     * event 为 null 表示该会话时间轴被重置（truncate / delete），订阅者须丢弃已有游标。
-     */
-    subscribeEvents(listener: (sessionId: string, event: AgentEvent | null) => void): () => void;
-    clearSession(sessionId: string): Promise<void>;
-    deleteSession(sessionId: string): Promise<void>;
     isSessionBusy(sessionId: string): boolean;
     /** 当前会话是否被其他实例（进程）持有排他锁，本实例无法中止其请求。 */
     isSessionLockedByOther(sessionId: string): boolean;
+    isSessionClaimed(sessionId: string): boolean;
+    /** 本实例当前持有的会话 id。 */
+    claimedSessionIds(): string[];
+    /** 本实例内发起过网络请求的会话用量统计（退出时展示用）。 */
+    getInstanceNetworkStats(): InstanceNetworkStats;
     getSystemPrompt(sessionId: string): Promise<string>;
-    /** 重读磁盘技能与 MCP 工具，并让后续请求使用新的运行时上下文。 */
-    reloadRuntime(): Promise<{ skillCount: number; mcpServerCount: number; mcpToolCount: number }>;
+    loadInputHistory(sessionId: string): string[];
+    /** 会话绑定的工作目录（无持久化记录时回退当前工具目录）。 */
+    getSessionCwd(sessionId: string): Promise<string>;
+    getSessionModelSelection(sessionId: string): Promise<ChatModelSelection | undefined>;
+    /** 本会话临时启用的 lazy MCP server（模型不支持 tool_search 时的显式放行名单）。 */
+    getSessionLazyMcpServers(sessionId: string): Promise<string[]>;
+    /** 只读版：已归档的会话也能读（归档态下界面仍要展示选中集）。 */
+    readSessionLazyMcpServers(sessionId: string): Promise<string[]>;
+}
+
+/** 会话生命周期：创建、清理、归档/删除、认领与释放。 */
+export interface SessionLifecycle {
+    /** 新建会话（内存态，未认领）；cwd 缺省用 TUI 启动目录，init 缺省表示不额外初始化。 */
+    createSession(cwd?: string, init?: SessionCreateInit): Promise<{ sessionId: string }>;
+    /** 丢弃该会话的进程内缓存（磁盘上的日志已删除时调用）。 */
+    forgetSession(sessionId: string): void;
+    clearSession(sessionId: string): Promise<void>;
+    deleteSession(sessionId: string): Promise<void>;
     closeSession(sessionId: string): Promise<void>;
     /** 取消归档：追加 session_unarchived 事件，使会话重新可写。 */
     unarchiveSession(sessionId: string): Promise<void>;
+    /** 重命名会话标题：空会话先落盘再记录，标题为空时不生效。 */
+    renameSession(sessionId: string, title: string): Promise<void>;
+    /**
+     * 认领会话：本实例成为该会话的唯一持有者。
+     * 被其他实例持有时发起协商式转移，持有者忙或无应答则失败（绝不夺权）。
+     * noNegotiate：被其他实例持有时直接失败，不发起协商式转移（编程化入口用）。
+     */
+    claimSession(sessionId: string, options?: { noNegotiate?: boolean }): Promise<ClaimResult>;
+    /**
+     * 放弃会话持有：关闭监听、释放 socket 文件，并摘掉本实例的内存视图。
+     * 事件日志不动，别的实例（或本实例面板）随后可重新认领。
+     */
+    releaseSession(sessionId: string, options?: { cause?: SessionReleaseCause }): void;
+    /** 探测会话归属（不触发认领）。 */
+    probeSession(sessionId: string): Promise<PeerOwnership>;
+    listSessionOwnership(sessionIds: string[]): Promise<Map<string, PeerOwnership>>;
+}
+
+/** 会话设置写入：工作目录、模型选择、lazy MCP 启用集与输入历史。 */
+export interface SessionSettings {
+    /** 改写会话工作目录（落盘 session_cwd_changed 事件）：之后的工具都在新目录执行。 */
+    setSessionCwd(sessionId: string, cwd: string): Promise<void>;
+    setSessionModelSelection(sessionId: string, selection: ChatModelSelection): Promise<void>;
+    /** 立即落盘模型选择（面板/命令都该用它：进程退出不该丢设置）。 */
+    setSessionModelSelectionNow?(sessionId: string, selection: ChatModelSelection): Promise<void>;
+    /** 覆盖本会话的 lazy MCP 启用集：落盘 lazy_mcp_changed 事件，重启后仍生效。 */
+    setSessionLazyMcpServers(sessionId: string, servers: string[]): Promise<void>;
+    appendInputHistory(sessionId: string, text: string, ts?: string): Promise<void>;
+}
+
+/** 回合驱动：发一条消息跑一轮、续跑、中止与压缩。 */
+export interface SessionTurnHost {
     /**
      * 发送一条用户消息并驱动一轮 LLM。
      * displayText 只影响落盘与历史：群消息把带行动指令的 prompt 发给模型，
@@ -159,45 +214,12 @@ export interface SessionHost {
      * alreadyReserved：调用方已持有会话互斥（会话间投递路径），压缩只借用不重抢。
      */
     compactSession(sessionId: string, instruction?: string, options?: { alreadyReserved?: boolean }): Promise<void>;
-    /** 本实例内发起过网络请求的会话用量统计（退出时展示用）。 */
-    getInstanceNetworkStats(): InstanceNetworkStats;
-    loadInputHistory(sessionId: string): string[];
-    appendInputHistory(sessionId: string, text: string, ts?: string): Promise<void>;
-    /** 会话绑定的工作目录（无持久化记录时回退当前工具目录）。 */
-    getSessionCwd(sessionId: string): Promise<string>;
-    /** 改写会话工作目录（落盘 session_cwd_changed 事件）：之后的工具都在新目录执行。 */
-    setSessionCwd(sessionId: string, cwd: string): Promise<void>;
-    /** 重命名会话标题：空会话先落盘再记录，标题为空时不生效。 */
-    renameSession(sessionId: string, title: string): Promise<void>;
-    getSessionModelSelection(sessionId: string): Promise<ChatModelSelection | undefined>;
-    setSessionModelSelection(sessionId: string, selection: ChatModelSelection): Promise<void>;
-    /** 立即落盘模型选择（面板/命令都该用它：进程退出不该丢设置）。 */
-    setSessionModelSelectionNow?(sessionId: string, selection: ChatModelSelection): Promise<void>;
-    /** 本会话临时启用的 lazy MCP server（模型不支持 tool_search 时的显式放行名单）。 */
-    getSessionLazyMcpServers(sessionId: string): Promise<string[]>;
-    /** 只读版：已归档的会话也能读（归档态下界面仍要展示选中集）。 */
-    readSessionLazyMcpServers(sessionId: string): Promise<string[]>;
-    /** 覆盖本会话的 lazy MCP 启用集：落盘 lazy_mcp_changed 事件，重启后仍生效。 */
-    setSessionLazyMcpServers(sessionId: string, servers: string[]): Promise<void>;
+}
+
+/** 会话间投递：入站消息落盘、结果取用与待交付计数。 */
+export interface PeerMailbox {
     /** 落盘一条会话间消息（时间线事实源；出入站各一条）。 */
     appendPeerMessage(sessionId: string, payload: AgentEventPayloads["peer_message"]): Promise<void>;
-    /**
-     * 认领会话：本实例成为该会话的唯一持有者。
-     * 被其他实例持有时发起协商式转移，持有者忙或无应答则失败（绝不夺权）。
-     */
-    /** noNegotiate：被其他实例持有时直接失败，不发起协商式转移（编程化入口用）。 */
-    claimSession(sessionId: string, options?: { noNegotiate?: boolean }): Promise<ClaimResult>;
-    /**
-     * 放弃会话持有：关闭监听、释放 socket 文件，并摘掉本实例的内存视图。
-     * 事件日志不动，别的实例（或本实例面板）随后可重新认领。
-     */
-    releaseSession(sessionId: string, options?: { cause?: SessionReleaseCause }): void;
-    isSessionClaimed(sessionId: string): boolean;
-    /** 本实例当前持有的会话 id。 */
-    claimedSessionIds(): string[];
-    /** 探测会话归属（不触发认领）。 */
-    probeSession(sessionId: string): Promise<PeerOwnership>;
-    listSessionOwnership(sessionIds: string[]): Promise<Map<string, PeerOwnership>>;
     /** 取走等待附加的会话间结果（下一次 HTTP 请求用），取后即清。 */
     takePeerResults(sessionId: string): string[];
     /** 本实例在该会话上的待交付计数：等待别人回传 + 已就绪待附加。 */
@@ -207,17 +229,26 @@ export interface SessionHost {
      * 返回放下的等待数，0 表示当前没有在等的会话结果。
      */
     detachPeerWaits(sessionId: string): number;
-    /**
-     * 持有权释放时的回调：宿主据此把会话从 tabs / 内存状态摘掉。
-     * 与 onTurnFinished 同理，非用户主动发起的状态变化也要让宿主知情。
-     */
+}
+
+/** 宿主自身运行态：运行时重载与退出。 */
+export interface HostRuntime {
+    /** 重读磁盘技能与 MCP 工具，并让后续请求使用新的运行时上下文。 */
+    reloadRuntime(): Promise<{ skillCount: number; mcpServerCount: number; mcpToolCount: number }>;
+    /** 中止所有进行中的请求并等待其落盘（退出前调用，避免 turn 丢失）。 */
+    close(): Promise<void>;
+}
+
+/**
+ * 宿主向前端的状态变化回调（宿主主动通知，不是前端调用的方法）。
+ * 非用户发起的变更也要让前端知情，否则列表与输入排队会停在旧状态。
+ */
+export interface SessionHostCallbacks {
+    /** 持有权释放时的回调：宿主据此把会话从 tabs / 内存状态摘掉。 */
     onSessionReleased?: (sessionId: string, cause: SessionReleaseCause) => void;
-    /**
-     * 模型派生了新的子会话（session_spawn）时回调：宿主据此把会话加进列表并固化标题。
-     * 与 onSessionReleased 同理，非用户主动发起的状态变化也要让宿主知情。
-     */
+    /** 模型派生了新的子会话（session_spawn）时回调：宿主据此把会话加进列表并固化标题。 */
     onSessionSpawned?: (sessionId: string, title?: string) => void;
-    /** 会话工作目录被改写后的回调（见 SessionHost.setSessionCwd）。 */
+    /** 会话工作目录被改写后的回调（见 SessionSettings.setSessionCwd）。 */
     onSessionCwdChanged?: (sessionId: string, cwd: string) => void;
     /** 归档会话被 session_wake 恢复并认领后回调宿主刷新会话列表。 */
     onSessionWoken?: (sessionId: string) => void;
@@ -227,9 +258,22 @@ export interface SessionHost {
      * 没有这个通知时排队的输入会一直等到用户切会话才发出去。
      */
     onTurnFinished?: (sessionId: string) => void;
-    /** 中止所有进行中的请求并等待其落盘（退出前调用，避免 turn 丢失）。 */
-    close(): Promise<void>;
 }
+
+/**
+ * 会话宿主契约：按职责分成上面几组，`SessionHost` 只是它们的合集。
+ * 调用方按需依赖真正用到的那一组（如 `JobRunnerHost`、`SessionTurnHost`），
+ * 替身只需实现用到的能力，新增能力也不会波及无关调用方。
+ */
+export interface SessionHost
+    extends SessionEventSource,
+        SessionQuery,
+        SessionLifecycle,
+        SessionSettings,
+        SessionTurnHost,
+        PeerMailbox,
+        HostRuntime,
+        SessionHostCallbacks {}
 
 export interface ActiveSession {
     session: Session;

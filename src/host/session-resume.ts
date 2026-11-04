@@ -6,17 +6,16 @@
 
 import { describeClaimFailure } from "../control/channel.js";
 import { AppError } from "../utils/app-error.js";
-import type { SessionHost } from "./session-host-types.js";
+import type { SessionLifecycle, SessionQuery } from "./session-host-types.js";
 
 export interface SessionResumeOptions {
     /** 目标会话已归档时先恢复；缺省拒绝。 */
     unarchive?: boolean;
 }
 
-type ResumeHost = Pick<
-    SessionHost,
-    "isSessionArchived" | "claimSession" | "unarchiveSession" | "releaseSession"
->;
+/** 恢复前置只需要归档判定与认领/取消归档/释放。 */
+type ResumeHost = Pick<SessionQuery, "isSessionArchived">
+    & Pick<SessionLifecycle, "claimSession" | "unarchiveSession" | "releaseSession">;
 
 export async function prepareSessionResume(
     host: ResumeHost,

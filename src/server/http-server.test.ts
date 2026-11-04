@@ -5,7 +5,8 @@
 
 import { describe, expect, spyOn, test } from "bun:test";
 import type { AgentEvent } from "../events/agent-events.js";
-import type { SessionHost, SessionSummary } from "../host/session-host-types.js";
+import type { SessionSummary } from "../host/session-host-types.js";
+import type { SessionApiHost } from "./http-server.js";
 import { startHttpServer, type HttpServerHandle } from "./http-server.js";
 
 const TOKEN = "test-token";
@@ -21,7 +22,7 @@ interface StubCalls {
 }
 
 interface StubHost {
-    host: SessionHost;
+    host: SessionApiHost;
     calls: StubCalls;
     /** 手动推一条实时事件（null 表示时间轴重置）。 */
     emit(sessionId: string, event: AgentEvent | null): void;
@@ -71,7 +72,7 @@ function createStubHost(
             return true;
         },
         close: async () => {},
-    } as unknown as SessionHost;
+    } as unknown as SessionApiHost;
 
     return {
         host,
@@ -95,7 +96,7 @@ function event(seq: number, sessionId = "s1"): AgentEvent {
 }
 
 /** 起一个只监听回环、端口由系统分配的实例。 */
-function serve(host: SessionHost, heartbeatMs = 60_000): HttpServerHandle {
+function serve(host: SessionApiHost, heartbeatMs = 60_000): HttpServerHandle {
     return startHttpServer({ host, port: 0, token: TOKEN, heartbeatMs });
 }
 

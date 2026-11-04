@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import type { SessionHost } from "../host/session-host-types.js";
+import type { JobsApiHost } from "./jobs-api.js";
 import { JobRunner } from "../jobs/runner.js";
 import { JobStore } from "../jobs/store.js";
 import { startHttpServer, type HttpServerHandle } from "./http-server.js";
@@ -29,7 +29,7 @@ interface HostState {
 function stubHost(
     state: HostState = { archived: [], deleted: [], pages: [], summaries: [], calls: [] },
     isBusy = false,
-): SessionHost {
+): JobsApiHost {
     return {
         listActiveSessionIds: () => [],
         createSession: async () => ({ sessionId: "s-1" }),
@@ -66,7 +66,7 @@ function stubHost(
             return [];
         },
         subscribeEvents: () => () => {},
-    } as unknown as SessionHost;
+    } as unknown as JobsApiHost;
 }
 
 function serve(options: { isBusy?: boolean } = {}): {

@@ -1,5 +1,5 @@
 /**
- * HTTP 前端：把 SessionHost（与可选的 Job 调度）暴露成可编程接口（REST + SSE）。
+ * HTTP 前端：把会话宿主（与可选的 Job 调度）暴露成可编程接口（REST + SSE）。
  *
  * 与 TUI 并列：不 import tui/，只依赖 host 契约与持久化事件的 seq 游标。
  * 事件流推的是持久化事实源（带唯一 seq），瞬态的逐 token 片段不在本接口范围内。
@@ -14,7 +14,10 @@ import {
     SessionArchivedError,
     SessionBusyError,
     SessionNotFoundError,
-    type SessionHost,
+    type SessionEventSource,
+    type SessionLifecycle,
+    type SessionQuery,
+    type SessionTurnHost,
 } from "../host/session-host-types.js";
 import { handleJobsRoute, type JobsApiContext } from "./jobs-api.js";
 import { parseEventPage } from "./page-params.js";
@@ -39,8 +42,14 @@ const IDLE_TIMEOUT_SECONDS = 0;
 /** 单个请求体上限：任务文本与图片引用都不该很大，超过多半是误用。 */
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
 
+/**
+ * HTTP 前端需要的宿主能力：事件流、只读视图、会话生命周期与回合驱动。
+ * 宿主运行态（reloadRuntime / close）与会话间投递由进程装配层负责，不在这里暴露。
+ */
+export type SessionApiHost = SessionEventSource & SessionQuery & SessionLifecycle & SessionTurnHost;
+
 export interface HttpServerOptions {
-    host: SessionHost;
+    host: SessionApiHost;
     /** 监听端口；0 表示由系统分配（测试用）。 */
     port: number;
     /** 监听地址，默认只绑本机回环。 */
@@ -158,7 +167,7 @@ function suggestDirs(rawInput: string): string[] {
 }
 
 /** 会话执行事件流：转发某个会话的持久化事件（重置信号原样透传）。 */
-function sessionEventSource(host: SessionHost, sessionId: string): SseSource {
+function sessionEventSource(host: SessionApiHost, sessionId: string): SseSource {
     return {
         label: `会话 ${sessionId}`,
         readSince: async since =>

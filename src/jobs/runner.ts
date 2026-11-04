@@ -7,7 +7,7 @@
  */
 
 import { Cause, Data, Duration, Effect, Exit, Fiber } from "effect";
-import type { SessionHost } from "../host/session-host-types.js";
+import type { SessionLifecycle, SessionTurnHost } from "../host/session-host-types.js";
 import { withJobContext } from "../tools/job-context.js";
 import { defaultMcpSelection } from "../mcp/client-manager.js";
 import { JobStore } from "./store.js";
@@ -26,6 +26,15 @@ const STOP_WAIT_MS = 5_000;
 const TITLE_MAX = 40;
 /** 续租频率 = 租约 / 3：连续三次失败才真的过期。 */
 const LEASE_RENEW_DIVISOR = 3;
+
+/**
+ * 调度器需要的宿主能力：新建/认领/命名会话 + 驱动与中止回合。
+ * 不依赖事件流与查询面，替身不必实现整个 `SessionHost`。
+ */
+export type JobRunnerHost = Pick<
+    SessionLifecycle,
+    "createSession" | "claimSession" | "renameSession"
+> & Pick<SessionTurnHost, "sendMessage" | "abortSession">;
 
 interface RunningJob {
     jobId: string;
@@ -46,7 +55,7 @@ function repeatEvery(intervalMs: number, action: Effect.Effect<void>): Effect.Ef
 
 export interface JobRunnerOptions {
     store: JobStore;
-    host: SessionHost;
+    host: JobRunnerHost;
     /** 租约持有者标识（进程实例 id），用于区分不同 worker。 */
     owner: string;
     /**
@@ -77,7 +86,7 @@ function titleOf(prompt: string): string {
 
 export class JobRunner {
     private readonly store: JobStore;
-    private readonly host: SessionHost;
+    private readonly host: JobRunnerHost;
     private readonly owner: string;
     private readonly maxConcurrent: number;
     private readonly leaseMs: number;

@@ -11,7 +11,12 @@ import { listSavedSessionIds } from "../events/session-files.js";
 import { redirectLogsToFile } from "../host/runtime-context.js";
 import { prepareSessionResume } from "../host/session-resume.js";
 import { LocalSessionHost, initializeSessionHostRuntime } from "../host/session-host.js";
-import type { SessionHost } from "../host/session-host-types.js";
+import type {
+    SessionEventSource,
+    SessionLifecycle,
+    SessionQuery,
+    SessionTurnHost,
+} from "../host/session-host-types.js";
 import { AppError } from "../utils/app-error.js";
 import { readStdinText } from "../utils/stdin.js";
 import { extractTurnResult, runHostTurn } from "./session-turn.js";
@@ -36,16 +41,11 @@ export interface ResumeCliIO {
     createHost?: () => Promise<{ host: ResumeSessionHost; close: () => Promise<void> }>;
 }
 
-type ResumeSessionHost = Pick<
-    SessionHost,
-    | "isSessionArchived"
-    | "claimSession"
-    | "unarchiveSession"
-    | "releaseSession"
-    | "subscribeEvents"
-    | "sendMessage"
-    | "abortSession"
->;
+/** `resume -p` 需要的能力：归档判定与认领/释放，加上订阅事件与驱动/中止回合。 */
+type ResumeSessionHost = Pick<SessionQuery, "isSessionArchived">
+    & Pick<SessionLifecycle, "claimSession" | "unarchiveSession" | "releaseSession">
+    & Pick<SessionEventSource, "subscribeEvents">
+    & Pick<SessionTurnHost, "sendMessage" | "abortSession">;
 
 export function parseResumeArgs(argv: string[]): ResumeArgs {
     const args: ResumeArgs = { id: "", print: false, prompt: [], json: false, unarchive: false };

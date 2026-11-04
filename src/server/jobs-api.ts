@@ -10,7 +10,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { expandHomePath } from "../utils/runtime-paths.js";
-import type { SessionHost } from "../host/session-host-types.js";
+import type {
+    SessionEventSource,
+    SessionLifecycle,
+    SessionQuery,
+    SessionSettings,
+    SessionTurnHost,
+} from "../host/session-host-types.js";
 import type { JobRunner } from "../jobs/runner.js";
 import type { JobStore } from "../jobs/store.js";
 import {
@@ -34,10 +40,20 @@ import { readToolCall, toLiveEventPayload, toSessionEventView, toSessionEventVie
 import { subscribeLive as subscribeLiveFrames } from "./live-stream.js";
 import { openSseStream, parseSseCursor, type SseSource } from "./sse.js";
 
+/**
+ * Job 看板接口需要的宿主能力：事件流、会话生命周期、查询与设置写入。
+ * 任务执行走 JobRunner，这里只用 `sendMessage` 给分支会话补一轮对话。
+ */
+export type JobsApiHost = SessionEventSource
+    & SessionLifecycle
+    & SessionQuery
+    & SessionSettings
+    & Pick<SessionTurnHost, "sendMessage">;
+
 export interface JobsApiContext {
     store: JobStore;
     runner: JobRunner;
-    host: SessionHost;
+    host: JobsApiHost;
     heartbeatMs: number;
 }
 
@@ -59,7 +75,7 @@ function jobListSource(store: JobStore): SseSource {
 }
 
 /** 详情执行流：转发该 Job 绑定会话的事件（重置信号原样透传）。 */
-function sessionEventSource(host: SessionHost, sessionId: string, jobId: string): SseSource {
+function sessionEventSource(host: JobsApiHost, sessionId: string, jobId: string): SseSource {
     return {
         label: `任务 ${jobId} 执行流`,
         readSince: async since =>

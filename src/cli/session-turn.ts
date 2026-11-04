@@ -6,9 +6,10 @@
  */
 
 import type { AgentEvent } from "../events/agent-events.js";
-import type { SessionHost } from "../host/session-host-types.js";
+import type { SessionEventSource, SessionTurnHost } from "../host/session-host-types.js";
 
-type TurnHost = Pick<SessionHost, "subscribeEvents" | "sendMessage" | "abortSession">;
+/** 跑一轮只需要订阅事件与驱动/中止回合。 */
+type TurnHost = Pick<SessionEventSource, "subscribeEvents"> & Pick<SessionTurnHost, "sendMessage" | "abortSession">;
 
 export interface HostTurnOptions {
     host: TurnHost;

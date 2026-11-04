@@ -5,12 +5,11 @@
 
 import { describe, expect, test } from "bun:test";
 import type { AgentEvent } from "../events/agent-events.js";
-import type { SessionHost } from "../host/session-host-types.js";
-import { JobRunner } from "./runner.js";
+import { JobRunner, type JobRunnerHost } from "./runner.js";
 import { JobStore } from "./store.js";
 import type { JobRecord } from "./types.js";
 
-interface StubHost extends SessionHost {
+interface StubHost extends JobRunnerHost {
     calls: { created: number; aborted: string[]; sent: string[] };
 }
 
@@ -61,7 +60,7 @@ function createStubHost(
     return host;
 }
 
-function makeRunner(host: SessionHost, maxConcurrent = 2): { store: JobStore; runner: JobRunner } {
+function makeRunner(host: JobRunnerHost, maxConcurrent = 2): { store: JobStore; runner: JobRunner } {
     const store = new JobStore({ path: ":memory:" });
     const runner = new JobRunner({ store, host, owner: "w1", maxConcurrent, tickMs: 60_000 });
     return { store, runner };
