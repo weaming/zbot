@@ -23,7 +23,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
 import { describeClaimFailure } from "../control/channel.js";
-import { cleanupStaleSockets, describeOwnership, type PeerOwnership } from "../control/registry.js";
+import { cleanupStaleSockets } from "../control/registry.js";
 import { cleanupArchivedSessions } from "../events/session-cleanup.js";
 import type { SessionHost } from "../host/session-host.js";
 import type { SessionReleaseCause } from "../host/session-host-types.js";
@@ -69,6 +69,9 @@ import {
     type PanelOverlay,
 } from "./panel-overlay.js";
 import { PanelStack } from "./panel-stack.js";
+import { OwnershipTracker } from "./ownership-tracker.js";
+import { QuestionCoordinator } from "./question-coordinator.js";
+import { ModelMcpPanels } from "./model-mcp-panels.js";
 import { PendingQueue, type PendingMessage } from "./pending-queue.js";
 import { truncatePlain } from "../format/text.js";
 import { parseWheelEvent, type WheelEvent } from "./panel-input.js";
@@ -76,21 +79,14 @@ import { PromptEditor } from "./prompt-editor.js";
 import { StatusBar } from "./status-bar.js";
 import { TodoBar } from "./todo-bar.js";
 import { buildSessionBar, type SessionBarStyles, type SessionBarTab } from "./session-bar.js";
-import { SPINNER_FRAMES, type SessionOwnerState } from "./session-marker.js";
+import { SPINNER_FRAMES } from "./session-marker.js";
 import { SessionPanel, type SessionPanelItem } from "./session-panel.js";
 import { QuestionPanel } from "./question-panel.js";
 import { isAskUserTool } from "./tool-block-parse.js";
 import { PanelFrame } from "./panel-frame.js";
 import { ShortcutPanel } from "./shortcut-panel.js";
 import { ModelPanel } from "./model-panel.js";
-import {
-    questionLabel,
-    setUserQuestionChannel,
-    type UserAnswer,
-    type UserQuestion,
-    type UserQuestionAnswer,
-    type UserQuestionRequest,
-} from "../utils/user-question.js";
+import { setUserQuestionChannel } from "../utils/user-question.js";
 
 import { getWheelLogFile } from "../utils/state-paths.js";
 import { discardPendingInput } from "../utils/tty-input.js";
@@ -130,23 +126,8 @@ import {
     type MessageComponents,
     type RenderContext,
 } from "./render/messages.js";
-import type { ImageAssetRef, TuiDraft, UserMessageInput } from "../types/image.js";
+import type { ImageAssetRef, UserMessageInput } from "../types/image.js";
 import { backgroundTaskManager, type BackgroundTaskSummary } from "../tools/background-tasks.js";
-
-/**
- * 挂着的提问（`ask_user` 工具在等用户作答）。
- * 面板只负责界面：逐题作答写进 answers，宿主据此结算成答案或「用户取消」。
- */
-interface PendingQuestion {
-    requestId: string;
-    sessionId: string;
-    questions: UserQuestion[];
-    /** 逐题作答（与面板共享引用，重开面板时据此回显进度）。 */
-    answers: (UserQuestionAnswer | null)[];
-    /** 结算（幂等）：作答 / 取消都走它，随后面板与 tab 标记一起收敛。 */
-    settle(answer: UserAnswer): void;
-}
-
 
 /** 需要当前会话才能执行的命令（无会话时直接提示，不静默失败）。 */
 const SESSION_REQUIRED_COMMANDS = new Set(["/clear", "/archive", "/unarchive", "/delete", "/close", "/compact", "/continue", "/system", "/model", "/cwd"]);
@@ -216,11 +197,8 @@ export class ChatApp {
 
     private currentModelSelection?: ChatModelSelection;
     private readonly statusBar = new StatusBar();
-    /** 提问区位于聊天视口之后、输入框之前，不覆盖对话正文。 */
+    /** 提问区位于聊天视口之后、输入框之前，不覆盖对话正文；显隐由 QuestionCoordinator 决策。 */
     private readonly questionDock = new Container();
-    private questionDockSessionId: string | null = null;
-    private readonly collapsedQuestionSessions = new Set<string>();
-    private readonly questionPanels = new Map<string, QuestionPanel>();
     /** 底部常驻任务清单条：有未完成 todo 时占位，替代事件流里的 todo 块。 */
     private readonly todoBar = new TodoBar();
     private readonly editor: PromptEditor;
@@ -238,8 +216,6 @@ export class ChatApp {
     private herdrBlock: string | undefined;
     private readonly unsubscribeBackgroundTaskCompletion: () => void;
     private readonly unsubscribeBackgroundTaskStart: () => void;
-    /** 等待用户作答的提问（按会话；同一个会话同时只会有一个回合在跑）。 */
-    private readonly pendingQuestions = new Map<string, PendingQuestion>();
     /** 按会话隔离的未发送输入草稿：暂存、防抖与落盘由 DraftStore 统一承担。 */
     private readonly drafts = new DraftStore({
         // marker 展开依赖编辑器持有的 paste 缓存；实例化时编辑器尚未就绪，故延迟到调用时解析
@@ -248,14 +224,22 @@ export class ChatApp {
     });
     /** 按会话记录当前的实时执行阶段与开始时间。 */
     private readonly turnState = new TurnStateStore();
-    /** 会话归属快照：面板/切换的认领入口必须让用户看得见归属，异步探测后缓存。 */
-    private sessionOwnership = new Map<string, PeerOwnership>();
-    /** 归属刷新节流时间戳与在途标记：探测要走 socket，不能跟着 spinner 帧每帧打。 */
-    private ownershipRefreshedAt = 0;
-    private ownershipRefreshPromise: Promise<void> | null = null;
-    /** 面板打开期间的归属轮询定时器：他实例状态变化要让列表跟上。 */
-    private ownershipTimer: ReturnType<typeof setInterval> | null = null;
-    private static readonly OWNERSHIP_TTL_MS = 1_500;
+    /**
+     * 提问通道与底部提问区：待答问题、按会话缓存的面板、折叠态与显隐决策都在 coordinator 内，
+     * 这里只提供 tui/面板栈/重绘等窄接口。
+     */
+    private readonly questions: QuestionCoordinator;
+    /**
+     * 会话归属快照（探测/节流/在途去重/面板期间轮询 + 展示文案都在 tracker 内）。
+     * 面板与切换入口必须让用户看得见归属，这里只负责把它接上宿主能力。
+     */
+    private readonly ownership = new OwnershipTracker({
+        probeOwnership: ids => this.agent.listSessionOwnership(ids),
+        sessionIds: () => this.store.sessions.map(session => session.sessionId),
+        onChange: () => this.renderTabBar(),
+        isPanelOpen: () => this.hasSessionPanelOpen(),
+        pendingStats: sessionId => this.agent.peerPendingStats(sessionId),
+    });
     /** 标题重命名（⌘R）锁定的会话；null 表示非重命名态。 */
     private renameSessionId: string | null = null;
     /** 进入标题重命名前的输入框原文快照（Esc/切走时还原，避免标题混入草稿）。 */
@@ -270,10 +254,8 @@ export class ChatApp {
     /** 进程级 UI 占位：只覆盖与具体会话无关的操作（重载、切会话）。会话自身的忙闲在 turnState。 */
     private runtimeReloading = false;
     private switching = false;
-    /** 当前打开的 MCP 面板：落盘失败时回读真实状态重置勾选。 */
-    private mcpPanel: McpPanel | null = null;
-    /** 每个会话的 lazy 启用集保存队列：连按空格时合并成最新一份，串行落盘。 */
-    private readonly lazySaveQueues = new Map<string, { running: boolean; queued?: string[] }>();
+    /** 模型 / MCP 浮层的装配与 lazy 启用集串行落盘（状态与决策在 ModelMcpPanels）。 */
+    private readonly modelMcp: ModelMcpPanels;
     private detailed = false;
     /** ⌃T：正常模式下也展开历史 turn 的改动详情。 */
     private diffDetail = false;
@@ -385,6 +367,85 @@ export class ChatApp {
         ], { gap: 0 });
         this.tui.setLayoutRoot(this.layout);
 
+        this.questions = new QuestionCoordinator({
+            panels: this.panels,
+            dock: {
+                showPanel: (panel) => {
+                    this.questionDock.clear();
+                    this.questionDock.addChild(new PanelFrame(panel as unknown as Component, theme.question));
+                },
+                showCollapsed: (text) => {
+                    this.questionDock.clear();
+                    this.questionDock.addChild(new Text(theme.question(text), 1, 0));
+                },
+                clear: () => this.questionDock.clear(),
+            },
+            currentSessionId: () => this.store.currentSessionId,
+            sessionLabel: sessionId => this.sessionLabel(sessionId),
+            isExiting: () => this.exiting,
+            restoreFocus: () => this.restoreFocus(),
+            requestRender: () => this.tui.requestRender(),
+            // 待答状态影响 tab 标记、状态栏计数与 herdr 阻塞态，三处一起收敛
+            onStateChange: () => {
+                this.renderTabBar();
+                this.renderStatusBar();
+                this.syncHerdrState();
+            },
+            flash: message => this.tui.flash(message),
+            isCollapseKey: data => matchesKey(data, Key.ctrlShift("q")),
+            createPanel: ({ questions, answers, submit, cancel, collapse }) => {
+                const terminalRows = this.tui.terminal.rows || 24;
+                const visibleRows = Math.max(3, Math.min(8, Math.floor(terminalRows * 0.3) - 2));
+                return new QuestionPanel({ tui: this.tui, questions, answers, visibleRows, submit, cancel, collapse });
+            },
+        });
+
+
+        this.modelMcp = new ModelMcpPanels({
+            panels: this.panels,
+            isExiting: () => this.exiting,
+            currentSessionId: () => this.store.currentSessionId,
+            isSessionBusy: sessionId => this.agent.isSessionBusy(sessionId),
+            contentRows: () => panelContentRows(this.tui),
+            openOverlay: (panel, kind) => openPanelOverlay(this.tui, panel, kind),
+            afterPanelClosed: overlay => this.afterPanelClosed(overlay),
+            requestRender: () => this.tui.requestRender(),
+            logWheel: line => this.writeWheelLog(line),
+            notify: (message, sessionId) => this.store.pushSystemMessage(message, sessionId),
+            currentSelection: () => this.currentModelSelection,
+            modelOptions: () => getChatModelOptions(),
+            applyModel: (sessionId, selection, makeDefault) =>
+                this.applyModelSelection(sessionId, selection, makeDefault),
+            mcpServers: () => ({ servers: getMcpServersStatus(), helpText: buildMcpStatusHelpText() }),
+            supportsToolSearch: () => {
+                const settings = getChatApiSettings(this.currentModelSelection);
+                return isToolSearchEnabled({
+                    protocol: settings.protocol ?? "chat_completions",
+                    model: settings.model,
+                    baseURL: settings.apiBase,
+                    hostedTools: settings.hostedTools,
+                });
+            },
+            readLazyServers: sessionId => this.agent.getSessionLazyMcpServers(sessionId),
+            saveLazyServers: (sessionId, servers) => this.agent.setSessionLazyMcpServers(sessionId, servers),
+            createModelPanel: ({ options, current, visibleRows, close, complete }) => {
+                const settings = getChatApiSettings(current);
+                return new ModelPanel({
+                    options,
+                    // 强度也交给面板做默认高亮：目标模型支持就沿用，否则 auto
+                    current: {
+                        protocol: settings.protocol!,
+                        model: settings.model,
+                        reasoningEffort: effectiveReasoningEffort(current),
+                    },
+                    visibleRows,
+                    close,
+                    complete,
+                });
+            },
+            createMcpPanel: input => new McpPanel(input),
+        });
+
         this.restoreFocus();
         this.bindEditor();
         bindGlobalKeys(this.tui, this.createKeyHost());
@@ -407,7 +468,7 @@ export class ChatApp {
             }
         });
         // 提问通道装配后 `ask_user` 才会下发给模型。
-        setUserQuestionChannel({ ask: (request, signal) => this.askUser(request, signal) });
+        setUserQuestionChannel({ ask: (request, signal) => this.questions.ask(request, signal) });
     }
 
     /**
@@ -487,7 +548,7 @@ export class ChatApp {
         try {
             await this.refreshSessions();
             // 先取一份归属快照，面板首帧就能显示 ●/◎/◌ 与他实例的忙闲
-            void this.refreshOwnership(true);
+            void this.ownership.refresh(true);
             if (!options.skipInitialView) this.openInitialView();
             this.renderStatusBar();
         } catch (error: any) {
@@ -532,21 +593,12 @@ export class ChatApp {
         return this.activeTurnSessions.size > 0 || this.turnState.hasModelActivity();
     }
 
-    /** 挂着的提问：任意会话在等作答都优先于「运行中」。 */
-    private pendingQuestionMessage(): string | undefined {
-        for (const pending of this.pendingQuestions.values()) {
-            const first = pending.questions[0];
-            return first ? questionLabel(first) : "等待用户作答";
-        }
-        return undefined;
-    }
-
     /**
      * 把本实例的聚合状态上报给 herdr：阻塞 > 运行中 > 空闲。
      * herdr 的 agent 状态是 pane 级，多会话并行时必须看全体而不是刚结束的那个会话。
      */
     private syncHerdrState(): void {
-        const block = this.herdrBlock ?? this.pendingQuestionMessage();
+        const block = this.herdrBlock ?? this.questions.blockedMessage();
         if (block) {
             herdrReporter.report("blocked", block);
             return;
@@ -823,14 +875,14 @@ export class ChatApp {
                 if (args.length > 0) {
                     await this.applyMcpToggle(args, sessionId ?? undefined);
                 } else if (sessionId) {
-                    this.openMcpPanel(sessionId);
+                    this.modelMcp.openMcp(sessionId);
                 } else {
                     this.store.pushSystemMessage(buildMcpStatusHelpText());
                 }
                 break;
             case "/model":
                 if (args.length === 0) {
-                    this.openModelPanel(sessionId!);
+                    this.modelMcp.openModel(sessionId!);
                 } else if (args[0] === "effort") {
                     await this.handleEffortCommand(args.slice(1), sessionId ?? undefined);
                 } else {
@@ -905,164 +957,6 @@ export class ChatApp {
         this.renderStatusBar();
     }
 
-    private openModelPanel(sessionId: string): void {
-        if (!this.panels.isEmpty || this.exiting) return;
-        if (this.agent.isSessionBusy(sessionId)) {
-            this.store.pushSystemMessage("当前会话正在执行，暂不能切换模型。", sessionId);
-            return;
-        }
-
-        const options = getChatModelOptions();
-        if (options.length === 0) {
-            this.store.pushSystemMessage([
-                "没有配置可切换的模型。",
-                "请在配置文件中为 Responses API 或 Chat Completions 配置模型：",
-                "模型列表使用 OPENAI_RESPONSES_MODELS 或 OPENAI_CHAT_MODELS，以逗号分隔。",
-            ].join("\n"), sessionId);
-            return;
-        }
-
-        const current = getChatApiSettings(this.currentModelSelection);
-        const panel = new ModelPanel({
-            options,
-            // 强度也交给面板做默认高亮：目标模型支持就沿用，否则 auto
-            current: {
-                protocol: current.protocol!,
-                model: current.model,
-                reasoningEffort: effectiveReasoningEffort(this.currentModelSelection),
-            },
-            visibleRows: panelContentRows(this.tui),
-            close: () => this.closeModelPanel(),
-            complete: (selection, makeDefault) => this.applyModelSelection(sessionId, selection, makeDefault),
-        });
-        const handle = openPanelOverlay(this.tui, panel, "model");
-        this.panels.push({
-            kind: "model",
-            panel,
-            meta: handle,
-            onClose: () => this.afterPanelClosed(handle),
-        });
-        this.writeWheelLog("打开面板 model");
-        this.tui.requestRender();
-    }
-
-    /**
-     * MCP 浮层：查看服务状态，并为本会话临时启用 / 停用 lazy server。
-     * 启用状态落盘在会话事件里，重启后跟着会话回来。
-     */
-    private openMcpPanel(sessionId: string): void {
-        if (!this.panels.isEmpty || this.exiting) return;
-        if (this.agent.isSessionBusy(sessionId)) {
-            this.store.pushSystemMessage("当前会话正在执行，暂不能调整 lazy MCP 工具的下发。", sessionId);
-            return;
-        }
-
-        const servers = getMcpServersStatus();
-        if (servers.length === 0) {
-            this.store.pushSystemMessage(buildMcpStatusHelpText(), sessionId);
-            return;
-        }
-
-        const settings = getChatApiSettings(this.currentModelSelection);
-        const toolSearch = isToolSearchEnabled({
-            protocol: settings.protocol ?? "chat_completions",
-            model: settings.model,
-            baseURL: settings.apiBase,
-            hostedTools: settings.hostedTools,
-        });
-
-        void this.agent.getSessionLazyMcpServers(sessionId).then((enabled) => {
-            // 读状态是异步的：期间可能又开了别的面板，或用户已切走会话
-            if (!this.panels.isEmpty || this.exiting) return;
-            if (this.store.currentSessionId !== sessionId) return;
-            const panel = new McpPanel({
-                servers,
-                enabled,
-                toolSearch,
-                visibleRows: panelContentRows(this.tui),
-                close: () => this.closeMcpPanel(),
-                toggle: nextEnabled => void this.saveLazyMcpServers(sessionId, nextEnabled),
-            });
-            const handle = openPanelOverlay(this.tui, panel, "mcp");
-            this.mcpPanel = panel;
-            this.panels.push({
-                kind: "mcp",
-                panel,
-                meta: handle,
-                onClose: () => this.afterPanelClosed(handle),
-            });
-            this.writeWheelLog("打开面板 mcp");
-            this.tui.requestRender();
-        }).catch((error: any) => {
-            this.store.pushSystemMessage(
-                `MCP 状态读取失败：${error?.message ?? String(error)}`,
-                sessionId,
-            );
-        });
-    }
-
-    private closeMcpPanel(): void {
-        this.mcpPanel = null;
-        this.panels.remove("mcp");
-    }
-
-    /**
-     * 面板给出的是整份启用集：按会话串行落盘，连按空格时只保留最新一份。
-     * 并发调用会撞会话锁（beginSessionOperation），所以这里必须自己排队。
-     */
-    private saveLazyMcpServers(sessionId: string, servers: string[]): void {
-        const queue = this.lazySaveQueues.get(sessionId) ?? { running: false };
-        this.lazySaveQueues.set(sessionId, queue);
-        if (queue.running) {
-            queue.queued = servers;
-            return;
-        }
-        queue.running = true;
-        void this.flushLazyMcpServers(sessionId, servers, queue);
-    }
-
-    private async flushLazyMcpServers(
-        sessionId: string,
-        servers: string[],
-        queue: { running: boolean; queued?: string[] },
-    ): Promise<void> {
-        try {
-            await this.agent.setSessionLazyMcpServers(sessionId, servers);
-        } catch (error: any) {
-            // 存储失败就丢掉排队项并回读真实状态：宁可少一次切换，也不要面板与事件分叉
-            queue.queued = undefined;
-            this.lazySaveQueues.delete(sessionId);
-            this.store.pushSystemMessage(
-                `lazy MCP 启用状态保存失败：${error?.message ?? String(error)}`,
-                sessionId,
-            );
-            await this.resyncMcpPanel(sessionId);
-            return;
-        }
-
-        const next = queue.queued;
-        queue.queued = undefined;
-        if (next) {
-            await this.flushLazyMcpServers(sessionId, next, queue);
-            return;
-        }
-        queue.running = false;
-        this.lazySaveQueues.delete(sessionId);
-    }
-
-    /** 回读落盘状态并重置面板勾选。 */
-    private async resyncMcpPanel(sessionId: string): Promise<void> {
-        if (!this.mcpPanel) return;
-        try {
-            this.mcpPanel.setEnabled(await this.agent.getSessionLazyMcpServers(sessionId));
-        } catch (error: any) {
-            this.store.pushSystemMessage(
-                `lazy MCP 状态回读失败：${error?.message ?? String(error)}`,
-                sessionId,
-            );
-        }
-    }
-
     /** 模型/强度落盘：优先立即写事件（进程退出不丢），前端替身退回 pending 语义。 */
     private async persistModelSelection(sessionId: string, selection: ChatModelSelection): Promise<void> {
         if (this.agent.setSessionModelSelectionNow) {
@@ -1087,7 +981,7 @@ export class ChatApp {
         try {
             await this.persistModelSelection(sessionId, selected);
         } catch (error: any) {
-            this.closeModelPanel();
+            this.modelMcp.closeModel();
             this.store.pushSystemMessage(`模型设置保存失败：${error?.message ?? String(error)}`, sessionId);
             return;
         }
@@ -1110,17 +1004,13 @@ export class ChatApp {
             }
         }
 
-        this.closeModelPanel();
+        this.modelMcp.closeModel();
         this.renderStatusBar();
         const effortLabel = selected.reasoningEffort ? `，思考强度 ${selected.reasoningEffort}` : "";
         this.store.pushSystemMessage(defaultFailure
             ? `当前会话模型已切换为 ${selected.protocol} · ${selected.model}${effortLabel}；设置默认模型失败：${defaultFailure}`
             : `当前会话模型已切换为 ${selected.protocol} · ${selected.model}${effortLabel}${makeDefault ? "，并设为默认" : ""}`,
         sessionId);
-    }
-
-    private closeModelPanel(): void {
-        this.panels.remove("model");
     }
 
     /** /model <协议> <模型> [强度|auto]：与面板走同一条落盘路径（不复制业务逻辑）。 */
@@ -1259,7 +1149,7 @@ export class ChatApp {
             await this.agent.deleteSession(sessionId);
             hasDeleted = true;
             this.agent.releaseSession(sessionId, { cause: "delete" });
-            void this.refreshOwnership(true);
+            void this.ownership.refresh(true);
             this.store.removeSessionView(sessionId);
             this.store.sessions = this.store.sessions.filter(session => session.sessionId !== sessionId);
             this.store.setSessions(this.store.sessions);
@@ -1312,7 +1202,7 @@ export class ChatApp {
             cancelRename: () => this.cancelRename(),
             openSessionPanel: () => this.openSessionPanel(),
             openShortcutPanel: () => this.openShortcutPanel(),
-            toggleQuestionPanel: () => this.toggleQuestionPanel(),
+            toggleQuestionPanel: () => this.questions.toggle(),
             continueCurrent: () => { void this.continueCurrent(); },
             editorText: () => this.editor.getText(),
             pendingCount: () => this.pending.count(this.store.currentSessionId),
@@ -2057,7 +1947,7 @@ export class ChatApp {
         const result = await this.agent.claimSession(sessionId);
         if (!result.ok) throw new Error(describeClaimFailure(result));
         // 认领成功即归属变化（本实例 ●），立刻校正快照，别等下一次轮询
-        void this.refreshOwnership(true);
+        void this.ownership.refresh(true);
     }
 
     /**
@@ -2066,7 +1956,7 @@ export class ChatApp {
      */
     private async handleSessionReleased(sessionId: string, cause: SessionReleaseCause = "peer"): Promise<void> {
         this.pending.clear(sessionId);
-        this.closeQuestionPanel(sessionId);
+        this.questions.close(sessionId);
         this.store.removeSessionView(sessionId);
         if (cause === "tool" || cause === "auto") {
             const summary = this.store.sessions.find(session => session.sessionId === sessionId);
@@ -2078,7 +1968,7 @@ export class ChatApp {
                 void this.refreshSessions();
             }
         }
-        void this.refreshOwnership(true);
+        void this.ownership.refresh(true);
         if (this.store.currentSessionId !== sessionId) {
             this.renderTabBar();
             return;
@@ -2125,7 +2015,7 @@ export class ChatApp {
             // pasteCounter，保证 marker 展开正确且 id 不与新粘贴冲突。
             this.setDraft(currentId, this.editor.getText(), this.editor.getImageAttachments());
             // 提问浮层只服务当前会话：切走先收起（问题本身仍挂在原会话上）
-            this.closeQuestionPanel();
+            this.questions.close();
         }
 
         const hasCachedView = this.store.hasSessionView(sessionId);
@@ -2165,7 +2055,7 @@ export class ChatApp {
             this.renderPending();
             this.sendNextPending(sessionId);
             // 目标会话挂着未作答的提问：切进来就把浮层弹出来
-            this.syncQuestionPanel();
+            this.questions.sync();
             this.syncHerdrMetadata();
         }
     }
@@ -2264,13 +2154,13 @@ export class ChatApp {
             ...(cleanTitle ? { title: cleanTitle.slice(0, 200) } : {}),
         });
         this.store.setSessions(this.store.sessions);
-        void this.refreshOwnership(true);
+        void this.ownership.refresh(true);
         this.tui.flash(cleanTitle ? `✚ 子会话：${truncateInline(cleanTitle, 20)}` : "✚ 已派生新的子会话");
     }
 
     private async handleSessionWoken(sessionId: string): Promise<void> {
         this.store.setSessions(await this.agent.listSessions());
-        void this.refreshOwnership(true);
+        void this.ownership.refresh(true);
         this.renderTabBar();
         this.tui.flash(`已唤醒会话 ${sessionId.slice(-8)}，可继续派活`);
     }
@@ -2361,7 +2251,7 @@ export class ChatApp {
             await this.agent.closeSession(sessionId);
             // 归档即放弃持有：别的实例可以接管它（只读查看）
             this.agent.releaseSession(sessionId, { cause: "archive" });
-            void this.refreshOwnership(true);
+            void this.ownership.refresh(true);
             // 归档后清理内存缓存，重新打开时从事件日志重建，避免残留瞬态 UI 状态。
             this.store.removeSessionView(sessionId);
             if (summary) summary.archived = true;
@@ -2495,13 +2385,13 @@ export class ChatApp {
             meta: handle,
             onClose: () => {
                 panel.dispose();
-                this.stopOwnershipTimer();
+                this.ownership.stopPolling();
                 this.afterPanelClosed(handle);
             },
         });
         // 打开时先校正一次归属，之后按节流轮询（他实例的认领/忙闲会变）
-        void this.refreshOwnership(true);
-        this.startOwnershipTimer();
+        void this.ownership.refresh(true);
+        this.ownership.startPolling();
         this.writeWheelLog("打开面板 session");
         this.tui.requestRender();
     }
@@ -2545,7 +2435,7 @@ export class ChatApp {
             await this.selectSession(sessionId);
         } catch (error: any) {
             // 认领失败往往是「对方正忙」：立刻刷新归属，让列表反映出最新状态
-            void this.refreshOwnership(true);
+            void this.ownership.refresh(true);
             this.tui.flash(error?.message ?? String(error));
             return;
         }
@@ -2589,170 +2479,6 @@ export class ChatApp {
      * 没有超时——`signal` 中止（⌃C 中止回合、退出、会话被释放）时按取消结算，
      * 所以工具不会永远悬着，而用户在场时可以慢慢想。
      */
-    private askUser(request: UserQuestionRequest, signal?: AbortSignal): Promise<UserAnswer> {
-        return new Promise<UserAnswer>(resolve => {
-            let settled = false;
-            const settle = (answer: UserAnswer): void => {
-                if (settled) return;
-                settled = true;
-                signal?.removeEventListener("abort", onAbort);
-                this.pendingQuestions.delete(request.sessionId);
-                this.questionPanels.delete(request.sessionId);
-                this.collapsedQuestionSessions.delete(request.sessionId);
-                this.closeQuestionPanel(request.sessionId);
-                this.renderTabBar();
-                this.renderStatusBar();
-                this.syncHerdrState();
-                resolve(answer);
-            };
-            const onAbort = (): void => settle({ cancelled: true });
-
-            if (signal?.aborted) {
-                resolve({ cancelled: true });
-                return;
-            }
-            signal?.addEventListener("abort", onAbort, { once: true });
-
-            this.pendingQuestions.set(request.sessionId, {
-                requestId: request.requestId,
-                sessionId: request.sessionId,
-                questions: request.questions,
-                answers: request.questions.map(() => null),
-                settle,
-            });
-            this.renderTabBar();
-            this.renderStatusBar();
-            this.syncHerdrState();
-
-            if (request.sessionId === this.store.currentSessionId) {
-                this.openQuestionPanel(request.sessionId);
-            } else {
-                this.tui.flash(`❓ 有会话在等你作答：${this.sessionLabel(request.sessionId)}（切过去作答）`);
-            }
-        });
-    }
-
-    /** 打开底部提问区：只在当前会话确实挂着提问时才有意义。 */
-    private openQuestionPanel(sessionId: string): void {
-        if (this.exiting) return;
-        const pending = this.pendingQuestions.get(sessionId);
-        if (!pending || sessionId !== this.store.currentSessionId) return;
-        if (!this.panels.isEmpty) return;
-
-        if (this.collapsedQuestionSessions.has(sessionId)) {
-            this.showCollapsedQuestionDock(sessionId);
-            return;
-        }
-
-        let panel = this.questionPanels.get(sessionId);
-        if (!panel) {
-            const terminalRows = this.tui.terminal.rows || 24;
-            const visibleRows = Math.max(3, Math.min(8, Math.floor(terminalRows * 0.3) - 2));
-            panel = new QuestionPanel({
-                tui: this.tui,
-                questions: pending.questions,
-                answers: pending.answers,
-                visibleRows,
-                submit: () => pending.settle({
-                    cancelled: false,
-                    answers: pending.answers.filter((answer): answer is UserQuestionAnswer => answer !== null),
-                }),
-                cancel: () => pending.settle({ cancelled: true }),
-                collapse: () => this.collapseQuestionPanel(sessionId),
-            });
-            this.questionPanels.set(sessionId, panel);
-        }
-
-        this.questionDock.clear();
-        this.questionDock.addChild(new PanelFrame(panel, theme.question));
-        this.questionDockSessionId = sessionId;
-        this.panels.push({
-            kind: "question",
-            panel,
-            sessionId,
-            // ⌃⇧Q 折叠而不是关闭：这是提问面板独有的键位，声明在层上而非路由函数里
-            intercept: (data) => {
-                if (!matchesKey(data, Key.ctrlShift("q"))) return false;
-                this.collapseQuestionPanel(sessionId);
-                return true;
-            },
-            onClose: () => this.clearQuestionDock(sessionId),
-        });
-        this.restoreFocus();
-        this.tui.requestRender();
-    }
-
-    /** 摘掉底部提问区但不改栈（栈内的 onClose 与外部收尾共用）。 */
-    private clearQuestionDock(sessionId?: string): void {
-        if (sessionId && this.questionDockSessionId && this.questionDockSessionId !== sessionId) return;
-        this.questionDock.clear();
-        this.questionDockSessionId = null;
-    }
-
-    /** 任意浮层关闭后的统一收尾：还原焦点并让被压在下面的提问重新露出来。 */
-    private afterPanelClosed(handle: PanelOverlay): void {
-        handle.handle.hide();
-        this.restoreFocus();
-        this.tui.requestRender();
-        this.syncQuestionPanel();
-    }
-
-    /**
-     * 收起提问面板但不结算：切回阅读正文时保留题目选择与自填内容。
-     */
-    private closeQuestionPanel(sessionId?: string): void {
-        const layer = this.panels.find("question");
-        if (sessionId && layer?.sessionId && layer.sessionId !== sessionId) return;
-        if (sessionId && this.questionDockSessionId && this.questionDockSessionId !== sessionId) return;
-        if (layer) this.panels.remove("question");
-        else this.clearQuestionDock(sessionId);
-        if (this.panels.isEmpty) this.restoreFocus();
-        this.tui.requestRender();
-    }
-
-    /** Esc 收起问题供阅读；⌃⇧Q 可重新打开。 */
-    private collapseQuestionPanel(sessionId: string): void {
-        const layer = this.panels.find("question");
-        if (layer?.sessionId !== sessionId) return;
-        // 折叠前先入集合，避免 onClose 清掉 dock 后又立刻按"未折叠"重开
-        this.collapsedQuestionSessions.add(sessionId);
-        this.panels.remove("question");
-        this.showCollapsedQuestionDock(sessionId);
-        this.restoreFocus();
-        this.tui.requestRender();
-    }
-
-    /** 折叠态只占一行，方便阅读正文期间知道仍有问题待答。 */
-    private showCollapsedQuestionDock(sessionId: string): void {
-        const pending = this.pendingQuestions.get(sessionId);
-        if (!pending || sessionId !== this.store.currentSessionId) return;
-        const current = pending.answers.findIndex(answer => answer === null);
-        const step = current < 0 ? 1 : current + 1;
-        const label = `❓ 等待回答 ${step}/${pending.questions.length} · ⌃⇧Q 展开 · ⌃C 取消`;
-        this.questionDock.clear();
-        this.questionDock.addChild(new Text(theme.question(label), 1, 0));
-        this.questionDockSessionId = sessionId;
-        this.tui.requestRender();
-    }
-
-    /** 切换折叠态；没有当前会话的待答问题时不处理。 */
-    private toggleQuestionPanel(): void {
-        const sessionId = this.store.currentSessionId;
-        if (!sessionId || !this.pendingQuestions.has(sessionId) || !this.panels.isEmpty) return;
-        this.collapsedQuestionSessions.delete(sessionId);
-        this.openQuestionPanel(sessionId);
-    }
-
-    /** 当前会话挂着未作答的提问就显示底部面板或折叠提示。 */
-    private syncQuestionPanel(): void {
-        const sessionId = this.store.currentSessionId;
-        if (!sessionId || !this.pendingQuestions.has(sessionId)) {
-            this.closeQuestionPanel();
-            return;
-        }
-        this.openQuestionPanel(sessionId);
-    }
-
     /** 会话展示名：标题优先，回退 id 末 8 位。 */
     private sessionLabel(sessionId: string): string {
         const title = this.store.sessions.find(session => session.sessionId === sessionId)?.title;
@@ -2765,9 +2491,17 @@ export class ChatApp {
         this.panels.clear();
     }
 
+    /** 任意浮层关闭后的统一收尾：还原焦点并让被压在下面的提问重新露出来。 */
+    private afterPanelClosed(handle: PanelOverlay): void {
+        handle.handle.hide();
+        this.restoreFocus();
+        this.tui.requestRender();
+        this.questions.sync();
+    }
+
     private buildSessionPanelItems(): SessionPanelItem[] {
         return this.store.sessions.map((session) => {
-            const ownership = this.describeSessionOwner(session.sessionId);
+            const ownership = this.ownership.describe(session.sessionId);
             return {
                 sessionId: session.sessionId,
                 ...(session.origin ? { origin: session.origin } : {}),
@@ -2779,81 +2513,10 @@ export class ChatApp {
                 archived: session.archived,
                 busy: this.turnState.isBusy(session.sessionId),
                 active: session.sessionId === this.store.currentSessionId,
-                question: this.pendingQuestions.has(session.sessionId),
+                question: this.questions.hasPending(session.sessionId),
                 ...(ownership ? { ownerState: ownership.state, owner: ownership.text } : {}),
             };
         });
-    }
-
-    /**
-     * 会话归属的展示文案与状态。
-     * 本实例的待交付计数实时取自通道（不进快照）；他实例的忙闲与处理中条数来自 who 握手。
-     */
-    private describeSessionOwner(sessionId: string): { state: SessionOwnerState; text: string } | null {
-        const ownership = this.sessionOwnership.get(sessionId);
-        if (!ownership) return null;
-
-        if (ownership.state === "mine") {
-            const { awaiting, queued } = this.agent.peerPendingStats(sessionId);
-            const parts = ["本实例"];
-            if (awaiting > 0) parts.push(`等待 ${awaiting}`);
-            if (queued > 0) parts.push(`待附加 ${queued}`);
-            return { state: "mine", text: parts.join(" · ") };
-        }
-        if (ownership.state === "free") return { state: "free", text: describeOwnership(sessionId, ownership) };
-
-        const info = ownership.info;
-        if (!info) return { state: "other", text: describeOwnership(sessionId, ownership) };
-        const parts = [describeOwnership(sessionId, ownership)];
-        if (info.pending > 0) parts.push(`处理中 ${info.pending}`);
-        return { state: "other", text: parts.join(" · ") };
-    }
-
-    /** 刷新归属快照（节流 + 在途去重）；force 用于认领/释放后立即校正。 */
-    private refreshOwnership(force = false): Promise<void> {
-        if (this.ownershipRefreshPromise) return this.ownershipRefreshPromise;
-        if (!force && Date.now() - this.ownershipRefreshedAt < ChatApp.OWNERSHIP_TTL_MS) {
-            return Promise.resolve();
-        }
-
-        const ids = this.store.sessions.map(session => session.sessionId);
-        let probe: Promise<Map<string, PeerOwnership>>;
-        try {
-            probe = Promise.resolve(this.agent.listSessionOwnership(ids));
-        } catch {
-            // 宿主未实现归属探测（如精简替身）：归属列留空，不影响面板其它功能
-            return Promise.resolve();
-        }
-        this.ownershipRefreshPromise = probe
-            .then((map) => {
-                this.sessionOwnership = map;
-                this.ownershipRefreshedAt = Date.now();
-            })
-            .catch(() => {
-                // 探测失败保留旧快照：归属只是展示辅助，不该打断主流程
-            })
-            .finally(() => {
-                this.ownershipRefreshPromise = null;
-                this.renderTabBar();
-            });
-        return this.ownershipRefreshPromise;
-    }
-
-    /** 面板打开期间轮询归属：他实例的忙闲/认领变化要反映到列表上。 */
-    private startOwnershipTimer(): void {
-        if (this.ownershipTimer) return;
-        this.ownershipTimer = setInterval(() => {
-            if (!this.hasSessionPanelOpen()) return;
-            this.refreshOwnership();
-        }, ChatApp.OWNERSHIP_TTL_MS);
-        // 轮询只是面板展示辅助：不应阻止进程退出（也不该卡住测试）
-        this.ownershipTimer.unref?.();
-    }
-
-    private stopOwnershipTimer(): void {
-        if (!this.ownershipTimer) return;
-        clearInterval(this.ownershipTimer);
-        this.ownershipTimer = null;
     }
 
     private hasSessionPanelOpen(): boolean {
@@ -3081,7 +2744,7 @@ export class ChatApp {
             now: Date.now(),
             contextTokens: this.store.contextTokens,
             contextSource: this.store.contextSource,
-            awaitingAnswer: this.pendingQuestions.size,
+            awaitingAnswer: this.questions.pendingCount(),
             backgroundRunning: sessionId ? backgroundTaskManager.runningCount(sessionId) : 0,
             totalTokens: this.store.totalTokens,
             promptTokens: this.store.promptTokens,
@@ -3166,7 +2829,7 @@ export class ChatApp {
                 messageCount: session.messageCount,
                 busy: this.turnState.isBusy(session.sessionId),
                 active: session.sessionId === this.store.currentSessionId,
-                question: this.pendingQuestions.has(session.sessionId),
+                question: this.questions.hasPending(session.sessionId),
             }));
     }
 

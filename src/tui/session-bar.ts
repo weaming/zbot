@@ -3,7 +3,8 @@
  * 纯函数实现便于单测；宽度按显示列计算，中文标题不会被截半个字。
  */
 
-import { sliceByColumn, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import { truncatePlain } from "../format/text.js";
 import { originPrefix } from "../format/session-origin.js";
 import { DEFAULT_SPINNER, sessionMarker } from "./session-marker.js";
 import { SESSION_NEW_URL, SESSION_PANEL_URL, wrapAppLink, wrapTabLink } from "./slash-commands.js";
@@ -65,12 +66,10 @@ function padTo(text: string, width: number, side: "left" | "right"): string {
     return side === "right" ? text + pad : pad + text;
 }
 
-/** 按显示列截断纯文本：不使用 truncateToWidth（它会插入 ANSI 复位，破坏 tab 背景色）。 */
-function truncatePlain(text: string, maxWidth: number): string {
+/** 按显示列截断纯文本：口径与 format/text 的 truncatePlain 一致（不插 ANSI 复位，免得破坏 tab 背景色）。 */
+function truncateTabLabel(text: string, maxWidth: number): string {
     if (maxWidth <= 0) return "";
-    const plain = stripTerminalSequences(text).replace(/\s+/g, " ").trim();
-    if (visibleWidth(plain) <= maxWidth) return plain;
-    return `${sliceByColumn(plain, 0, Math.max(0, maxWidth - 1), true)}…`;
+    return truncatePlain(text, maxWidth);
 }
 
 /** 计算可见 tab 数与等宽列宽：先按上限估可见数，需要溢出指示时再扣掉两侧预留。 */
@@ -103,7 +102,7 @@ export function renderSessionTab(tab: SessionBarTab, tabWidth: number, spinner: 
         count = "";
         titleWidth = tabWidth - TAB_FIXED_WIDTH;
     }
-    const title = truncatePlain(`${originPrefix(tab.origin)}${tab.title ?? ""}`, titleWidth);
+    const title = truncateTabLabel(`${originPrefix(tab.origin)}${tab.title ?? ""}`, titleWidth);
     const text = ` ${label} ${marker} ${title}${count} `;
     return padTo(text, tabWidth, "right");
 }

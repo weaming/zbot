@@ -151,15 +151,15 @@ describe("特征：归属轮询生命周期", () => {
     test("打开会话面板启动归属轮询，关闭后停止", () => {
         const { app } = makeApp();
         app.openSessionPanel();
-        expect(app.ownershipTimer).not.toBeNull();
+        expect(app.ownership.isPolling()).toBe(true);
 
         app.closeActivePanel();
-        expect(app.ownershipTimer).toBeNull();
+        expect(app.ownership.isPolling()).toBe(false);
     });
 
     test("非会话面板不启动归属轮询", () => {
         const { app } = makeApp();
         app.openShortcutPanel();
-        expect(app.ownershipTimer).toBeNull();
+        expect(app.ownership.isPolling()).toBe(false);
     });
 });

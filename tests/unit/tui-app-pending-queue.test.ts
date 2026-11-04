@@ -1808,7 +1808,7 @@ describe("ChatApp 会话条", () => {
             { sessionId: "sess-other", messageCount: 1, title: "他实例" },
         ]);
 
-        await (app as any).refreshOwnership(true);
+        await (app as any).ownership.refresh(true);
         expect(probes).toBe(1);
 
         const items = (app as any).buildSessionPanelItems();
@@ -1823,7 +1823,7 @@ describe("ChatApp 会话条", () => {
         expect(other.owner).toContain("处理中 2");
 
         // 节流：TTL 内再次刷新不重新探测
-        await (app as any).refreshOwnership();
+        await (app as any).ownership.refresh();
         expect(probes).toBe(1);
     });
 
@@ -1831,10 +1831,10 @@ describe("ChatApp 会话条", () => {
         const app = new ChatApp(makeFakeAgent() as any, new ChatStore());
 
         (app as any).openSessionPanel();
-        expect((app as any).ownershipTimer).not.toBeNull();
+        expect((app as any).ownership.isPolling()).toBe(true);
 
         (app as any).closeSessionPanel();
-        expect((app as any).ownershipTimer).toBeNull();
+        expect((app as any).ownership.isPolling()).toBe(false);
     });
 
     test("面板里删除会话：保持面板打开并同步列表", async () => {

@@ -145,7 +145,7 @@ describe("ChatApp 提问接线", () => {
             answers: [{ header: "部署方式", question: "这次部署走哪条路？", selected: ["方案 A"] }],
         });
         expect((app as any).panels.find("question")).toBeUndefined();
-        expect((app as any).pendingQuestions.size).toBe(0);
+        expect((app as any).questions.pendingCount()).toBe(0);
         expect(focusCalls.at(-1)).toBe((app as any).editor);
         expect(tui.flashCalls).toEqual([]);
     });
@@ -175,7 +175,7 @@ describe("ChatApp 提问接线", () => {
         controller.abort();
         expect(await pending).toEqual({ cancelled: true });
         expect((app as any).panels.find("question")).toBeUndefined();
-        expect((app as any).pendingQuestions.size).toBe(0);
+        expect((app as any).questions.pendingCount()).toBe(0);
     });
 
     test("已经中止的信号：直接按取消结算，不挂起也不弹层", async () => {
@@ -186,7 +186,7 @@ describe("ChatApp 提问接线", () => {
         const answer = await getUserQuestionChannel()!.ask(request(), controller.signal);
         expect(answer).toEqual({ cancelled: true });
         expect((app as any).panels.find("question")).toBeUndefined();
-        expect((app as any).pendingQuestions.size).toBe(0);
+        expect((app as any).questions.pendingCount()).toBe(0);
     });
 
     test("tab 标记：等待作答的会话显示 ?（优先于运行中转圈）", async () => {
@@ -197,7 +197,7 @@ describe("ChatApp 提问接线", () => {
         expect(tab.question).toBe(true);
         expect((app as any).buildSessionBarTabs().find((item: any) => item.sessionId === SESSION).question).toBe(false);
 
-        (app as any).pendingQuestions.get(OTHER).settle({ cancelled: true });
+        (app as any).questions.pending(OTHER)!.settle({ cancelled: true });
         await pending;
         expect((app as any).buildSessionBarTabs().find((item: any) => item.sessionId === OTHER).question).toBe(false);
     });
@@ -306,7 +306,7 @@ describe("ChatApp 提问接线", () => {
 
         const pending = getUserQuestionChannel()!.ask(request());
         expect(lastHerdrState()).toEqual(["blocked", "provider 配置无效"]);
-        (app as any).pendingQuestions.get(SESSION).settle({ cancelled: true });
+        (app as any).questions.pending(SESSION)!.settle({ cancelled: true });
         await pending;
         expect(lastHerdrState()).toEqual(["blocked", "provider 配置无效"]);
     });
