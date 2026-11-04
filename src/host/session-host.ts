@@ -53,6 +53,12 @@ import { MAX_SESSION_TITLE_LENGTH, type Session } from "../types/session.js";
 import type { ChatModelSelection } from "../types/chat-model.js";
 import { aggregateInstanceUsage, summarizeEvents } from "./summary.js";
 import { compactSessionContext, runSessionTurn, type TurnHost } from "./turn.js";
+import {
+    executePeerCommand,
+    isPeerCommandAllowedOnArchived,
+    type PeerCommandHost,
+    type PeerDeferredAction,
+} from "./peer-command.js";
 import type {
     ActiveSession,
     InstanceNetworkStats,
@@ -61,7 +67,6 @@ import type {
     SessionHostOptions,
     SessionCreateInit,
     SessionSummary,
-    SlashCommandOutcome,
     TurnSpec,
     TurnUserMessage,
 } from "./session-host-types.js";
@@ -71,7 +76,7 @@ import {
     SessionNotFoundError,
 } from "./session-host-types.js";
 import { toUserContent, type UserMessageInput } from "../types/image.js";
-import { parseSlashCommand, REVIEW_PROMPT, type SlashCommandParse } from "../commands/slash-command.js";
+import { buildReviewPrompt, parseSlashCommand, type SlashCommandParse } from "../commands/slash-command.js";
 import { backgroundTaskManager } from "../tools/background-tasks.js";
 import { deleteSessionImageAssets } from "../utils/image-assets.js";
 
@@ -136,8 +141,6 @@ export class LocalSessionHost implements SessionHost {
     private readonly cancellingSessions = new Set<string>();
     /** 已进入退出流程：不再接受新的驱动回合（结果留在队列里即可）。 */
     private isClosing = false;
-    /** 会话间命令执行器（TUI 注入；无 UI 宿主不注册，命令按文本处理）。 */
-    private slashCommandHandler?: (sessionId: string, text: string) => SlashCommandOutcome | Promise<SlashCommandOutcome>;
     /** 每会话的有界排队投递队列（FIFO）。 */
     private readonly peerQueues = new Map<string, QueuedPeerMessage[]>();
     /**
@@ -347,13 +350,6 @@ export class LocalSessionHost implements SessionHost {
         return this.control.takeResults(sessionId);
     }
 
-    /** 注册会话间命令执行器：解析层放行的 allow 命令交给前端执行。 */
-    setSlashCommandHandler(
-        handler: (sessionId: string, text: string) => SlashCommandOutcome | Promise<SlashCommandOutcome>,
-    ): void {
-        this.slashCommandHandler = handler;
-    }
-
     /** 本实例在该会话上的待交付计数：等待别人回传 + 已就绪待附加。 */
     peerPendingStats(sessionId: string): { awaiting: number; queued: number } {
         return {
@@ -409,9 +405,13 @@ export class LocalSessionHost implements SessionHost {
         }
 
         try {
-            // 先确保会话已进内存（标题、cwd 与后续回合都依赖它），再落盘时间线
-            await this.requireActiveSession(sessionId);
-            await this.recordPeerMessage(sessionId, message, "in");
+            // 归档会话不写时间线：往 session_archived 之后追加任何事件都会把它悄悄"解除归档"。
+            // 能不能执行由 runPeerTurn 按命令矩阵判定（只读/生命周期命令放行，其余回明确失败）。
+            if (!await this.isSessionArchived(sessionId)) {
+                // 先确保会话已进内存（标题、cwd 与后续回合都依赖它），再落盘时间线
+                await this.requireActiveSession(sessionId);
+                await this.recordPeerMessage(sessionId, message, "in");
+            }
         } catch (error) {
             this.forgetPeerMessage(key);
             this.endSessionOperation(sessionId);
@@ -592,32 +592,38 @@ export class LocalSessionHost implements SessionHost {
         let content = "";
         let stopReason = "stop";
         let failure: string | undefined;
+        let deferred: PeerDeferredAction | undefined;
 
         // 模型回合由 runSessionTurn 自己释放互斥；命令分支与异常路径需要这里兜底
         let handedOff = false;
         try {
-            // 命令：先经共享解析层判定；非法参数/不支持的命令给明确结果，不跑模型也不当文本
+            // 未知 /xxx 与前导空格按纯文本交给模型；已识别命令一律执行（参数非法则明确报错）
             const parsed = parseSlashCommand(message.text);
-            if (parsed.kind === "invalid") {
+            // 归档会话只接受只读/生命周期命令（不要求可写会话视图），其余回明确失败
+            if (await this.isSessionArchived(sessionId)
+                && !(parsed.kind === "command" && isPeerCommandAllowedOnArchived(parsed))) {
+                const target = parsed.kind === "command" || parsed.kind === "invalid" ? parsed.name : "普通消息";
                 this.completePeerTurn(sessionId, message, {
                     content: "",
-                    stopReason: "invalid_command",
-                    failure: parsed.message,
+                    stopReason: "archived",
+                    failure: `会话已归档（${sessionId}），先 /unarchive 再执行 ${target}`,
                 });
                 return;
             }
-            if (parsed.kind === "command") {
-                const command = await this.resolvePeerSlashCommand(sessionId, message.text, parsed);
-                if (command.kind === "unsupported") {
+            if (parsed.kind === "command" || parsed.kind === "invalid") {
+                if (parsed.kind === "invalid") {
                     this.completePeerTurn(sessionId, message, {
                         content: "",
-                        stopReason: "unsupported_command",
-                        failure: command.message,
+                        stopReason: "invalid_command",
+                        failure: parsed.message,
                     });
                     return;
                 }
+                const command = await this.resolvePeerSlashCommand(sessionId, parsed);
                 if (command.kind === "output") {
                     this.completePeerTurn(sessionId, message, { content: command.output, stopReason: "command" });
+                    // 生命周期命令要等结果送达再拆链路（见 runDeferredPeerAction）
+                    deferred = command.deferred;
                     return;
                 }
                 if (command.kind === "prompt") prompt = command.prompt;
@@ -662,41 +668,46 @@ export class LocalSessionHost implements SessionHost {
         } finally {
             // 只有没交给 runSessionTurn 的路径才释放，避免删掉期间别的入口刚抢到的互斥
             if (!handedOff) this.endSessionOperation(sessionId);
+            // 结果已经送达且互斥已归还：这时候归档/关闭/删除才不会掐断回传
+            if (deferred) void this.runDeferredPeerAction(sessionId, deferred);
         }
     }
 
-    /**
-     * 会话间命令的落点：deny 明确拒绝；prompt 转模型指令；allow 交给前端执行器。
-     * 未注册执行器（无 UI 宿主）时回落成普通文本，由模型自己处理。
-     */
+    /** 会话间命令的落点：prompt 转模型指令，host 交宿主执行器。 */
     private async resolvePeerSlashCommand(
         sessionId: string,
-        text: string,
         parsed: Extract<SlashCommandParse, { kind: "command" }>,
     ): Promise<
-        { kind: "output"; output: string }
+        { kind: "output"; output: string; deferred?: PeerDeferredAction }
         | { kind: "prompt"; prompt: string }
-        | { kind: "unsupported"; message: string }
-        | { kind: "fallback" }
     > {
-        if (parsed.spec.peer === "deny") {
-            return {
-                kind: "unsupported",
-                message: `命令 ${parsed.name} 不支持从会话间消息执行，请在 TUI 里直接输入。`,
-            };
-        }
         if (parsed.spec.peer === "prompt") {
-            return parsed.name === "/review"
-                ? { kind: "prompt", prompt: REVIEW_PROMPT }
-                : { kind: "fallback" };
+            return { kind: "prompt", prompt: buildReviewPrompt(parsed.args[0]) };
         }
+        const result = await executePeerCommand(this.peerCommandHost, sessionId, parsed);
+        return { kind: "output", output: result.output, ...(result.deferred ? { deferred: result.deferred } : {}) };
+    }
 
-        const handler = this.slashCommandHandler;
-        if (!handler) return { kind: "fallback" };
-        const outcome = await handler(sessionId, text);
-        if (!outcome.handled) return { kind: "fallback" };
-        if (outcome.prompt) return { kind: "prompt", prompt: outcome.prompt };
-        return { kind: "output", output: outcome.output ?? "" };
+    /**
+     * 结果送达后再执行归档/关闭/删除：它们会拆掉会话视图与 socket，
+     * 先拆就等于把刚写出的结果连同回传链路一起扔掉。
+     */
+    private async runDeferredPeerAction(sessionId: string, action: PeerDeferredAction): Promise<void> {
+        // 会话要走了：排队中的投递先按 cancelled 收尾，调用方拿到终态而不是静静消失
+        this.dropAllQueuedPeerMessages(sessionId);
+        try {
+            if (action === "archive") {
+                await this.closeSession(sessionId);
+                this.releaseSession(sessionId, { cause: "archive" });
+            } else if (action === "delete") {
+                await this.deleteSession(sessionId);
+                this.releaseSession(sessionId, { cause: "delete" });
+            } else {
+                this.releaseSession(sessionId, { cause: "peer" });
+            }
+        } catch (error) {
+            console.error(`⚠️ [host] 会话间 ${action} 收尾失败:`, error);
+        }
     }
 
     /** 落定一条会话间回合结果（命令与模型回合共用）。 */
@@ -803,6 +814,8 @@ export class LocalSessionHost implements SessionHost {
         if (init?.selectedServers !== undefined) {
             await this.setSessionLazyMcpServers(sessionId, init.selectedServers);
         }
+        // 标题在这里固化：前端回调只负责展示，无 UI 宿主（peer /new、serve）也不会丢标题
+        if (init?.title?.trim()) await this.renameSession(sessionId, init.title);
         return { sessionId };
     }
 
@@ -922,8 +935,9 @@ export class LocalSessionHost implements SessionHost {
         this.onSessionCwdChanged?.(sessionId, resolved);
     }
 
-    async clearSession(sessionId: string): Promise<void> {
-        this.beginSessionOperation(sessionId);
+    /** 清空会话（截断事件日志重建）；alreadyReserved：会话间命令已持有互斥。 */
+    async clearSession(sessionId: string, options: { alreadyReserved?: boolean } = {}): Promise<void> {
+        if (options.alreadyReserved !== true) this.beginSessionOperation(sessionId);
         let lock: SessionLockHandle | undefined;
         try {
             lock = await acquireSessionLock(sessionId);
@@ -946,7 +960,7 @@ export class LocalSessionHost implements SessionHost {
             try {
                 await this.releaseSessionLockSafely(lock);
             } finally {
-                this.endSessionOperation(sessionId);
+                if (options.alreadyReserved !== true) this.endSessionOperation(sessionId);
             }
         }
     }
@@ -981,7 +995,10 @@ export class LocalSessionHost implements SessionHost {
         }
     }
 
+    /** 当前会话的模型选择：待落盘（本回合设置、下一回合生效）优先于已落盘值。 */
     async getSessionModelSelection(sessionId: string): Promise<ChatModelSelection | undefined> {
+        const pending = this.pendingModelSelections.get(sessionId);
+        if (pending) return pending;
         return (await this.requireActiveSession(sessionId)).modelSelection;
     }
 
@@ -1009,8 +1026,12 @@ export class LocalSessionHost implements SessionHost {
      * 换工具集合等于换请求前缀，所以跟改名一样走会话锁：回合进行中不许改，也不会
      * 和被别的实例删除/归档的会话打架（deleteSession 同样要求空闲）。
      */
-    async setSessionLazyMcpServers(sessionId: string, servers: string[]): Promise<void> {
-        this.beginSessionOperation(sessionId);
+    async setSessionLazyMcpServers(
+        sessionId: string,
+        servers: string[],
+        options: { alreadyReserved?: boolean } = {},
+    ): Promise<void> {
+        if (options.alreadyReserved !== true) this.beginSessionOperation(sessionId);
         let lock: SessionLockHandle | undefined;
         try {
             lock = await acquireSessionLock(sessionId);
@@ -1031,7 +1052,7 @@ export class LocalSessionHost implements SessionHost {
             try {
                 await this.releaseSessionLockSafely(lock);
             } finally {
-                this.endSessionOperation(sessionId);
+                if (options.alreadyReserved !== true) this.endSessionOperation(sessionId);
             }
         }
     }
@@ -1039,6 +1060,32 @@ export class LocalSessionHost implements SessionHost {
     async setSessionModelSelection(sessionId: string, selection: ChatModelSelection): Promise<void> {
         await this.requireActiveSession(sessionId);
         this.pendingModelSelections.set(sessionId, selection);
+    }
+
+    /**
+     * 立即落盘模型/强度选择（会话间命令与一次性宿主用）。
+     * `setSessionModelSelection` 只是"下一回合生效"的内存等待区，宿主进程退出就丢了，
+     * 所以远程 /model 必须当场写事件。
+     */
+    async setSessionModelSelectionNow(
+        sessionId: string,
+        selection: ChatModelSelection,
+        options: { alreadyReserved?: boolean } = {},
+    ): Promise<void> {
+        if (options.alreadyReserved !== true) this.beginSessionOperation(sessionId);
+        let lock: SessionLockHandle | undefined;
+        try {
+            lock = await acquireSessionLock(sessionId);
+            const session = await this.requireActiveSession(sessionId);
+            this.pendingModelSelections.set(sessionId, selection);
+            await this.persistPendingModelSelection(sessionId, session);
+        } finally {
+            try {
+                await this.releaseSessionLockSafely(lock);
+            } finally {
+                if (options.alreadyReserved !== true) this.endSessionOperation(sessionId);
+            }
+        }
     }
 
     private async persistPendingModelSelection(sessionId: string, session: Session): Promise<void> {
@@ -1128,8 +1175,8 @@ export class LocalSessionHost implements SessionHost {
         }
     }
 
-    async unarchiveSession(sessionId: string): Promise<void> {
-        this.beginSessionOperation(sessionId);
+    async unarchiveSession(sessionId: string, options: { alreadyReserved?: boolean } = {}): Promise<void> {
+        if (options.alreadyReserved !== true) this.beginSessionOperation(sessionId);
         let lock: SessionLockHandle | undefined;
         try {
             lock = await acquireSessionLock(sessionId);
@@ -1143,7 +1190,7 @@ export class LocalSessionHost implements SessionHost {
             try {
                 await this.releaseSessionLockSafely(lock);
             } finally {
-                this.endSessionOperation(sessionId);
+                if (options.alreadyReserved !== true) this.endSessionOperation(sessionId);
             }
         }
     }
@@ -1178,7 +1225,11 @@ export class LocalSessionHost implements SessionHost {
      */
     async resumeSession(
         sessionId: string,
-        options?: { consumePendingMessages?: () => Array<string | UserMessageInput> | undefined },
+        options?: {
+            consumePendingMessages?: () => Array<string | UserMessageInput> | undefined;
+            /** 会话间命令已持有会话互斥（同 runSessionTurn 的 alreadyReserved）。 */
+            alreadyReserved?: boolean;
+        },
     ): Promise<{ resumed: boolean; reason?: string; aborted?: boolean }> {
         const session = await this.requireActiveSession(sessionId);
         const plan = planResume(session);
@@ -1193,7 +1244,7 @@ export class LocalSessionHost implements SessionHost {
             skipToolCallIds: new Set(plan.toolCalls.map(call => call.id)),
             initialRequestKind: "turn_resume",
             consumePendingMessages: options?.consumePendingMessages,
-        }));
+        }, options?.alreadyReserved === true));
         return { resumed: true, aborted: result.aborted };
     }
 
@@ -1311,9 +1362,109 @@ export class LocalSessionHost implements SessionHost {
         return aggregateInstanceUsage(this.instanceUsage.values());
     }
 
-    async compactSession(sessionId: string, instruction?: string): Promise<void> {
-        await compactSessionContext(this.turnHost, sessionId, instruction);
+    async compactSession(
+        sessionId: string,
+        instruction?: string,
+        options: { alreadyReserved?: boolean } = {},
+    ): Promise<void> {
+        await compactSessionContext(this.turnHost, sessionId, instruction, options);
     }
+
+    /**
+     * 本地一次性执行一条会话间命令（`session send` 遇到无持有者时由本进程接管）。
+     * 与投递路径共用解析与执行器，区别只是没有回传链路：结果为返回值，
+     * 生命周期收尾（archive/close/delete）由调用方在输出之后 `finish()` 触发。
+     */
+    async executePeerCommandLocally(
+        sessionId: string,
+        text: string,
+    ): Promise<
+        | { kind: "command"; ok: boolean; output: string; stopReason: string; finish: () => Promise<void> }
+        | { kind: "prompt"; prompt: string }
+    > {
+        const parsed = parseSlashCommand(text);
+        if (parsed.kind === "text") return { kind: "prompt", prompt: text };
+        if (parsed.kind === "invalid") {
+            return {
+                kind: "command",
+                ok: false,
+                output: parsed.message,
+                stopReason: "invalid_command",
+                finish: async () => undefined,
+            };
+        }
+
+        if (await this.isSessionArchived(sessionId) && !isPeerCommandAllowedOnArchived(parsed)) {
+            return {
+                kind: "command",
+                ok: false,
+                output: `会话已归档（${sessionId}），先 /unarchive 再执行 ${parsed.name}`,
+                stopReason: "archived",
+                finish: async () => undefined,
+            };
+        }
+
+        // 命令在执行器里按"调用方已持有互斥"处理，这里自己占一次
+        this.beginSessionOperation(sessionId);
+        let result: { output: string; deferred?: PeerDeferredAction };
+        try {
+            result = await executePeerCommand(this.peerCommandHost, sessionId, parsed);
+        } catch (error: any) {
+            this.endSessionOperation(sessionId);
+            return {
+                kind: "command",
+                ok: false,
+                output: error?.message ?? String(error),
+                stopReason: "error",
+                finish: async () => undefined,
+            };
+        }
+        this.endSessionOperation(sessionId);
+
+        const deferred = result.deferred;
+        return {
+            kind: "command",
+            ok: true,
+            output: result.output,
+            stopReason: "command",
+            finish: async () => {
+                if (deferred) await this.runDeferredPeerAction(sessionId, deferred);
+            },
+        };
+    }
+
+    /**
+     * 会话间 /new：派生一个子会话并立即认领（与 session_spawn 同一套记账：
+     * 数量上限、TUI 会话条通知、自动回收清单）。
+     */
+    private async spawnPeerSession(
+        parentSessionId: string,
+        title?: string,
+    ): Promise<{ ok: true; sessionId: string } | { ok: false; error: string }> {
+        return this.control.spawnSession(parentSessionId, title);
+    }
+
+    /** 会话间命令执行器所需的宿主能力：全部指向真实业务方法，不复制任何 UI 逻辑。 */
+    private readonly peerCommandHost: PeerCommandHost = {
+        listSessions: () => this.listSessions(),
+        listSessionOwnership: ids => this.listSessionOwnership(ids),
+        claimedSessionIds: () => this.claimedSessionIds(),
+        isSessionBusy: sessionId => this.isSessionBusy(sessionId),
+        getSessionCwd: sessionId => this.getSessionCwd(sessionId),
+        setSessionCwd: (sessionId, cwd) => this.setSessionCwd(sessionId, cwd),
+        getSystemPrompt: sessionId => this.getSystemPrompt(sessionId),
+        getSessionModelSelection: sessionId => this.getSessionModelSelection(sessionId),
+        setSessionModelSelection: (sessionId, selection, options) =>
+            this.setSessionModelSelectionNow(sessionId, selection, options),
+        getSessionLazyMcpServers: sessionId => this.getSessionLazyMcpServers(sessionId),
+        setSessionLazyMcpServers: (sessionId, servers, options) => this.setSessionLazyMcpServers(sessionId, servers, options),
+        compactSession: (sessionId, instruction, options) => this.compactSession(sessionId, instruction, options),
+        resumeSession: (sessionId, options) => this.resumeSession(sessionId, options),
+        clearSession: (sessionId, options) => this.clearSession(sessionId, options),
+        unarchiveSession: (sessionId, options) => this.unarchiveSession(sessionId, options),
+        reloadRuntime: () => this.reloadRuntime(),
+        spawnPeerSession: (parentSessionId, title) => this.spawnPeerSession(parentSessionId, title),
+    };
 
     loadInputHistory(sessionId: string): string[] {
         return loadInputHistory(sessionId);
@@ -1373,10 +1524,11 @@ export class LocalSessionHost implements SessionHost {
     private async runTurn(
         sessionId: string,
         spec: TurnSpec,
+        alreadyReserved = false,
     ): Promise<{ aborted?: boolean; contextTrimmed?: boolean }> {
         await this.runtimeReady;
         if (this.isClosing) throw new Error("宿主已关闭，无法开始回合");
-        return runSessionTurn(this.turnHost, sessionId, spec);
+        return runSessionTurn(this.turnHost, sessionId, spec, alreadyReserved ? { alreadyReserved: true } : {});
     }
 
     private async trackTurn<T>(sessionId: string, turn: Promise<T>): Promise<T> {

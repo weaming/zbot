@@ -726,14 +726,14 @@ describe("ChatApp pending queue", () => {
         expect(rendered[0]).toContain("(4.5s | 8.0s)");
     });
 
-    test("handleCommand 支持 /effort 和 /thinking 修改思考强度", async () => {
+    test("handleCommand 的思考强度只由 /model effort 设置", async () => {
         const agent = makeFakeAgent();
         const store = new ChatStore();
         const app = new ChatApp(agent as any, store);
         store.currentSessionId = "session-cmd-test";
 
         // 1. 无参查询
-        await (app as any).handleCommand("/effort");
+        await (app as any).handleCommand("/model effort");
         expect(store.messages.some(m => m.role === "system" && m.text.includes("当前思考强度"))).toBe(true);
 
         // 2. 设置 high
@@ -741,20 +741,20 @@ describe("ChatApp pending queue", () => {
         (agent as any).setSessionModelSelection = async (sessionId: string, selection: any) => {
             selections.push({ sessionId, selection });
         };
-        await (app as any).handleCommand("/effort high");
+        await (app as any).handleCommand("/model effort high");
         // 会话内设置：写会话级选择，不污染进程环境
         expect(selections.at(-1)?.sessionId).toBe("session-cmd-test");
         expect(selections.at(-1)?.selection.reasoningEffort).toBe("high");
         expect(process.env.REASONING_EFFORT).toBeUndefined();
         expect(store.messages.some(m => m.role === "system" && m.text.includes("思考强度已设置为: high"))).toBe(true);
 
-        // 3. 用 /thinking 别名重置为 auto
-        await (app as any).handleCommand("/thinking auto");
+        // 3. 重置为 auto
+        await (app as any).handleCommand("/model effort auto");
         expect(selections.at(-1)?.selection.reasoningEffort).toBe("auto");
         expect(store.messages.some(m => m.role === "system" && m.text.includes("思考强度已设为 auto"))).toBe(true);
 
         // 4. 非法参数报错
-        await (app as any).handleCommand("/effort invalid_level");
+        await (app as any).handleCommand("/model effort invalid_level");
         expect(store.messages.some(m => m.role === "system" && m.text.includes("未知思考强度"))).toBe(true);
 
         // 5. /mcp 命令
@@ -764,6 +764,116 @@ describe("ChatApp pending queue", () => {
         // 6. /help 命令包含 /mcp
         await (app as any).handleCommand("/help");
         expect(store.messages.some(m => m.role === "system" && m.text.includes("/mcp"))).toBe(true);
+    });
+
+    test("/model 按目标模型的档位校验并归一化（与 session send 同口径）", async () => {
+        // 当前模型是 deepseek 系（档位 none/low/high/max），目标模型是 responses 系
+        // （档位含 minimal/medium/xhigh、没有 max）：两套档位不同，正是历史 bug 的场景
+        const saved = {
+            chatModel: process.env.OPENAI_CHAT_MODEL,
+            responsesModel: process.env.OPENAI_RESPONSES_MODEL,
+            chatBase: process.env.OPENAI_CHAT_BASE_URL,
+            responsesBase: process.env.OPENAI_RESPONSES_BASE_URL,
+        };
+        process.env.OPENAI_CHAT_MODEL = "deepseek-chat";
+        process.env.OPENAI_RESPONSES_MODEL = "gpt-5";
+        process.env.OPENAI_CHAT_BASE_URL = "https://api.deepseek.com/v1";
+        process.env.OPENAI_RESPONSES_BASE_URL = "https://api.openai.com/v1";
+        try {
+            const agent = makeFakeAgent();
+            const store = new ChatStore();
+            const app = new ChatApp(agent as any, store);
+            store.currentSessionId = "session-model-use-test";
+            (app as any).currentModelSelection = {
+                protocol: "chat_completions",
+                model: "deepseek-chat",
+                reasoningEffort: "max",
+            };
+            const selections: any[] = [];
+            (agent as any).setSessionModelSelection = async (_sessionId: string, selection: any) => {
+                selections.push(selection);
+            };
+
+            // 目标模型支持的 medium：必须成功（旧实现用当前模型档位会被误判为未知）
+            await (app as any).handleCommand("/model responses gpt-5 medium");
+            expect(selections.at(-1)).toEqual({
+                protocol: "responses",
+                model: "gpt-5",
+                reasoningEffort: "medium",
+            });
+            expect(store.messages.some(m => m.role === "system" && m.text.includes("未知思考强度"))).toBe(false);
+
+            // 归一化：大写 HIGH 落盘为小写 high
+            await (app as any).handleCommand("/model responses gpt-5 HIGH");
+            expect(selections.at(-1)?.reasoningEffort).toBe("high");
+
+            // 目标模型不支持的 max：必须报错并且不落盘（旧实现用当前模型档位会放过）
+            const before = selections.length;
+            await (app as any).handleCommand("/model responses gpt-5 max");
+            expect(selections.length).toBe(before);
+            expect(store.messages.some(m => m.role === "system" && m.text.includes("未知思考强度"))).toBe(true);
+
+            // 省略强度：沿用当前档位（目标模型支持 high）
+            await (app as any).handleCommand("/model responses gpt-5");
+            expect(selections.at(-1)?.reasoningEffort).toBe("high");
+
+            // 省略强度且原档位在目标模型不支持：回落 auto
+            (app as any).currentModelSelection = {
+                protocol: "chat_completions",
+                model: "deepseek-chat",
+                reasoningEffort: "max",
+            };
+            await (app as any).handleCommand("/model responses gpt-5");
+            expect(selections.at(-1)?.reasoningEffort).toBe("auto");
+        } finally {
+            for (const [key, value] of Object.entries({
+                OPENAI_CHAT_MODEL: saved.chatModel,
+                OPENAI_RESPONSES_MODEL: saved.responsesModel,
+                OPENAI_CHAT_BASE_URL: saved.chatBase,
+                OPENAI_RESPONSES_BASE_URL: saved.responsesBase,
+            })) {
+                if (value === undefined) delete process.env[key];
+                else process.env[key] = value;
+            }
+        }
+    });
+
+    test("/model 与 /model effort 是唯一入口；/effort /thinking /reasoning 已删除", async () => {
+        const agent = makeFakeAgent();
+        const store = new ChatStore();
+        const app = new ChatApp(agent as any, store);
+        store.currentSessionId = "session-cmd-test";
+        const selections: any[] = [];
+        (agent as any).setSessionModelSelection = async (_sessionId: string, selection: any) => {
+            selections.push(selection);
+        };
+
+        // /model effort 设置强度
+        await (app as any).handleCommand("/model effort high");
+        expect(selections.at(-1)?.reasoningEffort).toBe("high");
+        await (app as any).handleCommand("/model effort auto");
+        expect(selections.at(-1)?.reasoningEffort).toBe("auto");
+
+        // /model 用非法模型组合时明确拒绝
+        await (app as any).handleCommand("/model chat_completions not-configured");
+        expect(store.messages.some(m => m.role === "system" && m.text.includes("不可用的模型组合"))).toBe(true);
+
+        // 已删除的命令不再被识别：/effort /thinking /reasoning 按普通文本提交给模型
+        const sent: string[] = [];
+        (agent as any).sendMessage = async (_sessionId: string, text: string) => {
+            sent.push(text);
+            return { aborted: false };
+        };
+        const before = selections.length;
+        const strengthNotices = store.messages
+            .filter(m => m.role === "system" && m.text.includes("思考强度已设为")).length;
+        for (const text of ["/effort high", "/thinking auto", "/reasoning on"]) {
+            await (app as any).handleCommand(text);
+            expect(sent.at(-1)).toBe(text);
+        }
+        expect(selections.length).toBe(before);
+        expect(store.messages.filter(m => m.role === "system" && m.text.includes("思考强度已设为")).length)
+            .toBe(strengthNotices);
     });
 
     test("handleCommand 支持 /reload 并提示后续请求使用新运行时", async () => {
@@ -1841,18 +1951,19 @@ describe("ChatApp 主动释放的提示", () => {
 });
 
 describe("会话派生（session_spawn）", () => {
-    test("派生后进会话列表、固化标题并 flash", async () => {
+    test("派生后进会话列表并 flash（标题由宿主建会话时固化，前端不再改名）", async () => {
         const agent = makeFakeAgent();
-        const renamed: { sessionId: string; title: string }[] = [];
-        agent.renameSession = async (sessionId, title) => {
-            renamed.push({ sessionId, title });
+        const renamed: string[] = [];
+        agent.renameSession = async (sessionId) => {
+            renamed.push(sessionId);
         };
         const store = new ChatStore();
         const app = new ChatApp(agent as any, store);
 
         await (app as any).handleSessionSpawned("sess-child", "读日志");
 
-        expect(renamed).toEqual([{ sessionId: "sess-child", title: "读日志" }]);
+        // 标题落盘归宿主（createSession 的 init.title）；前端重复改名会与宿主抢会话锁
+        expect(renamed).toEqual([]);
         const child = store.sessions.find(session => session.sessionId === "sess-child");
         expect(child?.title).toBe("读日志");
         expect((app as any).tui.flashCalls.at(-1)).toContain("子会话");

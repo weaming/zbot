@@ -229,4 +229,12 @@ describe("compactSessionContext", () => {
         await expect(compactSessionContext(host, SESSION_ID)).rejects.toThrow("当前没有可压缩的对话历史");
         expect(ops).toEqual(["begin", "end"]);
     });
+
+    test("alreadyReserved：借用调用方的会话互斥，既不重抢也不代为释放", async () => {
+        const { host, ops } = makeHost();
+
+        await expect(compactSessionContext(host, SESSION_ID, undefined, { alreadyReserved: true }))
+            .rejects.toThrow("当前没有可压缩的对话历史");
+        expect(ops).toEqual([]);
+    });
 });

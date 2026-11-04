@@ -36,9 +36,9 @@ TUI 中只需输入 `/model`，再依次选择协议、模型，以及是否设�
 
 ### 思考强度
 
-在 TUI 中输入 `/effort` 查看当前值，或输入 `/effort <值>` 设置当前会话的思考强度。设置会随会话保存；`auto` 表示本次请求不发送思考强度参数，使用服务端默认值，并优先于全局 effort 环境变量。未设置会话值时，环境变量按 `REASONING_EFFORT`、`OPENAI_REASONING_EFFORT`、`DEEPSEEK_REASONING_EFFORT` 的顺序读取。
+在 TUI 中输入 `/model effort` 查看当前值，或输入 `/model effort <值>` 设置当前会话的思考强度（`/model` 是模型与强度的唯一入口）。设置会随会话保存；`auto` 表示本次请求不发送思考强度参数，使用服务端默认值，并优先于全局 effort 环境变量。未设置会话值时，环境变量按 `REASONING_EFFORT`、`OPENAI_REASONING_EFFORT`、`DEEPSEEK_REASONING_EFFORT` 的顺序读取。
 
-`/effort` 按当前协议和厂家提供上游实际接收的值，选中的值会原样用于对应请求字段。未配置或留空时使用按协议和厂家区分的内置列表；列表不会逐个查询模型元数据，同一厂家内不同模型仍可能支持不同值。配置 `*_EFFORTS` 后，`/effort` 只允许配置中的值，发送前会校验并按原值发送。请确保这些值被所选模型支持。`auto` 始终可选，表示省略思考强度参数；不要把它写入 `*_EFFORTS`。
+`/model effort` 按当前协议和厂家提供上游实际接收的值，选中的值会原样用于对应请求字段。未配置或留空时使用按协议和厂家区分的内置列表；列表不会逐个查询模型元数据，同一厂家内不同模型仍可能支持不同值。配置 `*_EFFORTS` 后，`/model effort` 只允许配置中的值，发送前会校验并按原值发送。请确保这些值被所选模型支持。`auto` 始终可选，表示省略思考强度参数；不要把它写入 `*_EFFORTS`。
 
 ```dotenv
 OPENAI_CHAT_EFFORTS=low,high,max

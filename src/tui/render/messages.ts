@@ -51,8 +51,6 @@ export interface MessageComponents {
 export interface RenderContext {
     /** 详细模式（Ctrl+O）：展开全部思考与工具块。 */
     detailed: boolean;
-    /** 是否显示思考过程。 */
-    showReasoning: boolean;
     /** 当前 spinner 帧下标。 */
     spinnerIndex: number;
     /** 终端列数（流式 reasoning 的视口宽度）。 */
@@ -86,7 +84,6 @@ function isRunningMessage(message: UiMessage, ctx: RenderContext): boolean {
 export function messageRenderKey(message: UiMessage, ctx: RenderContext): string {
     const flags = [
         ctx.detailed ? 1 : 0,
-        ctx.showReasoning ? 1 : 0,
         isDiffExpanded(message, ctx) ? 1 : 0,
         isRunningMessage(message, ctx) ? 1 : 0,
     ].join("");
@@ -225,7 +222,7 @@ function renderTimelineItem(
     ctx: RenderContext,
 ): Component | undefined {
     if (item.type === "reasoning") {
-        if (!showDetail || !ctx.showReasoning) return undefined;
+        if (!showDetail) return undefined;
         if (ctx.detailed) {
             // 详细模式：完整 Markdown（人工展开全量内容）
             return new ReasoningBlock(item.text);

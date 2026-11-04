@@ -9,7 +9,7 @@ import type { Component } from "@earendil-works/pi-tui";
 import { PanelBody } from "./panel-body.js";
 import { handlePanelScroll } from "./panel-scroll.js";
 import { padColumns, truncatePlain } from "../format/text.js";
-import { SHORTCUT_GROUPS } from "./shortcuts.js";
+import { SHORTCUT_GROUPS } from "../commands/shortcuts.js";
 import { theme } from "./theme.js";
 
 /** 键位列宽度（按最长键位 + 2 列间隔取整，保证描述列左对齐）。 */

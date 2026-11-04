@@ -364,6 +364,20 @@ describe("ChatApp 提问接线", () => {
         expect(sentTexts[1]).toBe("/help");
     });
 
+    test("/review 带附加说明：与固定指令一起送模型", async () => {
+        sentTexts.length = 0;
+        const { app } = makeApp();
+        await app.init();
+        const editor = (app as any).editor as {
+            onSubmitWithImages?: (value: string, images: unknown[]) => void;
+        };
+
+        editor.onSubmitWithImages?.("/review 请重点检查并发竞态", []);
+        await waitFor(() => sentTexts.length === 1);
+        expect(sentTexts[0]).toContain("Do dev-review-fix loop");
+        expect(sentTexts[0]).toContain("请重点检查并发竞态");
+    });
+
     test("openResumedSession：关掉启动选择面板并载入目标会话", async () => {
         const { app, store } = makeApp();
         await app.init();

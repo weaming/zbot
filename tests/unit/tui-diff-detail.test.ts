@@ -56,7 +56,6 @@ function makeMessage(streaming: boolean): UiMessage {
 function makeContext(overrides: Partial<RenderContext> = {}): RenderContext {
     return {
         detailed: false,
-        showReasoning: true,
         spinnerIndex: 0,
         columns: 120,
         diffDetail: false,

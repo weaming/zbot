@@ -182,11 +182,30 @@ type SessionCommand =
     | QueueCommand
     | RunCommand;
 
+/** 一次性本地宿主的装配形态（send 无持有者时临时接管用）。 */
+export interface LocalSendHost {
+    createSessionForCli(cwd: string, init?: { origin?: "user" | "web" | "job" | "tool"; title?: string }): Promise<{ sessionId: string }>;
+    claimSession(sessionId: string, options?: { noNegotiate?: boolean }): Promise<{ ok: boolean; reason?: string; message?: string }>;
+    executePeerCommandLocally(
+        sessionId: string,
+        text: string,
+    ): Promise<
+        | { kind: "command"; ok: boolean; output: string; stopReason: string; finish: () => Promise<void> }
+        | { kind: "prompt"; prompt: string }
+    >;
+    sendMessage(sessionId: string, text: string): Promise<{ aborted?: boolean }>;
+    subscribeEvents(...args: any[]): () => void;
+    abortSession(sessionId: string): Promise<boolean>;
+    close(): Promise<void>;
+}
+
 export interface SessionCliIO {
     /** 标准输出：默认写 process.stdout。 */
     write?: (text: string) => void;
     /** 读取 stdin（send 未给文本时用）；默认读到 EOF。 */
     readStdin?: () => Promise<string>;
+    /** send 无持有者时的一次性宿主（测试注入；默认创建真实 LocalSessionHost + 运行时）。 */
+    createLocalSendHost?: (startupCwd: string) => Promise<LocalSendHost>;
 }
 
 /** 参数/用法错误：`--json` 调用方靠 code=usage 与运行时失败区分开。 */
@@ -500,11 +519,11 @@ export async function runSessionCli(argv: string[], io: SessionCliIO = {}): Prom
         case "delete":
             return runDelete(command, write);
         case "send":
-            return runSend(command, write, io.readStdin ?? readStdin);
+            return runSend(command, write, io.readStdin ?? readStdin, io);
         case "queue":
             return runQueue(command, write);
         case "run":
-            return runSessionTask(command, write, io.readStdin ?? readStdin);
+            return runSessionTask(command, write, io.readStdin ?? readStdin, io);
     }
 }
 
@@ -755,25 +774,17 @@ async function runNew(command: NewCommand, write: (text: string) => void): Promi
  * `session run`：新建 → 认领 → 执行一轮 → 释放。
  * 认领在建会话之后立刻完成（socket bind 原子），避免 new + send 之间被别的实例插手。
  */
-async function runSessionTask(
-    command: RunCommand,
-    write: (text: string) => void,
-    readStdinText: () => Promise<string>,
-): Promise<void> {
-    const text = command.text || (await readStdinText()).trim();
-    if (!text) throw usageError("run 需要任务正文");
-    const cwd = command.cwd ? resolveCwdInput(command.cwd, process.cwd()) : process.cwd();
-    if (!isDirectory(cwd)) throw usageError(`cwd 不是已存在的目录：${cwd}`);
-    const title = command.title ? cleanTitle(command.title) : undefined;
-
-    const [{ LocalSessionHost, initializeSessionHostRuntime }, { runHostTurn }, mcp, runtimeContext] =
-        await Promise.all([
-            import("../host/session-host.js"),
-            import("./session-turn.js"),
-            import("../mcp/client-manager.js"),
-            import("../host/runtime-context.js"),
-        ]);
-    // session 子命令在 dotenv/宿主环境初始化之前分流；run 要真跑模型，这里补齐
+/**
+ * 一次性宿主：dotenv + 宿主环境 + 运行时（不挂技能监听）+ 日志落文件。
+ * `session run` 与 `send` 的无持有者接管共用，保证两处装配完全一致。
+ */
+async function createOneShotHost(startupCwd: string): Promise<LocalSendHost> {
+    const [{ LocalSessionHost, initializeSessionHostRuntime }, mcp, runtimeContext] = await Promise.all([
+        import("../host/session-host.js"),
+        import("../mcp/client-manager.js"),
+        import("../host/runtime-context.js"),
+    ]);
+    // session 子命令在 dotenv/宿主环境初始化之前分流；这里要真跑模型，补齐
     const dotenv = (await import("dotenv")).default;
     const envFile = process.env.ZBOT_ENV_FILE || path.join(process.env.HOME ?? "", ".zbot", "env");
     dotenv.config({ path: envFile, quiet: true });
@@ -789,35 +800,116 @@ async function runSessionTask(
     });
     // 初始化失败时 gate 会被 reject；没人接的话 Bun 会打出崩溃报告
     void runtimeGate.catch(() => undefined);
-    const host = new LocalSessionHost(runtimeGate, { startupCwd: cwd });
-    try {
-        const { sessionId } = await host.createSession(cwd, { origin: "user" });
-        if (title) await host.renameSession(sessionId, title);
+    const host = new LocalSessionHost(runtimeGate, { startupCwd });
+    const runtimeReady = initializeSessionHostRuntime({ watchSkills: false });
+    runtimeReady.then(openRuntime, failRuntime);
+    void runtimeReady.catch(() => undefined);
+    await runtimeReady;
 
+    return {
+        createSessionForCli: (cwd, init) => host.createSession(cwd, init),
+        claimSession: (sessionId, options) => host.claimSession(sessionId, options),
+        executePeerCommandLocally: (sessionId, text) => host.executePeerCommandLocally(sessionId, text),
+        sendMessage: (sessionId, text) => host.sendMessage(sessionId, text),
+        subscribeEvents: listener => host.subscribeEvents(listener as any),
+        abortSession: sessionId => host.abortSession(sessionId),
+        close: async () => {
+            await host.close().catch((error) => {
+                console.error("⚠️ [session] 关闭一次性宿主失败:", error);
+            });
+            await mcp.closeAllMcpClients().catch((error) => {
+                console.error("⚠️ [session] 关闭 MCP 客户端失败:", error);
+            });
+            restoreConsole();
+        },
+    };
+}
+
+/**
+ * 无持有者时的本地接管：命令直接执行（含归档/关闭/删除的收尾），普通文本跑一轮模型。
+ * 与投递路径共用解析与执行器；`--queue`/`--expires` 无意义（没有竞争者）。
+ */
+async function runSendLocally(
+    command: SendCommand,
+    sessionId: string,
+    text: string,
+    write: (text: string) => void,
+    io: SessionCliIO,
+): Promise<void> {
+    const { runHostTurn } = await import("./session-turn.js");
+    const host = await (io.createLocalSendHost ?? createOneShotHost)(process.cwd());
+    try {
+        const claim = await host.claimSession(sessionId, { noNegotiate: true });
+        if (!claim.ok) {
+            throw new SessionCliError(
+                "no_holder",
+                `会话 ${shortSessionId(sessionId)} 没有运行中的实例持有，临时接管也失败：${claim.message ?? claim.reason ?? "未知原因"}`,
+                1,
+                { sessionId, delivered: false },
+            );
+        }
+
+        const plan = await host.executePeerCommandLocally(sessionId, text);
+        if (plan.kind === "prompt") {
+            await runHostTurn({ host, sessionId, prompt: plan.prompt, json: command.json, write });
+            return;
+        }
+
+        // 先输出结果，再执行生命周期收尾：删除/归档要让人看到"做了什么"
+        if (!plan.ok) {
+            await plan.finish();
+            throw new SessionCliError(
+                plan.stopReason === "invalid_command" ? plan.stopReason : "peer_failed",
+                plan.output,
+                1,
+                { sessionId, executedLocally: true, stopReason: plan.stopReason, delivered: false },
+            );
+        }
+        if (command.json) {
+            write(`${JSON.stringify({
+                sessionId,
+                executedLocally: true,
+                ok: true,
+                stopReason: plan.stopReason,
+                text: plan.output,
+            }, null, 2)}\n`);
+        } else {
+            write(`${plan.output}\n`);
+        }
+        await plan.finish();
+    } finally {
+        await host.close();
+    }
+}
+
+async function runSessionTask(
+    command: RunCommand,
+    write: (text: string) => void,
+    readStdinText: () => Promise<string>,
+    io: SessionCliIO = {},
+): Promise<void> {
+    const text = command.text || (await readStdinText()).trim();
+    if (!text) throw usageError("run 需要任务正文");
+    const cwd = command.cwd ? resolveCwdInput(command.cwd, process.cwd()) : process.cwd();
+    if (!isDirectory(cwd)) throw usageError(`cwd 不是已存在的目录：${cwd}`);
+    const title = command.title ? cleanTitle(command.title) : undefined;
+
+    const { runHostTurn } = await import("./session-turn.js");
+    const host = await (io.createLocalSendHost ?? createOneShotHost)(cwd);
+    try {
+        const { sessionId } = await host.createSessionForCli(cwd, { origin: "user", ...(title ? { title } : {}) });
         const claim = await host.claimSession(sessionId, { noNegotiate: true });
         if (!claim.ok) {
             throw new SessionCliError(
                 "claim_failed",
-                `已创建会话 ${sessionId}，但认领失败：${describeClaimFailure(claim)}`,
+                `已创建会话 ${sessionId}，但认领失败：${claim.message ?? claim.reason ?? "未知原因"}`,
                 1,
                 { sessionId },
             );
         }
-
-        const runtimeReady = initializeSessionHostRuntime({ watchSkills: false });
-        runtimeReady.then(openRuntime, failRuntime);
-        void runtimeReady.catch(() => undefined);
-        await runtimeReady;
-
         await runHostTurn({ host, sessionId, prompt: text, json: command.json, write });
     } finally {
-        await host.close().catch((error) => {
-            console.error("⚠️ [session run] 关闭会话宿主失败:", error);
-        });
-        await mcp.closeAllMcpClients().catch((error) => {
-            console.error("⚠️ [session run] 关闭 MCP 客户端失败:", error);
-        });
-        restoreConsole();
+        await host.close();
     }
 }
 
@@ -871,6 +963,7 @@ async function runSend(
     command: SendCommand,
     write: (text: string) => void,
     readStdinText: () => Promise<string>,
+    io: SessionCliIO = {},
 ): Promise<void> {
     const sessionId = await resolveSendTarget(command.id);
     if (command.cancelMsgId) return cancelQueuedSend(sessionId, command, write);
@@ -880,12 +973,9 @@ async function runSend(
 
     const ownership = await probeOwnership(sessionId);
     if (ownership.state === "free") {
-        throw new SessionCliError(
-            "no_holder",
-            `会话 ${shortSessionId(sessionId)} 没有运行中的实例持有，投递无法执行；先在 TUI 里打开该会话，或用 session new 新建`,
-            1,
-            { sessionId, delivered: false },
-        );
+        // 没有实例持有：由本进程临时接管执行一条（命令直接跑，普通文本跑一轮），
+        // 否则归档后的 /unarchive 这类命令永远没有可达路径。
+        return runSendLocally(command, sessionId, text, write, io);
     }
 
     let settleResult: (result: PeerResult) => void = () => undefined;

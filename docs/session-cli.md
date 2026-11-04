@@ -62,22 +62,57 @@ zbot session queue <id> --json                        # 队列快照（position/
 ## 会话间命令（send）
 
 `session send` 投递的文本如果**第一个字符就是 `/`** 且是 zbot 支持的完整命令名，
-由持有会话的 TUI 执行并把结果回传（不会发给模型）。规则：
+就在目标会话里执行并把结果回传给调用方（不发给模型）。**所有命令都可远程执行**：
+面板类命令有等价的文本视图与非交互参数，交互类命令有 `set/enable/disable` 参数，
+生命周期命令有确认词与「先回结果、再释放」的退出顺序。
+
+### 通用规则
 
 - 只认完整命令名：`/helpx`、`/Help`、`/`、前导空格的 `" /help"` 一律按普通文本交给模型。
-- 已识别命令逐项校验参数：`/help extra`、`/tasks status`（缺 task_id）等返回明确错误
-  （`stopReason=invalid_command`），既不跑模型也不当普通文本。
-- 可选参数按命令语义处理：`/cwd <路径>`（可含空格）、`/tasks wait <id> [秒]`、
-  `/stop [id|all]`、`/effort <档位|auto>`。
-- 面板/会话生命周期强绑定的命令（`/new` `/sessions` `/keys` `/delete` `/close` `/clear`
-  `/compact` `/archive` `/unarchive` `/model` `/reasoning` `/mcp` `/continue`）从会话间
-  消息执行时明确拒绝（`stopReason=unsupported_command`）：它们要么是 TUI 面板，要么需要
-  在会话空闲时才能安全执行（当前投递回合已占用互斥）。
-- `/review` 等价于把固定评审指令作为模型输入执行。
-- 无 UI 宿主（如 `serve` 自己持有会话）没有命令执行器时，已识别命令按普通文本交给模型。
+- 已识别命令逐项校验参数：`/help extra`、`/tasks status`（缺 task_id）、`/model foo`
+  等返回明确错误（`stopReason=invalid_command`），既不跑模型也不当普通文本。
+- 视图类命令支持 `--json`：独立 token 才算开关，输出与文本表达同一事实。
+- 未知 `/xxx` 仍是普通文本；`/review [附加说明]` 仍是模型指令，附加说明拼在固定指令之后。
+- 命令在「本次投递已占住的会话互斥」里执行，不重抢、不代释；忙时按现有每会话有界
+  FIFO 排队（`--queue`/默认、`--expires`、`--cancel`、msgId 幂等），不另建队列。
+- **目标会话无人持有**（进程退出、归档后释放）时，`send` 由本进程临时接管执行这一条：
+  命令直接跑、普通文本跑一轮模型，结束后释放（`--json` 多一个 `executedLocally: true`）。
+  这是 `/archive` 之后还能 `send /unarchive` 的原因；`--queue`/`--expires` 在这种场景无意义。
+- 归档态会话只接受只读/生命周期命令（白名单见下表 `归档` 列），且**不写目标时间线**：
+  往 `session_archived` 之后追加任何事件都会把它悄悄解除归档。其余命令回明确错误
+  「先 `/unarchive`」。
+
+### 命令矩阵
+
+| 命令 | TUI 语义 | 远程协议（`session send`） |
+| --- | --- | --- |
+| `/new [标题]` | 新建会话并切换焦点 | 在本实例创建并认领子会话（同 `session_spawn`），返回 id/标题/cwd；不改变 TUI 焦点 |
+| `/sessions [查询] [--json]` | 会话面板（搜索/切换/重命名/归档/删除） | 会话列表（id/标题/cwd/轮数/归档/是否执行中/持有者），按 id/标题/cwd 过滤；JSON 同形。切换/改名/归档/删除各有独立命令 |
+| `/tasks [list\|status\|wait\|stop] … [--json]` | 后台任务管理 | 同语义动作与视图 |
+| `/ps [--json]` | 运行中的后台任务 | 任务列表 |
+| `/stop [id\|all]` | 终止后台任务 | 同语义 |
+| `/reload` | 重载技能与 MCP | 同语义（其他会话执行中时明确拒绝） |
+| `/keys [--json]` | 快捷键面板 | 快捷键清单（分组/键位/说明） |
+| `/continue` | 补跑中断的工具或下一次请求 | 直接执行，返回「已继续/没有可继续的上下文」 |
+| `/clear confirm` | 清空历史（截断重建） | 破坏性，必须带 `confirm`；会话保留可用 |
+| `/archive` | 归档（可在面板查看） | **结果送达后**归档并释放持有；排队中的投递按 cancelled 收尾 |
+| `/unarchive` | 取消归档 | 恢复可写（归档态白名单内可用） |
+| `/delete confirm` | 彻底删除 | 破坏性，必须带 `confirm`；**结果送达后**删除并释放 |
+| `/close` | 关闭（释放持有，数据保留） | **结果送达后**释放持有，不写归档事件 |
+| `/compact [附加要求]` | 压缩上下文 | 与 TUI 共用压缩实现；附加要求进入压缩提示 |
+| `/cwd [路径] [--json]` | 查看/切换工作目录 | 同语义（路径可含空格） |
+| `/model [--json]` \| `/model <协议> <模型> [强度\|auto]` \| `/model effort [档位\|auto]` | 交互式菜单：协议 → 模型 → 思考强度（目标模型可用档位+auto，默认当前档位/不支持则 auto）→ 是否设为默认 | 查看当前与可选项；位置参数校验组合并按**目标模型**的档位校验/归一化强度（省略则保留原档位，不支持才回落 auto），选择立即落盘、下一回合生效；`effort` 查看/设置强度。统一入口，只有这一处写选择 |
+| `/effort` `/thinking` `/reasoning` | 已随统一入口删除 | 不再是命令：整条按普通文本交给模型（与未知 `/xxx` 一致） |
+| `/mcp [--json] \| /mcp enable\|disable <服务名>` | 面板查看状态、勾选会话级 lazy 启用 | 查看服务状态与 tool_search 情况；`enable/disable` 覆盖本会话启用集 |
+| `/system [--json]` | 显示 system prompt | 同语义 |
+| `/skills [--json]` | 技能列表 | 同语义 |
+| `/help [--json]` | 帮助 | 同语义 |
+
+`归档` 列白名单：`/sessions` `/keys` `/skills` `/help` `/unarchive` `/delete`。
 
 命令矩阵与参数协议在 `src/commands/slash-command.ts`（唯一事实源），TUI 输入与
-`session send` 共用同一份解析。
+`session send` 共用同一份解析；执行器在 `src/host/peer-command.ts`（宿主层，
+复用真实业务能力，不复制 TUI 面板实现）。
 
 ## 创建并执行（run）
 

@@ -92,12 +92,9 @@ export type SessionReleaseCause = "peer" | "user" | "tool" | "auto" | "archive" 
 export interface SessionCreateInit {
     selectedServers?: string[];
     origin?: SessionOrigin;
+    /** 建会话时即固化标题（不依赖前端回调，无 UI 宿主也能带上标题）。 */
+    title?: string;
 }
-
-/** 前端执行会话间命令的结果：output 直接回传，prompt 改为模型指令。 */
-export type SlashCommandOutcome =
-    | { handled: true; output?: string; prompt?: string }
-    | { handled: false };
 
 export interface SessionHost {
     onEvent?: (requestId: number, sessionId: string, event: UIEvent) => void;
@@ -157,18 +154,15 @@ export interface SessionHost {
     abortSession(sessionId: string): Promise<boolean>;
     /** 向会话当前活跃的 Responses WS 响应追加 steering 输入；不支持时返回 false。 */
     steerResponse?(sessionId: string, input: string, onAccepted?: () => void): Promise<boolean>;
-    compactSession(sessionId: string, instruction?: string): Promise<void>;
+    /**
+     * 压缩会话上下文（写入 context_compacted 事件）。
+     * alreadyReserved：调用方已持有会话互斥（会话间投递路径），压缩只借用不重抢。
+     */
+    compactSession(sessionId: string, instruction?: string, options?: { alreadyReserved?: boolean }): Promise<void>;
     /** 本实例内发起过网络请求的会话用量统计（退出时展示用）。 */
     getInstanceNetworkStats(): InstanceNetworkStats;
     loadInputHistory(sessionId: string): string[];
     appendInputHistory(sessionId: string, text: string, ts?: string): Promise<void>;
-    /**
-     * 注册"会话间命令"执行器（TUI 注入）：解析层放行的 allow 命令由前端执行并回传输出。
-     * 未注册时（无 UI 宿主）命令按普通文本交给模型。
-     */
-    setSlashCommandHandler?(
-        handler: (sessionId: string, text: string) => SlashCommandOutcome | Promise<SlashCommandOutcome>,
-    ): void;
     /** 会话绑定的工作目录（无持久化记录时回退当前工具目录）。 */
     getSessionCwd(sessionId: string): Promise<string>;
     /** 改写会话工作目录（落盘 session_cwd_changed 事件）：之后的工具都在新目录执行。 */
@@ -177,6 +171,8 @@ export interface SessionHost {
     renameSession(sessionId: string, title: string): Promise<void>;
     getSessionModelSelection(sessionId: string): Promise<ChatModelSelection | undefined>;
     setSessionModelSelection(sessionId: string, selection: ChatModelSelection): Promise<void>;
+    /** 立即落盘模型选择（面板/命令都该用它：进程退出不该丢设置）。 */
+    setSessionModelSelectionNow?(sessionId: string, selection: ChatModelSelection): Promise<void>;
     /** 本会话临时启用的 lazy MCP server（模型不支持 tool_search 时的显式放行名单）。 */
     getSessionLazyMcpServers(sessionId: string): Promise<string[]>;
     /** 只读版：已归档的会话也能读（归档态下界面仍要展示选中集）。 */

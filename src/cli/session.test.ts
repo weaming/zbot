@@ -43,6 +43,38 @@ async function run(argv: string[], stdinText = ""): Promise<string> {
     return chunks.join("");
 }
 
+/** 无持有者时的本地接管宿主替身：把调用记到 calls，并按需返回命令结果或文本回合。 */
+function fakeLocalHost(
+    calls: string[],
+    options: { output?: string; ok?: boolean; stopReason?: string; prompt?: string } = {},
+) {
+    return {
+        createSessionForCli: async () => ({ sessionId: "sess-new" }),
+        claimSession: async (sessionId: string) => {
+            calls.push(`claim:${sessionId}`);
+            return { ok: true as const };
+        },
+        executePeerCommandLocally: async (sessionId: string, text: string) => {
+            calls.push(`exec:${sessionId}:${text}`);
+            if (options.prompt !== undefined) return { kind: "prompt" as const, prompt: options.prompt };
+            return {
+                kind: "command" as const,
+                ok: options.ok !== false,
+                output: options.output ?? "本地结果",
+                stopReason: options.stopReason ?? "command",
+                finish: async () => { calls.push("finish"); },
+            };
+        },
+        sendMessage: async (_sessionId: string, _text: string) => {
+            calls.push("sendMessage");
+            return { aborted: false };
+        },
+        subscribeEvents: () => () => undefined,
+        abortSession: async () => false,
+        close: async () => { calls.push("close"); },
+    };
+}
+
 /** 造一个只认 who / deliver 的假会话服务端；用于验证 send 的投递与结果等待。 */
 function startFakePeer(
     sessionId: string,
@@ -294,10 +326,18 @@ describe("会话命令行端到端", () => {
         await expect(run(["new", "--cwd", path.join(tmpDir, "missing")])).rejects.toThrow("cwd 不是已存在的目录");
     });
 
-    test("会话未被持有时 send 直接报错", async () => {
+    test("会话无人持有时 send 由本进程临时接管执行（命令直接跑，不起常驻持有）", async () => {
         const created = await run(["new", "--json"]);
         const { sessionId } = JSON.parse(created) as { sessionId: string };
-        await expect(run(["send", sessionId, "hi"])).rejects.toThrow("没有运行中的实例持有");
+        const calls: string[] = [];
+        const output = await runSessionCli(["send", sessionId, "/help"], {
+            write: (text) => calls.push(text),
+            readStdin: async () => "",
+            createLocalSendHost: async () => fakeLocalHost(calls, { output: "本地执行的帮助" }),
+        }).then(() => calls.join(""));
+
+        expect(output).toContain("本地执行的帮助");
+        expect(calls.some(text => text.includes("claim:" + sessionId))).toBe(true);
     });
 
     test("send --wait 拿到运行中会话的回合结果", async () => {

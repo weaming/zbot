@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { padColumns } from "../format/text.js";
 import { ShortcutPanel } from "./shortcut-panel.js";
-import { SHORTCUT_GROUPS } from "./shortcuts.js";
+import { SHORTCUT_GROUPS } from "../commands/shortcuts.js";
 
 const ESCAPE = "\x1b";
 const CTRL_C = "\x03";

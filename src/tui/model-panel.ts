@@ -1,17 +1,27 @@
-/** 模型选择浮层：依次选择协议、模型，以及是否将该模型设为默认。 */
+/** 模型选择浮层：协议 → 模型 → 思考强度 → 是否设为默认，全程键盘、无需输入文本。 */
 
 import { Key, matchesKey, Text } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
 import type { ChatModelSelection } from "../types/chat-model.js";
+import { effortChoicesFor, preserveEffort } from "../commands/slash-model.js";
 import { PanelBody } from "./panel-body.js";
 import { handlePanelScroll } from "./panel-scroll.js";
 import { truncatePlain } from "../format/text.js";
 import { theme } from "./theme.js";
 
-type Step = "protocol" | "model" | "default";
+type Step = "protocol" | "model" | "effort" | "default";
+
+/** 每一步的总步数，用于标题里的 1/4…4/4。 */
+const STEP_LABELS: Record<Step, string> = {
+    protocol: "1/4 选择协议",
+    model: "2/4 选择模型",
+    effort: "3/4 选择思考强度",
+    default: "4/4 设为默认模型？",
+};
 
 export interface ModelPanelOptions {
     options: ChatModelSelection[];
+    /** 当前选择：协议、模型与思考强度（强度用于默认高亮）。 */
     current?: ChatModelSelection;
     visibleRows: number;
     close(): void;
@@ -23,6 +33,7 @@ export class ModelPanel implements Component {
     private step: Step = "protocol";
     private protocolIndex = 0;
     private modelIndex = 0;
+    private effortIndex = 0;
     private defaultIndex = 0;
     private cursor = 0;
 
@@ -63,6 +74,13 @@ export class ModelPanel implements Component {
         }
         if (this.step === "model") {
             this.modelIndex = this.cursor;
+            this.step = "effort";
+            // 默认高亮：目标模型支持当前档位就用它，否则 auto
+            this.cursor = this.initialEffortIndex();
+            return;
+        }
+        if (this.step === "effort") {
+            this.effortIndex = this.cursor;
             this.step = "default";
             this.defaultIndex = 0;
             this.cursor = 0;
@@ -70,8 +88,17 @@ export class ModelPanel implements Component {
         }
 
         this.defaultIndex = this.cursor;
-        const selection = this.models()[this.modelIndex];
-        if (selection) void this.options.complete(selection, this.defaultIndex === 1);
+        const model = this.models()[this.modelIndex];
+        if (!model) return;
+        const target = this.efforts();
+        void this.options.complete(
+            {
+                protocol: model.protocol,
+                model: model.model,
+                reasoningEffort: target[this.effortIndex] ?? "auto",
+            },
+            this.defaultIndex === 1,
+        );
     }
 
     render(width: number): string[] {
@@ -84,10 +111,9 @@ export class ModelPanel implements Component {
             const prefix = itemIndex === this.cursor ? "❯ " : "  ";
             return new Text(`${prefix}${truncatePlain(choice, Math.max(1, width - 4))}`, 1, 0);
         });
-        const stepLabel = this.step === "protocol" ? "1/3 选择协议"
-            : this.step === "model" ? "2/3 选择模型"
-                : "3/3 设为默认？";
-        const header = new Text(theme.commandBorder(`模型设置 · ${stepLabel}`), 1, 0);
+        const model = this.models()[this.modelIndex];
+        const target = model ? `（${model.protocol} · ${model.model}）` : "";
+        const header = new Text(theme.commandBorder(`模型设置 · ${STEP_LABELS[this.step]}${this.step === "protocol" ? "" : target}`), 1, 0);
         const footer = new Text(theme.dim("↑↓ 选择 · Enter 确认 · Backspace 返回 · Esc 关闭"), 1, 0);
         this.root.setChildren([header, ...lines, footer]);
         return this.root.render(width);
@@ -106,11 +132,26 @@ export class ModelPanel implements Component {
         return this.options.options.filter(option => option.protocol === protocol);
     }
 
+    /** 目标模型的可用档位（含 auto）：与命令行同一份解析。 */
+    private efforts(): string[] {
+        const model = this.models()[this.modelIndex];
+        return model ? effortChoicesFor(model.protocol, model.model) : ["auto"];
+    }
+
+    private initialEffortIndex(): number {
+        const model = this.models()[this.modelIndex];
+        if (!model) return 0;
+        const current = preserveEffort(this.options.current?.reasoningEffort, model.protocol, model.model);
+        const index = this.efforts().findIndex(effort => effort === current);
+        return Math.max(0, index);
+    }
+
     private choices(): string[] {
         if (this.step === "protocol") {
             return this.protocols().map(protocol => protocol === "responses" ? "Responses API" : "Chat Completions");
         }
         if (this.step === "model") return this.models().map(option => option.model);
+        if (this.step === "effort") return this.efforts();
         return ["否（仅应用到当前会话）", "是（同时设为默认模型）"];
     }
 
@@ -122,6 +163,9 @@ export class ModelPanel implements Component {
 
     private goBack(): void {
         if (this.step === "default") {
+            this.step = "effort";
+            this.cursor = this.effortIndex;
+        } else if (this.step === "effort") {
             this.step = "model";
             this.cursor = this.modelIndex;
         } else if (this.step === "model") {

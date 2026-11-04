@@ -32,7 +32,6 @@ import {
     buildHelpText,
     buildSkillsHelpText,
     EXIT_CONFIRM_MS,
-    REVIEW_PROMPT,
     SESSION_NEW_URL,
     SESSION_PANEL_URL,
     SHORTCUT_PANEL_URL,
@@ -41,14 +40,14 @@ import {
     truncateInline,
     wrapAppLink,
 } from "./slash-commands.js";
-import { parseSlashCommand } from "../commands/slash-command.js";
+import { preserveEffort, resolveModelUse } from "../commands/slash-model.js";
+import { buildReviewPrompt, parseSlashCommand } from "../commands/slash-command.js";
 import {
     formatBackgroundTaskDetails,
     formatElapsed,
     MAX_SHOWN_BACKGROUND_TASKS,
     MAX_TASK_TEXT_COLUMNS,
-} from "./task-format.js";
-import { executePeerSlashCommand } from "./peer-commands.js";
+} from "../format/task-format.js";
 import { bindGlobalKeys, type GlobalKeyHost } from "./keybindings.js";
 import { buildStatusBarModel } from "./status-bar-model.js";
 import { protocolStatusLabel } from "../utils/responses-transport.js";
@@ -266,7 +265,6 @@ export class ChatApp {
     /** 进程级 UI 占位：只覆盖与具体会话无关的操作（重载、切会话）。会话自身的忙闲在 turnState。 */
     private runtimeReloading = false;
     private switching = false;
-    private showReasoning = true;
     /** 当前打开的 MCP 面板：落盘失败时回读真实状态重置勾选。 */
     private mcpPanel: McpPanel | null = null;
     /** 每个会话的 lazy 启用集保存队列：连按空格时合并成最新一份，串行落盘。 */
@@ -416,9 +414,6 @@ export class ChatApp {
         for (const [sessionId, draft] of loadRichDrafts()) {
             this.drafts.set(sessionId, typeof draft === "string" ? draft : draft.text, typeof draft === "string" ? [] : draft.images);
         }
-        // 会话间投递的 slash 命令：解析在 commands/，执行留在 TUI（面板等专属能力不塞进 host）
-        this.agent.setSlashCommandHandler?.((sessionId, text) =>
-            executePeerSlashCommand(this.agent, sessionId, text));
         this.agent.onEvent = (requestId, sessionId, event) => {
             this.store.applyEvent(requestId, sessionId, event);
 
@@ -752,10 +747,10 @@ export class ChatApp {
 
         const sessionId = this.store.currentSessionId;
         const { name, args } = parsed;
-        // /review 等价于用户直接输入评审指令：入历史的是指令正文而非命令名
+        // /review 等价于用户直接输入评审指令：附加说明拼在固定指令后面一起送给模型
         if (name === "/review") {
             this.editor.setText("");
-            this.enqueueOrSend(REVIEW_PROMPT);
+            this.enqueueOrSend(buildReviewPrompt(args[0]));
             this.restoreFocus();
             return;
         }
@@ -771,7 +766,8 @@ export class ChatApp {
                 await this.newSession();
                 break;
             case "/sessions":
-                this.openSessionPanel();
+                if (args[0]) this.showSessionMatches(args[0]);
+                else this.openSessionPanel();
                 break;
             case "/tasks":
                 await this.showBackgroundTasks(args, sessionId);
@@ -804,7 +800,7 @@ export class ChatApp {
                 await this.unarchiveCurrentSession();
                 break;
             case "/compact":
-                await this.compactCurrent();
+                await this.compactCurrent(args[0]);
                 break;
             case "/cwd":
                 await this.changeCwd(args[0] ?? "");
@@ -819,22 +815,22 @@ export class ChatApp {
                 this.store.pushSystemMessage(buildSkillsHelpText(), sessionId ?? undefined);
                 break;
             case "/mcp":
-                if (sessionId) this.openMcpPanel(sessionId);
-                else this.store.pushSystemMessage(buildMcpStatusHelpText());
-                break;
-            case "/effort":
-            case "/thinking":
-                await this.handleEffortCommand(args, sessionId ?? undefined);
-                break;
-            case "/model":
                 if (args.length > 0) {
-                    this.store.pushSystemMessage("请只输入 /model，然后在面板中选择协议和模型。", sessionId ?? undefined);
+                    await this.applyMcpToggle(args, sessionId ?? undefined);
+                } else if (sessionId) {
+                    this.openMcpPanel(sessionId);
                 } else {
-                    this.openModelPanel(sessionId!);
+                    this.store.pushSystemMessage(buildMcpStatusHelpText());
                 }
                 break;
-            case "/reasoning":
-                this.toggleReasoning();
+            case "/model":
+                if (args.length === 0) {
+                    this.openModelPanel(sessionId!);
+                } else if (args[0] === "effort") {
+                    await this.handleEffortCommand(args.slice(1), sessionId ?? undefined);
+                } else {
+                    await this.applyModelCommand(args, sessionId ?? undefined);
+                }
                 break;
             case "/help":
                 this.store.pushSystemMessage(buildHelpText(), sessionId ?? undefined);
@@ -865,7 +861,7 @@ export class ChatApp {
         if (!input) {
             this.store.pushSystemMessage([
                 `当前思考强度: ${currentEffort}`,
-                `用法: /effort <${[...effortChoices, "auto"].join("|")}>`,
+                `用法: /model effort <${[...effortChoices, "auto"].join("|")}>`,
                 "说明:",
                 "  - auto: 不传思考强度参数，由上游服务端按默认配置处理",
                 "  - 其他值会按当前协议和厂家直接发送给上游",
@@ -918,10 +914,10 @@ export class ChatApp {
         }
 
         const options = getChatModelOptions();
-        if (options.length < 2) {
+        if (options.length === 0) {
             this.store.pushSystemMessage([
-                "当前只有一个可切换模型。",
-                "请在配置文件中为 Responses API 或 Chat Completions 配置多个模型，或配置两种协议。",
+                "没有配置可切换的模型。",
+                "请在配置文件中为 Responses API 或 Chat Completions 配置模型：",
                 "模型列表使用 OPENAI_RESPONSES_MODELS 或 OPENAI_CHAT_MODELS，以逗号分隔。",
             ].join("\n"), sessionId);
             return;
@@ -930,7 +926,12 @@ export class ChatApp {
         const current = getChatApiSettings(this.currentModelSelection);
         const panel = new ModelPanel({
             options,
-            current: { protocol: current.protocol!, model: current.model },
+            // 强度也交给面板做默认高亮：目标模型支持就沿用，否则 auto
+            current: {
+                protocol: current.protocol!,
+                model: current.model,
+                reasoningEffort: this.currentModelSelection?.reasoningEffort ?? current.reasoningEffort ?? "auto",
+            },
             visibleRows: panelContentRows(this.tui),
             close: () => this.closeModelPanel(),
             complete: (selection, makeDefault) => this.applyModelSelection(sessionId, selection, makeDefault),
@@ -1069,20 +1070,22 @@ export class ChatApp {
         makeDefault: boolean,
     ): Promise<void> {
         const nextSettings = getChatApiSettings(selection);
-        const nextProvider = getReasoningProvider(selection.protocol, selection.model, nextSettings.apiBase);
-        const nextEffortChoices = getReasoningEffortChoices(selection.protocol, nextProvider, nextSettings.reasoningEfforts);
         const previousEffort = this.currentModelSelection?.reasoningEffort
             ?? getChatApiSettings(this.currentModelSelection).reasoningEffort;
-        const canPreserveEffort = previousEffort === "auto" || (previousEffort !== undefined
-            && nextEffortChoices.some(value => value.toLowerCase() === previousEffort.toLowerCase()));
+        // 与命令行同一条保留规则：新模型支持原档位才保留，否则回落 auto
         const selected: ChatModelSelection = {
             ...selection,
-            ...(selection.reasoningEffort === undefined && previousEffort && canPreserveEffort
-                ? { reasoningEffort: previousEffort }
-                : {}),
+            reasoningEffort: selection.reasoningEffort
+                ?? preserveEffort(previousEffort, selection.protocol, selection.model),
         };
         try {
-            await this.agent.setSessionModelSelection(sessionId, selected);
+            // 立即落盘（事件里能查到），与 /model 命令同一条持久化路径；
+            // 没有该方法的前端替身退回 pending 语义
+            if (this.agent.setSessionModelSelectionNow) {
+                await this.agent.setSessionModelSelectionNow(sessionId, selected);
+            } else {
+                await this.agent.setSessionModelSelection(sessionId, selected);
+            }
         } catch (error: any) {
             this.closeModelPanel();
             this.store.pushSystemMessage(`模型设置保存失败：${error?.message ?? String(error)}`, sessionId);
@@ -1109,14 +1112,91 @@ export class ChatApp {
 
         this.closeModelPanel();
         this.renderStatusBar();
+        const effortLabel = selected.reasoningEffort ? `，思考强度 ${selected.reasoningEffort}` : "";
         this.store.pushSystemMessage(defaultFailure
-            ? `当前会话模型已切换为 ${selected.protocol} · ${selected.model}；设置默认模型失败：${defaultFailure}`
-            : `当前会话模型已切换为 ${selected.protocol} · ${selected.model}${makeDefault ? "，并设为默认" : ""}`,
+            ? `当前会话模型已切换为 ${selected.protocol} · ${selected.model}${effortLabel}；设置默认模型失败：${defaultFailure}`
+            : `当前会话模型已切换为 ${selected.protocol} · ${selected.model}${effortLabel}${makeDefault ? "，并设为默认" : ""}`,
         sessionId);
     }
 
     private closeModelPanel(): void {
         this.panels.remove("model");
+    }
+
+    /** /model <协议> <模型> [强度|auto]：与面板走同一条落盘路径（不复制业务逻辑）。 */
+    private async applyModelCommand(args: string[], sessionId?: string): Promise<void> {
+        if (!sessionId) {
+            this.tui.flash("没有打开的会话");
+            return;
+        }
+        const [protocol, model, effort] = args;
+        const settings = getChatApiSettings(this.currentModelSelection);
+        // 与 session send 同一条解析：按**目标模型**的档位校验并归一化强度
+        const resolved = resolveModelUse(
+            getChatModelOptions(),
+            protocol,
+            model,
+            effort,
+            this.currentModelSelection?.reasoningEffort ?? settings.reasoningEffort,
+        );
+        if (!resolved.ok) {
+            this.store.pushSystemMessage(resolved.error, sessionId);
+            return;
+        }
+        await this.applyModelSelection(sessionId, resolved.selection, false);
+    }
+
+    /** /mcp enable|disable <服务名>：面板勾选的非交互等价入口。 */
+    private async applyMcpToggle(args: string[], sessionId?: string): Promise<void> {
+        const [action, name] = args;
+        if (!sessionId) {
+            this.tui.flash("没有打开的会话");
+            return;
+        }
+        if (this.agent.isSessionBusy(sessionId)) {
+            this.tui.flash("会话执行中，暂不能调整 lazy MCP 工具的下发");
+            return;
+        }
+        const servers = getMcpServersStatus();
+        if (!name || !servers.some(server => server.name === name)) {
+            this.store.pushSystemMessage(
+                `没有这个 MCP 服务：${name ?? "（缺失）"}。可选：${servers.map(server => server.name).join(" | ") || "（无）"}`,
+                sessionId,
+            );
+            return;
+        }
+        try {
+            const enabled = await this.agent.getSessionLazyMcpServers(sessionId);
+            const next = action === "enable"
+                ? [...new Set([...enabled, name])]
+                : enabled.filter(server => server !== name);
+            await this.agent.setSessionLazyMcpServers(sessionId, next);
+            this.store.pushSystemMessage(
+                action === "enable" ? `已为本会话启用 lazy MCP：${name}` : `已为本会话停用 lazy MCP：${name}`,
+                sessionId,
+            );
+        } catch (error: any) {
+            this.store.pushSystemMessage(`MCP 选择保存失败：${error?.message ?? String(error)}`, sessionId);
+        }
+    }
+
+    /** /sessions <查询>：面板的文本视图（面板本身只按键盘搜索，参数不能被静默丢掉）。 */
+    private showSessionMatches(query: string): void {
+        const keyword = query.trim().toLowerCase();
+        const matched = this.store.sessions.filter(session => [session.sessionId, session.title ?? "", session.cwd ?? ""]
+            .some(field => field.toLowerCase().includes(keyword)));
+        if (matched.length === 0) {
+            this.store.pushSystemMessage(`没有匹配「${query}」的会话`);
+            return;
+        }
+        const lines = matched.map(session => [
+            `- ${session.sessionId}`,
+            session.title ? `「${session.title}」` : "",
+            `· ${session.messageCount} 轮`,
+            session.archived ? "· 已归档" : "",
+            session.cwd ? `· ${formatDisplayPath(session.cwd)}` : "",
+        ].filter(Boolean).join(" "));
+        this.store.pushSystemMessage(`匹配「${query}」的会话（${matched.length} 个）：\n${lines.join("\n")}`);
     }
 
     private async showSystemPrompt(): Promise<void> {
@@ -2175,16 +2255,8 @@ export class ChatApp {
      * 子会话不自动回收：用完由用户 ⌃X 删除或 ⌃A 归档。
      */
     private async handleSessionSpawned(sessionId: string, title?: string): Promise<void> {
+        // 标题已由宿主在建会话时固化（createSession），这里只负责进会话条
         const cleanTitle = (title ?? "").trim();
-        if (cleanTitle) {
-            try {
-                // 空会话先落盘 session_created + session_renamed，标题才能持久化
-                await this.agent.renameSession(sessionId, cleanTitle);
-            } catch (error: any) {
-                console.error("⚠️ [TUI] 子会话标题落盘失败:", error?.message ?? error);
-            }
-        }
-
         this.store.sessions.unshift({
             sessionId,
             cwd: await this.agent.getSessionCwd(sessionId),
@@ -2865,14 +2937,19 @@ export class ChatApp {
         await this.agent.abortSession(sessionId);
     }
 
-    private async compactCurrent(): Promise<void> {
+    /** /compact [附加要求]：附加要求作为压缩提示的一部分，不静默丢弃。 */
+    private async compactCurrent(instruction?: string): Promise<void> {
         const sessionId = this.store.currentSessionId;
-        if (!sessionId || this.agent.isSessionBusy(sessionId)) return;
+        if (!sessionId) return;
+        if (this.agent.isSessionBusy(sessionId)) {
+            this.tui.flash("会话正在执行，暂不能压缩");
+            return;
+        }
         this.turnState.lock(sessionId, "compacting");
         this.syncSubmitState();
         this.syncHerdrState();
         try {
-            await this.agent.compactSession(sessionId);
+            await this.agent.compactSession(sessionId, instruction);
             this.store.pushSystemMessage("🗜️ 已压缩上下文", sessionId);
         } catch (error: any) {
             this.store.pushSystemMessage(`⚠️ 压缩失败: ${error.message}`, sessionId);
@@ -2929,20 +3006,6 @@ export class ChatApp {
             if (this.detailed) this.syncMessages();
             this.sendNextPending(sessionId);
         }
-    }
-
-    private toggleReasoning(): void {
-        this.showReasoning = !this.showReasoning;
-        const ctx = this.renderContext();
-        for (const entry of this.messageComponents.values()) {
-            if (!entry.timeline) continue;
-            const message = this.store.getMessageById(entry.messageId);
-            if (message && message.role === "assistant") {
-                updateMessageComponent(entry, message, ctx);
-                entry.renderKey = messageRenderKey(message, ctx);
-            }
-        }
-        this.tui.requestRender();
     }
 
     /** Ctrl+O：全局展开/收起详细内容（reasoning 全文 + 全部工具块）。 */
@@ -3236,7 +3299,6 @@ export class ChatApp {
     private renderContext(): RenderContext {
         return {
             detailed: this.detailed,
-            showReasoning: this.showReasoning,
             spinnerIndex: this.spinnerIndex,
             columns: this.tui.terminal.columns,
             diffDetail: this.diffDetail,

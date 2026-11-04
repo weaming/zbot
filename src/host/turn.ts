@@ -245,13 +245,23 @@ export async function runSessionTurn(
     }
 }
 
+export interface CompactSessionOptions {
+    /**
+     * 调用方已持有会话互斥（会话间投递在回 ack 前就已占住，见 acceptPeerMessage）：
+     * 压缩只借用该互斥，既不重新抢，也不替调用方释放。
+     */
+    alreadyReserved?: boolean;
+}
+
 /** 手动压缩会话上下文：写入 context_compacted 事件并同步内存会话。 */
 export async function compactSessionContext(
     host: TurnHost,
     sessionId: string,
     instruction?: string,
+    options: CompactSessionOptions = {},
 ): Promise<void> {
-    host.beginSessionOperation(sessionId);
+    const reservedByCaller = options.alreadyReserved === true;
+    if (!reservedByCaller) host.beginSessionOperation(sessionId);
     let lock: SessionLockHandle | undefined;
     const abortController = new AbortController();
     const requestId = host.allocateRequestId();
@@ -347,7 +357,7 @@ export async function compactSessionContext(
             try {
                 await host.releaseSessionLockSafely(lock);
             } finally {
-                host.endSessionOperation(sessionId);
+                if (!reservedByCaller) host.endSessionOperation(sessionId);
             }
         }
     }

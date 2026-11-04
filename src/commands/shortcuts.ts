@@ -123,7 +123,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
             { keys: "/archive /unarchive", desc: "归档 / 取消归档当前会话" },
             { keys: "/compact /continue", desc: "压缩上下文 / 续跑未完成任务" },
             { keys: "/system", desc: "查看 system prompt" },
-            { keys: "/effort /reasoning", desc: "思考强度 / 思考过程显示" },
+            { keys: "/model", desc: "模型与思考强度（查看 / 切换模型 / 设置强度）" },
             { keys: "/skills /mcp /help", desc: "技能清单 / MCP 状态 / 帮助" },
         ],
     },
