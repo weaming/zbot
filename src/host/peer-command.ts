@@ -39,6 +39,11 @@ export type PeerDeferredAction = "archive" | "close" | "delete";
 export interface PeerCommandResult {
     output: string;
     deferred?: PeerDeferredAction;
+    /**
+     * 命令内部已经跑过一轮（如 /continue）：那一轮自己释放了会话互斥，
+     * 调用方不能再释放一次，否则会误删刚被排队消息抢到的互斥。
+     */
+    ranTurn?: boolean;
 }
 
 /** 命令执行所需的宿主能力（结构化子集，便于测试注入）。 */
@@ -132,7 +137,10 @@ export async function executePeerCommand(
                 if (!result.resumed) {
                     return { output: view(parsed.json, `ℹ️ ${result.reason ?? "没有可继续的内容"}`, () => ({ resumed: false, reason: result.reason ?? null })) };
                 }
-                return { output: view(parsed.json, result.aborted ? "⏩ 继续已中止" : "⏩ 已继续执行", () => ({ resumed: true, aborted: result.aborted === true })) };
+                return {
+                    output: view(parsed.json, result.aborted ? "⏩ 继续已中止" : "⏩ 已继续执行", () => ({ resumed: true, aborted: result.aborted === true })),
+                    ranTurn: true,
+                };
             }
             case "/clear": {
                 requireConfirm(parsed.name, parsed.args[0]);

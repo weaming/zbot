@@ -40,7 +40,13 @@ import {
     truncateInline,
     wrapAppLink,
 } from "./slash-commands.js";
-import { preserveEffort, resolveModelUse } from "../commands/slash-model.js";
+import {
+    describeModelView,
+    effectiveReasoningEffort,
+    preserveEffort,
+    resolveEffort,
+    resolveModelUse,
+} from "../commands/slash-model.js";
 import { buildReviewPrompt, parseSlashCommand } from "../commands/slash-command.js";
 import {
     formatBackgroundTaskDetails,
@@ -103,7 +109,6 @@ import {
     validateChatApiSettings,
 } from "../services/chat-runtime.js";
 import type { ChatModelSelection } from "../types/chat-model.js";
-import { getReasoningEffortChoices, getReasoningProvider } from "../utils/reasoning-effort.js";
 import { readSessionTodos, type TodoItem } from "../tools/todo-tool.js";
 import { deepSeekPhaseInfo, endpointHost, normalizeDeepSeekModel, resolvePricingMode } from "../pricing/deepseek.js";
 import { getContextWindowForModel } from "../utils/token-budget.js";
@@ -847,21 +852,15 @@ export class ChatApp {
     }
 
     private async handleEffortCommand(args: string[], sessionId?: string): Promise<void> {
-        const input = args[0]?.trim().toLowerCase();
-        const settings = getChatApiSettings(this.currentModelSelection);
-        const provider = getReasoningProvider(settings.protocol ?? "chat_completions", settings.model, settings.apiBase);
-        const effortChoices = getReasoningEffortChoices(settings.protocol ?? "chat_completions", provider, settings.reasoningEfforts);
-        const currentEffort = this.currentModelSelection?.reasoningEffort
-            ?? settings.reasoningEffort
-            ?? process.env.REASONING_EFFORT
-            ?? process.env.OPENAI_REASONING_EFFORT
-            ?? process.env.DEEPSEEK_REASONING_EFFORT
-            ?? "auto";
+        const raw = args[0];
+        const view = describeModelView(this.currentModelSelection);
+        const choices = view.efforts;
+        const currentEffort = effectiveReasoningEffort(this.currentModelSelection);
 
-        if (!input) {
+        if (raw === undefined) {
             this.store.pushSystemMessage([
                 `当前思考强度: ${currentEffort}`,
-                `用法: /model effort <${[...effortChoices, "auto"].join("|")}>`,
+                `用法: /model effort <${choices.join("|")}>`,
                 "说明:",
                 "  - auto: 不传思考强度参数，由上游服务端按默认配置处理",
                 "  - 其他值会按当前协议和厂家直接发送给上游",
@@ -869,20 +868,20 @@ export class ChatApp {
             return;
         }
 
-        if (input !== "auto" && !effortChoices.some(value => value.toLowerCase() === input)) {
-            this.store.pushSystemMessage(`⚠️ 未知思考强度: ${args[0]}，可选值：${[...effortChoices, "auto"].join(" | ")}`, sessionId);
+        const resolved = resolveEffort(raw, choices);
+        if (!resolved.ok) {
+            this.store.pushSystemMessage(`⚠️ ${resolved.error}`, sessionId);
             return;
         }
-
-        const normalized = input;
+        const normalized = resolved.effort;
         if (sessionId) {
             const selection: ChatModelSelection = {
-                protocol: this.currentModelSelection?.protocol ?? settings.protocol ?? "chat_completions",
-                model: this.currentModelSelection?.model ?? settings.model,
+                protocol: view.current.protocol as ChatModelSelection["protocol"],
+                model: view.current.model,
                 reasoningEffort: normalized,
             };
             try {
-                await this.agent.setSessionModelSelection(sessionId, selection);
+                await this.persistModelSelection(sessionId, selection);
                 this.currentModelSelection = selection;
                 const sessionSummary = this.store.sessions.find(session => session.sessionId === sessionId);
                 if (sessionSummary) sessionSummary.modelSelection = selection;
@@ -930,7 +929,7 @@ export class ChatApp {
             current: {
                 protocol: current.protocol!,
                 model: current.model,
-                reasoningEffort: this.currentModelSelection?.reasoningEffort ?? current.reasoningEffort ?? "auto",
+                reasoningEffort: effectiveReasoningEffort(this.currentModelSelection),
             },
             visibleRows: panelContentRows(this.tui),
             close: () => this.closeModelPanel(),
@@ -1064,28 +1063,29 @@ export class ChatApp {
         }
     }
 
+    /** 模型/强度落盘：优先立即写事件（进程退出不丢），前端替身退回 pending 语义。 */
+    private async persistModelSelection(sessionId: string, selection: ChatModelSelection): Promise<void> {
+        if (this.agent.setSessionModelSelectionNow) {
+            await this.agent.setSessionModelSelectionNow(sessionId, selection);
+            return;
+        }
+        await this.agent.setSessionModelSelection(sessionId, selection);
+    }
+
     private async applyModelSelection(
         sessionId: string,
         selection: ChatModelSelection,
         makeDefault: boolean,
     ): Promise<void> {
-        const nextSettings = getChatApiSettings(selection);
-        const previousEffort = this.currentModelSelection?.reasoningEffort
-            ?? getChatApiSettings(this.currentModelSelection).reasoningEffort;
-        // 与命令行同一条保留规则：新模型支持原档位才保留，否则回落 auto
+        const previousEffort = effectiveReasoningEffort(this.currentModelSelection);
+        // 与命令行同一条保留规则：新模型支持原档位才保留，否则回落 auto（含环境变量里的档位）
         const selected: ChatModelSelection = {
             ...selection,
             reasoningEffort: selection.reasoningEffort
                 ?? preserveEffort(previousEffort, selection.protocol, selection.model),
         };
         try {
-            // 立即落盘（事件里能查到），与 /model 命令同一条持久化路径；
-            // 没有该方法的前端替身退回 pending 语义
-            if (this.agent.setSessionModelSelectionNow) {
-                await this.agent.setSessionModelSelectionNow(sessionId, selected);
-            } else {
-                await this.agent.setSessionModelSelection(sessionId, selected);
-            }
+            await this.persistModelSelection(sessionId, selected);
         } catch (error: any) {
             this.closeModelPanel();
             this.store.pushSystemMessage(`模型设置保存失败：${error?.message ?? String(error)}`, sessionId);
@@ -1130,14 +1130,14 @@ export class ChatApp {
             return;
         }
         const [protocol, model, effort] = args;
-        const settings = getChatApiSettings(this.currentModelSelection);
-        // 与 session send 同一条解析：按**目标模型**的档位校验并归一化强度
+        // 与 session send 同一条解析：按**目标模型**的档位校验并归一化强度；
+        // "当前档位"要含环境变量（否则切模型会把 REASONING_EFFORT 静默变成 auto）
         const resolved = resolveModelUse(
             getChatModelOptions(),
             protocol,
             model,
             effort,
-            this.currentModelSelection?.reasoningEffort ?? settings.reasoningEffort,
+            effectiveReasoningEffort(this.currentModelSelection),
         );
         if (!resolved.ok) {
             this.store.pushSystemMessage(resolved.error, sessionId);

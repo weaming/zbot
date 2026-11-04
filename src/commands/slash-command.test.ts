@@ -140,6 +140,8 @@ describe("parseSlashCommand", () => {
         expect(invalidMessage("/model effort high extra")).toContain("只接受一个取值");
         // use 子命令已删除：它是非法协议名
         expect(invalidMessage("/model use chat_completions gpt-4o")).toContain("协议需要是");
+        // 位置参数最多三段：第四段必须报错，不能静默丢弃
+        expect(invalidMessage("/model chat_completions gpt-4o high extra")).toContain("参数过多");
         expect(commandArgs("/mcp enable github")).toEqual(["enable", "github"]);
         expect(invalidMessage("/mcp enable")).toContain("需要服务名");
         expect(invalidMessage("/mcp kill github")).toContain("未知子命令");

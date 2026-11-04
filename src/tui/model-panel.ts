@@ -3,7 +3,7 @@
 import { Key, matchesKey, Text } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
 import type { ChatModelSelection } from "../types/chat-model.js";
-import { effortChoicesFor, preserveEffort } from "../commands/slash-model.js";
+import { effortChoicesFor, resolveEffort } from "../commands/slash-model.js";
 import { PanelBody } from "./panel-body.js";
 import { handlePanelScroll } from "./panel-scroll.js";
 import { truncatePlain } from "../format/text.js";
@@ -141,9 +141,14 @@ export class ModelPanel implements Component {
     private initialEffortIndex(): number {
         const model = this.models()[this.modelIndex];
         if (!model) return 0;
-        const current = preserveEffort(this.options.current?.reasoningEffort, model.protocol, model.model);
-        const index = this.efforts().findIndex(effort => effort === current);
-        return Math.max(0, index);
+        const efforts = this.efforts();
+        // 归一化后再找索引：preserve 的返回值可能与展示值大小写不同（如 HIGH vs high），
+        // 精确匹配失败会落到第一项 none，等于把思考悄悄关掉
+        const current = this.options.current?.reasoningEffort;
+        const normalized = current === undefined ? undefined : resolveEffort(current, efforts);
+        const desired = normalized?.ok ? normalized.effort : "auto";
+        const index = efforts.indexOf(desired);
+        return index >= 0 ? index : Math.max(0, efforts.indexOf("auto"));
     }
 
     private choices(): string[] {

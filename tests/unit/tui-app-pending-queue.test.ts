@@ -766,6 +766,37 @@ describe("ChatApp pending queue", () => {
         expect(store.messages.some(m => m.role === "system" && m.text.includes("/mcp"))).toBe(true);
     });
 
+    test("/model effort 立即落盘；切模型时环境变量档位不会被静默改成 auto", async () => {
+        const savedEffort = process.env.REASONING_EFFORT;
+        const savedModel = process.env.OPENAI_CHAT_MODEL;
+        process.env.REASONING_EFFORT = "high";
+        process.env.OPENAI_CHAT_MODEL = "stub-model";
+        try {
+            const agent = makeFakeAgent();
+            const store = new ChatStore();
+            const app = new ChatApp(agent as any, store);
+            store.currentSessionId = "session-effort-now";
+            const pending: any[] = [];
+            const immediate: any[] = [];
+            (agent as any).setSessionModelSelection = async (_id: string, selection: any) => { pending.push(selection); };
+            (agent as any).setSessionModelSelectionNow = async (_id: string, selection: any) => { immediate.push(selection); };
+
+            await (app as any).handleCommand("/model effort low");
+            expect(immediate.at(-1)?.reasoningEffort).toBe("low");
+            expect(pending).toHaveLength(0);
+
+            // 切模型：env 里的 high 在目标模型上可用 → 保留，而不是回落 auto
+            (app as any).currentModelSelection = undefined;
+            await (app as any).handleCommand("/model chat_completions stub-model");
+            expect(immediate.at(-1)).toMatchObject({ model: "stub-model", reasoningEffort: "high" });
+        } finally {
+            if (savedEffort === undefined) delete process.env.REASONING_EFFORT;
+            else process.env.REASONING_EFFORT = savedEffort;
+            if (savedModel === undefined) delete process.env.OPENAI_CHAT_MODEL;
+            else process.env.OPENAI_CHAT_MODEL = savedModel;
+        }
+    });
+
     test("/model 按目标模型的档位校验并归一化（与 session send 同口径）", async () => {
         // 当前模型是 deepseek 系（档位 none/low/high/max），目标模型是 responses 系
         // （档位含 minimal/medium/xhigh、没有 max）：两套档位不同，正是历史 bug 的场景

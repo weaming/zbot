@@ -76,8 +76,10 @@ zbot session queue <id> --json                        # 队列快照（position/
 - 命令在「本次投递已占住的会话互斥」里执行，不重抢、不代释；忙时按现有每会话有界
   FIFO 排队（`--queue`/默认、`--expires`、`--cancel`、msgId 幂等），不另建队列。
 - **目标会话无人持有**（进程退出、归档后释放）时，`send` 由本进程临时接管执行这一条：
-  命令直接跑、普通文本跑一轮模型，结束后释放（`--json` 多一个 `executedLocally: true`）。
-  这是 `/archive` 之后还能 `send /unarchive` 的原因；`--queue`/`--expires` 在这种场景无意义。
+  命令直接跑（`/review` 转成模型指令）、普通文本跑一轮模型，结束后释放
+  （`--json` 带 `executedLocally: true`）。这是 `/archive` 之后还能 `send /unarchive` 的原因。
+  该路径沿用调用方的 `ZBOT_STATE_DIR`，`--queue`/`--expires` 无意义，也没有 msgId 幂等
+  （重复调用即重复执行）。
 - 归档态会话只接受只读/生命周期命令（白名单见下表 `归档` 列），且**不写目标时间线**：
   往 `session_archived` 之后追加任何事件都会把它悄悄解除归档。其余命令回明确错误
   「先 `/unarchive`」。
@@ -94,14 +96,14 @@ zbot session queue <id> --json                        # 队列快照（position/
 | `/reload` | 重载技能与 MCP | 同语义（其他会话执行中时明确拒绝） |
 | `/keys [--json]` | 快捷键面板 | 快捷键清单（分组/键位/说明） |
 | `/continue` | 补跑中断的工具或下一次请求 | 直接执行，返回「已继续/没有可继续的上下文」 |
-| `/clear confirm` | 清空历史（截断重建） | 破坏性，必须带 `confirm`；会话保留可用 |
+| `/clear [confirm]` | 清空历史（截断重建） | 破坏性：远程必须带 `confirm`；会话保留可用且 cwd 不变 |
 | `/archive` | 归档（可在面板查看） | **结果送达后**归档并释放持有；排队中的投递按 cancelled 收尾 |
 | `/unarchive` | 取消归档 | 恢复可写（归档态白名单内可用） |
 | `/delete confirm` | 彻底删除 | 破坏性，必须带 `confirm`；**结果送达后**删除并释放 |
 | `/close` | 关闭（释放持有，数据保留） | **结果送达后**释放持有，不写归档事件 |
 | `/compact [附加要求]` | 压缩上下文 | 与 TUI 共用压缩实现；附加要求进入压缩提示 |
 | `/cwd [路径] [--json]` | 查看/切换工作目录 | 同语义（路径可含空格） |
-| `/model [--json]` \| `/model <协议> <模型> [强度\|auto]` \| `/model effort [档位\|auto]` | 交互式菜单：协议 → 模型 → 思考强度（目标模型可用档位+auto，默认当前档位/不支持则 auto）→ 是否设为默认 | 查看当前与可选项；位置参数校验组合并按**目标模型**的档位校验/归一化强度（省略则保留原档位，不支持才回落 auto），选择立即落盘、下一回合生效；`effort` 查看/设置强度。统一入口，只有这一处写选择 |
+| `/model [--json]` \| `/model <协议> <模型> [强度\|auto]` \| `/model effort [档位\|auto]` | 无参 = 交互式菜单：协议 → 模型 → 思考强度（目标模型可用档位+auto，默认当前档位/不支持则 auto）→ 是否设为默认；带参数 = 同一条命令的文字形式 | 查看当前与可选项；位置参数校验组合并按**目标模型**的档位校验/归一化强度（省略则保留原档位，不支持才回落 auto），选择立即落盘、下一回合生效；`effort` 查看/设置强度。统一入口，只有这一处写选择 |
 | `/effort` `/thinking` `/reasoning` | 已随统一入口删除 | 不再是命令：整条按普通文本交给模型（与未知 `/xxx` 一致） |
 | `/mcp [--json] \| /mcp enable\|disable <服务名>` | 面板查看状态、勾选会话级 lazy 启用 | 查看服务状态与 tool_search 情况；`enable/disable` 覆盖本会话启用集 |
 | `/system [--json]` | 显示 system prompt | 同语义 |

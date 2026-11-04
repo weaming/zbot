@@ -779,6 +779,8 @@ async function runNew(command: NewCommand, write: (text: string) => void): Promi
  * `session run` 与 `send` 的无持有者接管共用，保证两处装配完全一致。
  */
 async function createOneShotHost(startupCwd: string): Promise<LocalSendHost> {
+    // 必须在 configureHostEnvironment 之前取：它会把 ZBOT_STATE_DIR 改成 ~/.zbot
+    const stateDir = process.env.ZBOT_STATE_DIR;
     const [{ LocalSessionHost, initializeSessionHostRuntime }, mcp, runtimeContext] = await Promise.all([
         import("../host/session-host.js"),
         import("../mcp/client-manager.js"),
@@ -788,7 +790,11 @@ async function createOneShotHost(startupCwd: string): Promise<LocalSendHost> {
     const dotenv = (await import("dotenv")).default;
     const envFile = process.env.ZBOT_ENV_FILE || path.join(process.env.HOME ?? "", ".zbot", "env");
     dotenv.config({ path: envFile, quiet: true });
-    runtimeContext.configureHostEnvironment();
+    // 保留调用方的状态目录：runSend 已经用它在原来那套会话库里解析过 sessionId
+    runtimeContext.configureHostEnvironment({
+        ...(stateDir ? { stateDir } : {}),
+        startupCwd,
+    });
 
     // MCP/技能初始化日志写文件，避免污染 stdout 的结果与 --json
     const restoreConsole = runtimeContext.redirectLogsToFile();
@@ -837,7 +843,10 @@ async function runSendLocally(
     io: SessionCliIO,
 ): Promise<void> {
     const { runHostTurn } = await import("./session-turn.js");
-    const host = await (io.createLocalSendHost ?? createOneShotHost)(process.cwd());
+    // 一次性宿主的启动目录用会话自己的 cwd（工具的相对路径基准不会跑到调用方目录）
+    const meta = await readSessionMeta(sessionId).catch(() => null);
+    const startupCwd = meta?.summary.cwd ?? process.cwd();
+    const host = await (io.createLocalSendHost ?? createOneShotHost)(startupCwd);
     try {
         const claim = await host.claimSession(sessionId, { noNegotiate: true });
         if (!claim.ok) {
@@ -851,11 +860,11 @@ async function runSendLocally(
 
         const plan = await host.executePeerCommandLocally(sessionId, text);
         if (plan.kind === "prompt") {
+            // 与投递路径一致：/review 的附加说明拼在固定指令之后
             await runHostTurn({ host, sessionId, prompt: plan.prompt, json: command.json, write });
             return;
         }
 
-        // 先输出结果，再执行生命周期收尾：删除/归档要让人看到"做了什么"
         if (!plan.ok) {
             await plan.finish();
             throw new SessionCliError(
@@ -865,10 +874,13 @@ async function runSendLocally(
                 { sessionId, executedLocally: true, stopReason: plan.stopReason, delivered: false },
             );
         }
+        // 收尾（归档/关闭/删除）先做：失败要报错，不能先打印成功
+        await plan.finish();
         if (command.json) {
             write(`${JSON.stringify({
                 sessionId,
                 executedLocally: true,
+                delivered: true,
                 ok: true,
                 stopReason: plan.stopReason,
                 text: plan.output,
@@ -876,7 +888,6 @@ async function runSendLocally(
         } else {
             write(`${plan.output}\n`);
         }
-        await plan.finish();
     } finally {
         await host.close();
     }

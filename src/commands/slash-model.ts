@@ -10,12 +10,24 @@ import { getReasoningEffortChoices, getReasoningProvider } from "../utils/reason
 import type { ChatApiProtocol, ChatModelSelection } from "../types/chat-model.js";
 import type { ChatModelOption } from "../services/chat-runtime.js";
 
-export const MODEL_PROTOCOLS = ["chat_completions", "responses"] as const;
-
 export interface ModelView {
     current: { protocol: string; model: string; reasoningEffort: string };
     options: ChatModelOption[];
     efforts: string[];
+}
+
+/**
+ * 当前生效的思考强度：会话选择 → 配置 → 环境变量（`REASONING_EFFORT` /
+ * `OPENAI_REASONING_EFFORT` / `DEEPSEEK_REASONING_EFFORT`）→ auto。
+ * 面板默认高亮、切模型保留档位都用它，否则切模型会把 env 里的设置静默变成 auto。
+ */
+export function effectiveReasoningEffort(selection: ChatModelSelection | undefined): string {
+    return selection?.reasoningEffort
+        ?? getChatApiSettings(selection).reasoningEffort
+        ?? process.env.REASONING_EFFORT
+        ?? process.env.OPENAI_REASONING_EFFORT
+        ?? process.env.DEEPSEEK_REASONING_EFFORT
+        ?? "auto";
 }
 
 /** 会话当前的模型视图：待落盘选择优先（本回合设置、下一回合生效）。 */
@@ -27,7 +39,7 @@ export function describeModelView(selection: ChatModelSelection | undefined): Mo
         current: {
             protocol,
             model,
-            reasoningEffort: selection?.reasoningEffort ?? settings.reasoningEffort ?? "auto",
+            reasoningEffort: effectiveReasoningEffort(selection),
         },
         options: getChatModelOptions(),
         efforts: effortChoices(protocol, model, settings.apiBase, settings.reasoningEfforts),
@@ -44,7 +56,7 @@ export function effortChoicesFor(protocol: ChatApiProtocol, model: string): stri
 }
 
 /** 某协议/模型可用的思考强度（含 auto）。 */
-export function effortChoices(
+function effortChoices(
     protocol: ChatApiProtocol,
     model: string,
     apiBase: string,
@@ -56,8 +68,8 @@ export function effortChoices(
     ];
 }
 
-/** 解析 `/model <协议> <模型>`：组合必须出现在可切换列表里（与面板同口径）。 */
-export function resolveModelOption(
+/** 组合必须出现在可切换列表里（与面板同口径）。 */
+function resolveModelOption(
     protocol: string,
     model: string,
     options: ChatModelOption[],

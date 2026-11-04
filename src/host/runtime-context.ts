@@ -169,9 +169,29 @@ export function setLogSession(sessionId: string | null): void {
     }
 }
 
-/** 将本地工具依赖的路径和宿主服务地址切换为 TUI 所在环境。 */
-export function configureHostEnvironment(): void {
-    const stateDir = DEFAULT_HOST_STATE_DIR;
+/**
+ * 解析宿主环境要用的状态目录与启动目录：显式给值优先（一次性 CLI 沿用调用方），
+ * 否则回落到 `~/.zbot` 与当前目录。纯函数，便于单独验证。
+ */
+export function resolveHostEnvironment(
+    options: { stateDir?: string; startupCwd?: string } = {},
+): { stateDir: string; startupCwd: string } {
+    return {
+        stateDir: options.stateDir ?? DEFAULT_HOST_STATE_DIR,
+        startupCwd: options.startupCwd ?? process.cwd(),
+    };
+}
+
+/**
+ * 将本地工具依赖的路径和宿主服务地址切换为 TUI 所在环境。
+ *
+ * `stateDir`/`startupCwd` 供一次性 CLI（`session run`、无持有者时的 `session send`）覆盖：
+ * 调用方可能已经用自定义状态目录解析出会话，这里再切回 `~/.zbot` 就会「会话不存在」。
+ */
+export function configureHostEnvironment(
+    options: { stateDir?: string; startupCwd?: string } = {},
+): void {
+    const { stateDir, startupCwd: startup } = resolveHostEnvironment(options);
     const srcRoot = resolveHostSrcRoot();
     fs.mkdirSync(stateDir, { recursive: true });
 
@@ -180,11 +200,11 @@ export function configureHostEnvironment(): void {
     setEmbeddedIdentity(embeddedIdentity);
     process.env.ZBOT_EXTRA_IDENTITY_FILE = path.join(os.homedir(), ".zbot", "AGENTS.md");
     process.env.TUI_PLATFORM = `${process.platform} ${process.arch}`;
-    process.env.TUI_CWD = process.cwd();
+    process.env.TUI_CWD = startup;
     // 固化启动目录：TUI_CWD 之后会随会话切换被改写，新建会话仍须以启动目录为初始值。
-    startupCwd = process.cwd();
+    startupCwd = startup;
     // 同一份固化值也交给工具层：旧会话缺 cwd 时不能继承当前选中会话的目录。
-    setStartupToolCwd(process.cwd());
+    setStartupToolCwd(startup);
     process.env.TUI_SRC_ROOT = srcRoot;
     rewriteContainerServicesForHost();
 }

@@ -127,6 +127,25 @@ describe("ModelPanel", () => {
         expect(screen(fallback.panel)).toContain("❯ auto");
     });
 
+    test("当前档位大小写不敏感：HIGH 归一化到 high，而不是落到 none", () => {
+        const completed: Array<{ selection: any }> = [];
+        const panel = new ModelPanel({
+            options: OPTIONS,
+            current: { protocol: "responses", model: "gpt-5", reasoningEffort: "HIGH" } as any,
+            visibleRows: 12,
+            close: () => undefined,
+            complete: selection => { completed.push({ selection }); },
+        });
+        panel.handleInput(DOWN); // Responses
+        panel.handleInput(ENTER);
+        moveTo(panel, "gpt-5");
+        panel.handleInput(ENTER);
+        expect(screen(panel)).toContain("❯ high");
+        panel.handleInput(ENTER);
+        panel.handleInput(ENTER);
+        expect(completed.at(-1)?.selection.reasoningEffort).toBe("high");
+    });
+
     test("Backspace 逐级返回；Esc 关闭", () => {
         let closed = 0;
         const panel = new ModelPanel({

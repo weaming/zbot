@@ -18,7 +18,7 @@ import { EventLog } from "../events/event-log.js";
 import { removeSessionArtifacts } from "../events/session-cleanup.js";
 import { listSavedSessionIds } from "../events/session-files.js";
 import { appendInputHistory, loadInputHistory } from "./input-history.js";
-import { getStartupToolCwd, getToolCwd } from "../utils/runtime-paths.js";
+import { getStartupToolCwd } from "../utils/runtime-paths.js";
 import { planResume } from "../services/resume-plan.js";
 import { clearMcpSelection, updateMcpSelection } from "../tools/session-mcp-selection.js";
 import {
@@ -624,6 +624,8 @@ export class LocalSessionHost implements SessionHost {
                     this.completePeerTurn(sessionId, message, { content: command.output, stopReason: "command" });
                     // 生命周期命令要等结果送达再拆链路（见 runDeferredPeerAction）
                     deferred = command.deferred;
+                    // 命令自己跑过一轮（/continue）时，互斥已由那一轮释放，别再删一次
+                    if (command.ranTurn) handedOff = true;
                     return;
                 }
                 if (command.kind === "prompt") prompt = command.prompt;
@@ -669,7 +671,7 @@ export class LocalSessionHost implements SessionHost {
             // 只有没交给 runSessionTurn 的路径才释放，避免删掉期间别的入口刚抢到的互斥
             if (!handedOff) this.endSessionOperation(sessionId);
             // 结果已经送达且互斥已归还：这时候归档/关闭/删除才不会掐断回传
-            if (deferred) void this.runDeferredPeerAction(sessionId, deferred);
+            if (deferred) void this.runDeferredPeerAction(sessionId, deferred).catch(() => undefined);
         }
     }
 
@@ -678,14 +680,19 @@ export class LocalSessionHost implements SessionHost {
         sessionId: string,
         parsed: Extract<SlashCommandParse, { kind: "command" }>,
     ): Promise<
-        { kind: "output"; output: string; deferred?: PeerDeferredAction }
+        { kind: "output"; output: string; deferred?: PeerDeferredAction; ranTurn?: boolean }
         | { kind: "prompt"; prompt: string }
     > {
         if (parsed.spec.peer === "prompt") {
             return { kind: "prompt", prompt: buildReviewPrompt(parsed.args[0]) };
         }
         const result = await executePeerCommand(this.peerCommandHost, sessionId, parsed);
-        return { kind: "output", output: result.output, ...(result.deferred ? { deferred: result.deferred } : {}) };
+        return {
+            kind: "output",
+            output: result.output,
+            ...(result.deferred ? { deferred: result.deferred } : {}),
+            ...(result.ranTurn ? { ranTurn: true } : {}),
+        };
     }
 
     /**
@@ -707,6 +714,7 @@ export class LocalSessionHost implements SessionHost {
             }
         } catch (error) {
             console.error(`⚠️ [host] 会话间 ${action} 收尾失败:`, error);
+            throw error;
         }
     }
 
@@ -950,7 +958,8 @@ export class LocalSessionHost implements SessionHost {
             await deleteSessionImageAssets(sessionId);
             closeChatSessionTransport(sessionId);
             await deleteResponsesBaseline(sessionId);
-            await this.eventLog.append(sessionId, "session_created", { cwd: getToolCwd() });
+            // 用会话自己的 cwd：远程 /clear 不该把目标会话的工作目录改成持有者/CLI 的目录
+            await this.eventLog.append(sessionId, "session_created", { cwd: session.cwd });
             if (session.modelSelection) {
                 await this.eventLog.append(sessionId, "model_selected", session.modelSelection);
             }
@@ -1404,9 +1413,14 @@ export class LocalSessionHost implements SessionHost {
             };
         }
 
+        // /review 这类命令转成模型指令（与投递路径同一口径），由调用方跑一轮
+        if (parsed.spec.peer === "prompt") {
+            return { kind: "prompt", prompt: buildReviewPrompt(parsed.args[0]) };
+        }
+
         // 命令在执行器里按"调用方已持有互斥"处理，这里自己占一次
         this.beginSessionOperation(sessionId);
-        let result: { output: string; deferred?: PeerDeferredAction };
+        let result: { output: string; deferred?: PeerDeferredAction; ranTurn?: boolean };
         try {
             result = await executePeerCommand(this.peerCommandHost, sessionId, parsed);
         } catch (error: any) {
@@ -1419,7 +1433,8 @@ export class LocalSessionHost implements SessionHost {
                 finish: async () => undefined,
             };
         }
-        this.endSessionOperation(sessionId);
+        // 命令自己跑过一轮（/continue）时互斥已被那一轮释放，别再删一次
+        if (!result.ranTurn) this.endSessionOperation(sessionId);
 
         const deferred = result.deferred;
         return {

@@ -27,6 +27,7 @@ mock.module("../../src/services/chat-runtime.js", () => ({
 const { LocalSessionHost } = await import("../../src/host/session-host.js");
 const { setSessionControl, setSessionDirectory } = await import("../../src/control/runtime.js");
 const { runSessionCli } = await import("../../src/cli/session.js");
+const { REVIEW_PROMPT } = await import("../../src/commands/slash-command.js");
 
 let tmpDir: string;
 let previousStateDir: string | undefined;
@@ -66,6 +67,23 @@ function createHostFactory() {
     };
 }
 
+function workdirOf(sessionId: string): string {
+    return readEvents(sessionId).find(event => event.type === "session_created")?.payload.cwd;
+}
+
+async function runWithStartupDirs(argv: string[], startupDirs: string[]): Promise<string> {
+    const chunks: string[] = [];
+    await runSessionCli(argv, {
+        write: text => chunks.push(text),
+        readStdin: async () => "",
+        createLocalSendHost: async (startupCwd) => {
+            startupDirs.push(startupCwd);
+            return createHostFactory()();
+        },
+    });
+    return chunks.join("");
+}
+
 async function cli(argv: string[]): Promise<string> {
     const chunks: string[] = [];
     await runSessionCli(argv, {
@@ -89,6 +107,43 @@ async function waitFor(check: () => boolean, timeoutMs = 2_000): Promise<void> {
         await new Promise(resolve => setTimeout(resolve, 10));
     }
 }
+
+describe("本地接管的命令路径", () => {
+    test("/review 走 prompt 分支（附加说明拼在固定指令之后），不会报未接入", async () => {
+        const owner = new LocalSessionHost();
+        const { sessionId: target } = await owner.createSession();
+        await owner.claimSession(target);
+        await owner.renameSession(target, "review-local");
+        await owner.close();
+        setSessionControl(undefined);
+        setSessionDirectory(undefined);
+
+        const startupDirs: string[] = [];
+        const out = await runWithStartupDirs(["send", target, "/review 重点看并发", "--wait=5"], startupDirs);
+        // 一次性宿主的启动目录取自会话自己的 cwd
+        expect(startupDirs[0]).toBe(workdirOf(target));
+        expect(out).toContain("桩回复");
+        const query = queries.find(item => item.sessionId === target)?.query ?? "";
+        expect(query).toContain(REVIEW_PROMPT);
+        expect(query).toContain("重点看并发");
+    }, 20_000);
+
+    test("/clear confirm 保留会话自己的 cwd", async () => {
+        const owner = new LocalSessionHost();
+        const { sessionId: target } = await owner.createSession();
+        await owner.claimSession(target);
+        const workdir = fs.mkdtempSync(path.join(process.env.ZBOT_STATE_DIR!, "cwd-"));
+        await owner.setSessionCwd(target, workdir);
+        await owner.renameSession(target, "clear-cwd");
+        await owner.close();
+        setSessionControl(undefined);
+        setSessionDirectory(undefined);
+
+        expect(await cli(["send", target, "/clear confirm", "--wait=5"])).toContain("已清空");
+        const probe = JSON.parse(await cli(["show", target, "--json"]));
+        expect(probe.cwd).toBe(workdir);
+    }, 20_000);
+});
 
 describe("一次性宿主的模型设置", () => {
     test("/model 立即落盘：换一个进程再读仍是新值", async () => {
