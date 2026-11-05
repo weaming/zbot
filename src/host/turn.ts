@@ -118,11 +118,14 @@ export async function runSessionTurn(
                 }
                 for (const [index, input] of texts.entries()) {
                     const userInput = typeof input === "string" ? { text: input } : input;
+                    // 首条驱动消息带上入站 msgId：命令行按 msgId 等待本回合终态
+                    const msgId = index === 0 ? spec.peerMsgId : undefined;
                     const appended = await host.eventLog.append(sessionId, "user_message", {
                         text: userInput.text,
                         ...(userInput.images?.length ? { images: userInput.images } : {}),
                         turnId: tid,
                         trigger: spec.userMessages[index]?.trigger ?? "user",
+                        ...(msgId ? { msgId } : {}),
                     });
                     host.updateActiveSeq(sessionId, appended.seq);
                 }
@@ -175,6 +178,7 @@ export async function runSessionTurn(
             persistTurn: async payload => {
                 await host.replay.appendAgentEvent(activeSession, "turn_commit", {
                     ...payload,
+                    ...(spec.peerMsgId ? { msgId: spec.peerMsgId } : {}),
                     ...(mcpSnapshot ? { mcpServers: mcpSnapshot } : {}),
                 }, false);
                 // 回合已定稿：内容以 turn_message 为准，流式片段可以丢弃

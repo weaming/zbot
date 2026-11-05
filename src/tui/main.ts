@@ -207,7 +207,11 @@ async function startChatApp(prepared?: PreparedTuiResume): Promise<void> {
         if (providerError) app.setHerdrBlocked(providerError);
         const removeSignalHandlers = installShutdownSignalHandlers(app);
         try {
-            await app.init(startupMessage, { skipInitialView: prepared !== undefined });
+            // 普通启动由 app 自动新建空会话；resume 已认领目标会话，不再多建一个
+            await app.init(startupMessage, {
+                skipInitialView: prepared !== undefined,
+                autoNewSession: prepared === undefined,
+            });
             await runtimeReady;
             if (prepared) await app.openResumedSession(prepared.sessionId);
         } catch (error) {

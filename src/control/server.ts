@@ -41,8 +41,14 @@ export interface PeerServerHandlers {
     queueState?(): PeerQueuedEntry[];
     /** 协商释放：忙时返回 false，持有者只在空闲时放行。 */
     release(): Promise<boolean> | boolean;
-    /** 断线重连后查询：done = 已就绪但未送达的结果，pending = 仍在处理中的 msgId。 */
-    pendingState(msgIds: string[]): { done: PeerResult[]; pending: string[] };
+    /**
+     * 断线重连后查询：done = 已就绪但未送达的结果，pending = 仍在处理中的 msgId。
+     * keep=true 只读查看暂存，结果仍留给真正的收件人（命令行 wait 用）。
+     */
+    pendingState(
+        msgIds: string[],
+        options?: { keep?: boolean },
+    ): { done: PeerResult[]; pending: string[] };
 }
 
 export type BindResult =
@@ -206,7 +212,7 @@ export class PeerServer {
                 await this.handleRelease(socket, frame.id);
                 return;
             case "query_pending":
-                this.handleQueryPending(socket, frame.id, frame.msgIds);
+                this.handleQueryPending(socket, frame.id, frame.msgIds, frame.keep === true);
                 return;
             case "queue_state":
                 writeFrame(socket, { type: "queue_state", id: frame.id, entries: this.handlers.queueState?.() ?? [] });
@@ -263,8 +269,8 @@ export class PeerServer {
         this.unbind();
     }
 
-    private handleQueryPending(socket: net.Socket, id: string, msgIds: string[]): void {
-        const { done, pending } = this.handlers.pendingState(msgIds);
+    private handleQueryPending(socket: net.Socket, id: string, msgIds: string[], keep: boolean): void {
+        const { done, pending } = this.handlers.pendingState(msgIds, keep ? { keep: true } : undefined);
         writeFrame(socket, { type: "pending_state", id, done, pending });
     }
 

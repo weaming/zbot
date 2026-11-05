@@ -14,6 +14,7 @@
 import path from "node:path";
 import { buildSystemPrompt, closeChatSessionTransport, deleteResponsesBaseline, steerChatSession } from "../services/chat-runtime.js";
 import { createEmptySession, eventCwd, SessionReplay } from "../events/session-replay.js";
+import { isEmptySession } from "../events/session-emptiness.js";
 import { EventLog } from "../events/event-log.js";
 import { removeSessionArtifacts } from "../events/session-cleanup.js";
 import { listSavedSessionIds } from "../events/session-files.js";
@@ -106,6 +107,8 @@ export class LocalSessionHost implements SessionHost {
     private readonly activeSessions = new Map<string, ActiveSession>();
     private readonly pendingModelSelections = new Map<string, ChatModelSelection>();
     private readonly sessionOperations = new Set<string>();
+    /** 正在做「空会话」删除的会话：读盘判空期间也要让 release/新投递看到「忙」。 */
+    private readonly deletingSessions = new Set<string>();
     /** 本进程内各会话真实网络请求的用量聚合（退出时展示）。 */
     private readonly instanceUsage = new Map<string, UsageInfo>();
     /** 进行中的 turn（sendMessage 全流程），退出时用于等待中断落盘。 */
@@ -516,6 +519,8 @@ export class LocalSessionHost implements SessionHost {
                 userMessages: [{ text: prompt, trigger: "peer" }],
                 query: prompt,
                 initialRequestKind: "peer_request",
+                // 终态事件带上入站 msgId：`session wait --msg=` 不必靠 seq 猜回合归属
+                peerMsgId: message.id,
                 onEvent: (event) => {
                     if (event.type === "message_end") {
                         content = event.content;
@@ -842,6 +847,8 @@ export class LocalSessionHost implements SessionHost {
             if (session.modelSelection) {
                 await this.eventLog.append(sessionId, "model_selected", session.modelSelection);
             }
+            // 清空历史 ≠ 从未用过：留一条事实，退出/关闭时空会话清理不会误删
+            await this.eventLog.append(sessionId, "session_cleared", {});
             const replayed = await this.replay.replayTo(sessionId);
             this.activeSessions.set(sessionId, { session: replayed.session, lastSeq: replayed.lastSeq });
         } finally {
@@ -1010,8 +1017,34 @@ export class LocalSessionHost implements SessionHost {
         }
     }
 
+    /**
+     * 空会话的唯一删除入口：归属/忙闲/内容三项复查都通过才删。
+     *
+     * 判空要读盘，这段等待里不能让别的实例通过 release 协商接管（否则刚接管就被删）：
+     * 用 deletingSessions 同时挡住 isSessionBusy 与 beginSessionOperation。
+     * 读盘结束立刻摘标记，紧接的 deleteSession 会同步 beginSessionOperation 重新置忙。
+     */
+    async deleteSessionIfEmpty(sessionId: string): Promise<boolean> {
+        if (!this.control.isClaimed(sessionId)) return false;
+        if (this.isSessionBusy(sessionId)) return false;
+
+        this.deletingSessions.add(sessionId);
+        let empty: boolean;
+        try {
+            empty = await isEmptySession(this.eventLog, sessionId);
+        } finally {
+            this.deletingSessions.delete(sessionId);
+        }
+        if (!empty) return false;
+
+        await this.deleteSession(sessionId);
+        return true;
+    }
+
     isSessionBusy(sessionId: string): boolean {
-        if (this.sessionOperations.has(sessionId) || this.activeSessions.get(sessionId)?.abortController !== undefined) {
+        if (this.sessionOperations.has(sessionId)
+            || this.deletingSessions.has(sessionId)
+            || this.activeSessions.get(sessionId)?.abortController !== undefined) {
             return true;
         }
         return isSessionLockedByOtherSync(sessionId);
@@ -1497,6 +1530,9 @@ export class LocalSessionHost implements SessionHost {
     private beginSessionOperation(sessionId: string): void {
         if (this.cancellingSessions.has(sessionId)) {
             throw new SessionBusyError("会话正在取消，请稍后重试");
+        }
+        if (this.deletingSessions.has(sessionId)) {
+            throw new SessionBusyError("会话正在清理，请稍后重试");
         }
         if (this.sessionOperations.has(sessionId) || this.activeSessions.get(sessionId)?.abortController !== undefined) {
             throw new SessionBusyError("有请求处理中，请先中止当前请求");

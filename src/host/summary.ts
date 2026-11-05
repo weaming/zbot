@@ -42,6 +42,7 @@ export const SUMMARY_PAYLOAD_FIELDS: Record<AgentEventType, readonly string[]> =
     usage_recorded: [],
     session_archived: [],
     session_unarchived: [],
+    session_cleared: [],
     lazy_mcp_changed: [],
 };
 

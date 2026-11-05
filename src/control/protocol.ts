@@ -112,7 +112,8 @@ export type PeerRequest =
     | { type: "deliver"; id: string; message: PeerMessage }
     | { type: "who"; id: string }
     | { type: "release"; id: string }
-    | { type: "query_pending"; id: string; msgIds: string[] }
+    /** keep=true 只读查看暂存结果，不消费（命令行 wait 与并发轮询用）。 */
+    | { type: "query_pending"; id: string; msgIds: string[]; keep?: boolean }
     | { type: "cancel_queued"; id: string; msgId: string }
     | { type: "queue_state"; id: string }
     | { type: "ping"; id: string };

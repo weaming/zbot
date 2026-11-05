@@ -163,8 +163,11 @@ describe("parseSessionArgs", () => {
         expect(parseSessionArgs(["help"])).toEqual({ kind: "help" });
     });
 
-    test("list 支持 --all / --json", () => {
-        expect(parseSessionArgs(["list", "--all", "--json"])).toEqual({ kind: "list", all: true, json: true });
+    test("list 支持 --all / --held / --limit / --json", () => {
+        expect(parseSessionArgs(["list", "--all", "--json"]))
+            .toEqual({ kind: "list", all: true, json: true, held: false });
+        expect(parseSessionArgs(["list", "--held", "-n", "5"])).toMatchObject({ held: true, limit: 5 });
+        expect(parseSessionArgs(["list", "--limit=3"])).toMatchObject({ limit: 3 });
         expect(() => parseSessionArgs(["list", "--bogus"])).toThrow("list 不支持参数");
     });
 
@@ -172,6 +175,7 @@ describe("parseSessionArgs", () => {
         expect(parseSessionArgs(["show", "abc", "--turns", "5", "--full", "--json"])).toEqual({
             kind: "show",
             id: "abc",
+            last: false,
             turns: 5,
             all: false,
             full: true,
@@ -188,7 +192,11 @@ describe("parseSessionArgs", () => {
         expect(() => parseSessionArgs(["show", "abc", "--since=1", "--lite"])).toThrow("不能与 --lite 同用");
         expect(() => parseSessionArgs(["show", "abc", "--since=1", "--turns=2"])).toThrow("不能与 --turns 同用");
         expect(() => parseSessionArgs(["show", "abc", "--since", "12"])).toThrow("--since=N");
-        expect(() => parseSessionArgs(["show"])).toThrow("zbot session show");
+        // 不带 id 走当前会话指针；--last 取最近更新；--since 必须显式给 id
+        expect(parseSessionArgs(["show"])).toMatchObject({ kind: "show", id: "", last: false });
+        expect(parseSessionArgs(["show", "--last"])).toMatchObject({ id: "", last: true });
+        expect(() => parseSessionArgs(["show", "abc", "--last"])).toThrow("--last");
+        expect(() => parseSessionArgs(["show", "--since=1"])).toThrow("--since 需要显式会话 id");
     });
 
     test("new / rename / archive / delete 的参数形态", () => {
@@ -212,13 +220,15 @@ describe("parseSessionArgs", () => {
             kind: "send",
             id: "abc",
             text: "帮我 看看",
+            wait: false,
             waitSeconds: undefined,
             json: false,
             queue: true,
             expiresSeconds: 270,
         });
-        expect(parseSessionArgs(["send", "abc", "hi", "--wait"])).toMatchObject({ waitSeconds: 300 });
-        expect(parseSessionArgs(["send", "abc", "hi", "--wait=12"])).toMatchObject({ waitSeconds: 12 });
+        // 不带秒数 = 一直等到终态；带秒数才是显式超时
+        expect(parseSessionArgs(["send", "abc", "hi", "--wait"])).toMatchObject({ wait: true, waitSeconds: undefined });
+        expect(parseSessionArgs(["send", "abc", "hi", "--wait=12"])).toMatchObject({ wait: true, waitSeconds: 12 });
     });
 
     test("send 支持排队开关、有效期与撤销", () => {

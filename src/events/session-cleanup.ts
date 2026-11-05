@@ -9,6 +9,7 @@ import fs from "fs";
 import path from "path";
 import { getSessionsDir } from "../utils/runtime-paths.js";
 import { getResponsesBaselineFile } from "../utils/state-paths.js";
+import { clearCurrentSessionPointerIf } from "../utils/session-pointer.js";
 import { sanitizeSessionId } from "../utils/session-id.js";
 import { isInjectedContext, type AgentEvent } from "./agent-events.js";
 
@@ -55,6 +56,8 @@ export async function removeSessionArtifacts(
         // assets 是目录，其余是文件；force 让缺失项直接跳过
         await fs.promises.rm(target, { recursive: true, force: true });
     }
+    // 当前会话指针可能正指向它：删除后 CLI 无 id 的 show/wait 不该再落到不存在的会话
+    await clearCurrentSessionPointerIf(sessionId);
 }
 
 /** 从环境变量解析保留天数；未设置用默认值，非法值告警后回退默认值。 */

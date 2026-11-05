@@ -213,6 +213,18 @@ export class OutboxLedger {
         }
     }
 
+    /** 只读查看：不删除暂存项，多个等待方可以并发查询同一条结果。 */
+    peekStashed(msgIds: string[]): { done: PeerResult[]; pending: string[] } {
+        const done: PeerResult[] = [];
+        const pending: string[] = [];
+        for (const msgId of msgIds) {
+            const result = this.stash.get(msgId);
+            if (result) done.push(result);
+            else pending.push(msgId);
+        }
+        return { done, pending };
+    }
+
     takeStashed(msgIds: string[]): { done: PeerResult[]; pending: string[] } {
         const done: PeerResult[] = [];
         const pending: string[] = [];

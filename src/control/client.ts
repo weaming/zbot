@@ -106,6 +106,16 @@ export class PeerConnection {
         return this.request({ type: "queue_state", id: createFrameId() });
     }
 
+    /**
+     * 只读补查某些消息的终态结果（不消费对方暂存，可重复调用）。
+     * 覆盖「推送丢了/连接半死」与命令行 wait 的并发轮询；连不上时抛 PeerConnectError。
+     */
+    async queryPending(msgIds: string[]): Promise<{ done: PeerResult[]; pending: string[] }> {
+        const reply = await this.request({ type: "query_pending", id: createFrameId(), msgIds, keep: true });
+        if (reply.type !== "pending_state") return { done: [], pending: msgIds };
+        return { done: reply.done, pending: reply.pending };
+    }
+
     /** 可以安全回收：无等待中的应答、无 pending 结果，且空闲超过阈值。 */
     isIdle(now: number, idleMs: number): boolean {
         return this.waiters.size === 0 && this.pending.size === 0 && now - this.lastUsedAt > idleMs;

@@ -196,7 +196,9 @@ export class SessionControl {
                     this.host.onReleased(sessionId);
                     return true;
                 },
-                pendingState: (msgIds) => this.outbox.takeStashed(msgIds),
+                pendingState: (msgIds, options) => options?.keep
+                    ? this.outbox.peekStashed(msgIds)
+                    : this.outbox.takeStashed(msgIds),
             },
             this.probeTimeoutMs !== undefined ? { probeTimeoutMs: this.probeTimeoutMs } : {},
         );

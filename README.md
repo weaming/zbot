@@ -35,17 +35,21 @@ Responses API 和 Chat Completions 可使用各自的 `OPENAI_RESPONSES_*` 与 `
 ## 使用
 
 ```sh
-~/.bun/bin/zbot
+~/.bun/bin/zbot            # 每次启动都新建一个空会话；旧会话用 resume 或会话面板打开
+~/.bun/bin/zbot resume <id>
 ```
+
+从未发过消息的空会话会在退出或 `/close` 时自动删除（有草稿或会话间消息则保留）。
 
 各子命令都支持 `-h` / `--help`（如 `zbot serve --help`）。
 
 会话也可以在命令行里增删查改（供其他 AI 或脚本调用）：
 
 ```sh
-~/.bun/bin/zbot session list
-~/.bun/bin/zbot session show <id>
-~/.bun/bin/zbot session send <id> "跑一下测试" --wait
+~/.bun/bin/zbot session list            # 当前会话置顶提示，-n 20 只看最近 20 条
+~/.bun/bin/zbot session show            # 不带 id = 当前会话；--last 取最近更新的
+~/.bun/bin/zbot session send <id> "跑一下测试" --wait          # 一直等到回合终态
+~/.bun/bin/zbot session wait <id> --msg=<msgId>                # 中断/断线后继续等结果
 ~/.bun/bin/zbot resume <id> -p --json "继续"
 ```
 

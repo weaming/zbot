@@ -152,6 +152,11 @@ export interface SessionLifecycle {
     forgetSession(sessionId: string): void;
     clearSession(sessionId: string): Promise<void>;
     deleteSession(sessionId: string): Promise<void>;
+    /**
+     * 只删除「从未产生过内容」的会话：不归本实例持有、正忙或不是空会话时返回 false。
+     * 判空与删除紧挨着，缩小「刚被别的实例接管就被删」的窗口。
+     */
+    deleteSessionIfEmpty(sessionId: string): Promise<boolean>;
     closeSession(sessionId: string): Promise<void>;
     /** 取消归档：追加 session_unarchived 事件，使会话重新可写。 */
     unarchiveSession(sessionId: string): Promise<void>;
@@ -302,6 +307,11 @@ export interface TurnSpec {
     skipToolCallIds?: ReadonlySet<string>;
     consumePendingMessages?: () => Array<string | UserMessageInput> | undefined;
     initialRequestKind?: Exclude<LLMRequestKind, "tool_response">;
+    /**
+     * 驱动本回合的会话间消息 id（入站投递）：写进 user_message 与 turn_commit，
+     * 让 `zbot session wait --msg=<msgId>` 能在事件日志里定位到这条消息的终态。
+     */
+    peerMsgId?: string;
     /** 观察本回合的事件流（会话间交付捕获收尾输出用）；不参与事件分发。 */
     onEvent?: (event: UIEvent) => void;
 }

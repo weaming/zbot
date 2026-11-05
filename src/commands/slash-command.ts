@@ -170,7 +170,7 @@ export const SLASH_COMMAND_SPECS: SlashCommandSpec[] = [
         archived: true,
         maxArgs: 1,
     },
-    { name: "close", description: "关闭当前会话（释放持有，数据保留）", usage: "/close", peer: "host" },
+    { name: "close", description: "关闭当前会话（释放持有；从未用过的空会话会删除）", usage: "/close", peer: "host" },
     {
         name: "compact",
         description: "压缩当前会话上下文",

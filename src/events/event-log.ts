@@ -394,6 +394,59 @@ export class EventLog {
         return records;
     }
 
+    /**
+     * 是否存在 types 之外的任意事件：命中即停，不为长会话读完整个文件。
+     *
+     * 只给「空会话」这类存在性判断用（白名单之外出现任何东西就算有内容）：
+     * 逐块读文件头、只解析行首。行首形状不认识或单行过长时返回 true ——
+     * 宁可保留会话，也不基于半懂的数据删数据。
+     */
+    async hasEventNotIn(sessionId: string, types: ReadonlySet<AgentEventType>): Promise<boolean> {
+        const filePath = this.eventFilePath(sessionId);
+        let handle: fs.promises.FileHandle;
+        try {
+            handle = await fs.promises.open(filePath, "r");
+        } catch (error: any) {
+            if (error?.code === "ENOENT") return false;
+            throw error;
+        }
+
+        const CHUNK_BYTES = 64 * 1024;
+        // 单行过长时不再缓存整行：只保留行首所需的一小段，避免把大消息读进内存
+        const MAX_CARRY_BYTES = 4 * 1024;
+        let carry = "";
+        let position = 0;
+        try {
+            for (;;) {
+                const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
+                const { bytesRead } = await handle.read(buffer, 0, CHUNK_BYTES, position);
+                if (bytesRead === 0) return false;
+                position += bytesRead;
+
+                // 行首（seq/ts/sessionId/type）全是 ASCII，按块切分不会破坏要读的字段
+                const text = carry + buffer.subarray(0, bytesRead).toString("utf8");
+                let start = 0;
+                for (;;) {
+                    const newline = text.indexOf("\n", start);
+                    if (newline === -1) {
+                        carry = text.slice(start);
+                        break;
+                    }
+                    const line = text.slice(start, newline);
+                    start = newline + 1;
+                    if (line.trim() === "") continue;
+                    const head = parseEventLineHead(line);
+                    if (!head) return true; // 形状不认识：保守当作有内容
+                    if (!types.has(head.type)) return true;
+                }
+                // 行首迟迟不完整（单行远超 4KB）：保守当作有内容
+                if (carry.length > MAX_CARRY_BYTES) return true;
+            }
+        } finally {
+            await handle.close();
+        }
+    }
+
     /** 截断日志到 upToSeq（时间点恢复 = 该点之后的未来全部作废）。 */
     async truncate(sessionId: string, upToSeq: number): Promise<void> {
         const filePath = this.eventFilePath(sessionId);

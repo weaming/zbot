@@ -44,6 +44,8 @@ const SNAPSHOT_SAFE_EVENT_TYPES = new Set<AgentEvent["type"]>([
     "session_cwd_changed",
     "session_archived",
     "session_unarchived",
+    // /clear 只留一条事实，不改变 Session 投影，落在快照边界上安全
+    "session_cleared",
     // lazy MCP 启用集只是下发口径，落在快照边界上也不会丢上下文。
     "lazy_mcp_changed",
 ]);

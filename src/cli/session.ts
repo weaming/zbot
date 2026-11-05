@@ -19,6 +19,7 @@ import { runArchive, runDelete, runNew, runRename } from "./session/mutate.js";
 import { runSessionTask } from "./session/one-shot.js";
 import { runQueue, runSend } from "./session/send.js";
 import { runList, runShow } from "./session/view.js";
+import { runWait } from "./session/wait.js";
 
 export { SessionCliError, isSessionCliInvocation, parseSessionArgs };
 export type {
@@ -32,6 +33,7 @@ export type {
     SendCommand,
     SessionCommand,
     ShowCommand,
+    WaitCommand,
 } from "./session/args.js";
 export type { SessionCliIO } from "./session/io.js";
 export { resolveSessionIdFrom } from "./session/store.js";
@@ -63,6 +65,8 @@ export async function runSessionCli(argv: string[], io: SessionCliIO = {}): Prom
             return runSend(command, write, io.readStdin ?? readSessionStdin, io);
         case "queue":
             return runQueue(command, write);
+        case "wait":
+            return runWait(command, write);
         case "run":
             return runSessionTask(command, write, io.readStdin ?? readSessionStdin, io);
     }

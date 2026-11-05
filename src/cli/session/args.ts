@@ -9,11 +9,9 @@ import { SESSION_CLI_USAGE } from "../help.js";
 
 /** show 默认展示的轮数：够看上下文，又不至于刷屏。 */
 const DEFAULT_SHOW_TURNS = 3;
-/** send --wait 的默认等待上限。 */
-const DEFAULT_WAIT_SECONDS = 300;
 /**
  * 排队投递的默认有效期：只限制"排队等多久"，不影响已开始执行的回合。
- * 必须短于结果等待上限（control 侧默认 10 分钟），否则 --wait 会先超时并判"结果丢失"。
+ * 与等待上限无关：`--wait` 不设上限，排队到期会回传明确的终态结果（不会静静丢消息）。
  */
 const DEFAULT_QUEUE_EXPIRES_SECONDS = 270;
 /**
@@ -33,13 +31,21 @@ export class SessionCliError extends AppError {
 }
 export interface ListCommand {
     kind: "list";
+    /** 含已归档会话。 */
     all: boolean;
     json: boolean;
+    /** 只看有实例持有的会话（运行中/闲置但未释放）。 */
+    held: boolean;
+    /** 只看最近 N 条（排序后的前 N 条）。 */
+    limit?: number;
 }
 
 export interface ShowCommand {
     kind: "show";
+    /** 空串表示用当前会话指针（见 utils/session-pointer）。 */
     id: string;
+    /** 取最近更新过的会话，而不是当前会话。 */
+    last: boolean;
     turns: number;
     all: boolean;
     full: boolean;
@@ -84,7 +90,9 @@ export interface SendCommand {
     kind: "send";
     id: string;
     text: string;
-    /** undefined 表示不等待结果（异步投递）。 */
+    /** 显式等待结果（`--wait`）：默认一直等到 turn 进入终态。 */
+    wait: boolean;
+    /** 等待上限（秒）；只在 `--wait=秒` 时给定，undefined 表示不设上限。 */
     waitSeconds?: number;
     json: boolean;
     /** 目标忙时排队（默认 true）；--no-queue 关掉后忙即失败。 */
@@ -98,6 +106,19 @@ export interface SendCommand {
 export interface QueueCommand {
     kind: "queue";
     id: string;
+    json: boolean;
+}
+
+export interface WaitCommand {
+    kind: "wait";
+    /** 空串表示用当前会话指针。 */
+    id: string;
+    /** 按入站消息 id 定位回合（`session send` 输出的 msgId）。 */
+    msgId?: string;
+    /** 按回合 id 定位（`session show --json` 的 turnDetails[].id）。 */
+    turnId?: string;
+    /** 等待上限（秒）；undefined 表示一直等到终态。 */
+    timeoutSeconds?: number;
     json: boolean;
 }
 
@@ -119,6 +140,7 @@ export type SessionCommand =
     | DeleteCommand
     | SendCommand
     | QueueCommand
+    | WaitCommand
     | RunCommand;
 
 /** 参数/用法错误：`--json` 调用方靠 code=usage 与运行时失败区分开。 */
@@ -163,17 +185,30 @@ export function parseSessionArgs(argv: string[]): SessionCommand {
             return parseQueueArgs(rest);
         case "run":
             return parseRunArgs(rest);
+        case "wait":
+            return parseWaitArgs(rest);
         default:
             throw usageError(`未知子命令：${command}\n\n${SESSION_CLI_USAGE}`);
     }
 }
 
 function parseListArgs(args: string[]): ListCommand {
-    const command: ListCommand = { kind: "list", all: false, json: false };
-    for (const arg of args) {
+    const command: ListCommand = { kind: "list", all: false, json: false, held: false };
+    for (let index = 0; index < args.length; index += 1) {
+        const arg = args[index]!;
         if (arg === "--all" || arg === "-a") command.all = true;
         else if (arg === "--json") command.json = true;
-        else throw usageError(`list 不支持参数：${arg}`);
+        else if (arg === "--held") command.held = true;
+        else if (arg === "--limit" || arg === "-n") {
+            command.limit = parsePositiveInt(args[index + 1], arg);
+            index += 1;
+        } else if (arg.startsWith("--limit=")) {
+            command.limit = parsePositiveInt(arg.slice("--limit=".length), "--limit");
+        } else if (arg.startsWith("-n=")) {
+            command.limit = parsePositiveInt(arg.slice("-n=".length), "-n");
+        } else {
+            throw usageError(`list 不支持参数：${arg}`);
+        }
     }
     return command;
 }
@@ -182,6 +217,7 @@ function parseShowArgs(args: string[]): ShowCommand {
     const command: ShowCommand = {
         kind: "show",
         id: "",
+        last: false,
         turns: DEFAULT_SHOW_TURNS,
         all: false,
         full: false,
@@ -194,6 +230,7 @@ function parseShowArgs(args: string[]): ShowCommand {
         else if (arg === "--full") command.full = true;
         else if (arg === "--lite") command.lite = true;
         else if (arg === "--all" || arg === "-a") command.all = true;
+        else if (arg === "--last" || arg === "-l") command.last = true;
         else if (arg.startsWith("--since=")) {
             // seq 从 1 起，但允许 --since=0 表示“从头按事件流式读”
             command.sinceSeq = parseNonNegativeInt(arg.slice("--since=".length), "--since");
@@ -216,7 +253,11 @@ function parseShowArgs(args: string[]): ShowCommand {
             command.id = arg;
         }
     }
-    if (!command.id) throw usageError("用法：zbot session show <id> [--turns N|--all] [--full] [--json]");
+    if (command.id && command.last) throw usageError("--last 不能与会话 id 同时使用");
+    if (!command.id && !command.last && command.sinceSeq !== undefined) {
+        // 事件视图必须指向确定的会话：指针可能已被别的实例改写
+        throw usageError("--since 需要显式会话 id（当前会话可能已变化）");
+    }
     if (command.sinceSeq !== undefined) {
         // 事件视图与回合视图互斥：静默忽略其中一个会让调用方以为参数生效了
         if (command.afterTurn !== undefined) throw usageError("--since 与 --after-turn 不能同时使用");
@@ -279,6 +320,7 @@ function parseSendArgs(args: string[]): SendCommand {
         kind: "send",
         id: "",
         text: "",
+        wait: false,
         json: false,
         queue: true,
         expiresSeconds: DEFAULT_QUEUE_EXPIRES_SECONDS,
@@ -309,10 +351,12 @@ function parseSendArgs(args: string[]): SendCommand {
                 if (next !== undefined && /^\d+$/.test(next)) {
                     throw usageError(`--wait 的秒数请写成 --wait=${next}（空格形式会被当成消息正文）`);
                 }
-                command.waitSeconds = DEFAULT_WAIT_SECONDS;
+                // 不带秒数 = 一直等到终态；固定短超时会静默丢掉已经投递的结果
+                command.wait = true;
                 continue;
             }
             if (arg.startsWith("--wait=")) {
+                command.wait = true;
                 command.waitSeconds = parsePositiveInt(arg.slice("--wait=".length), "--wait");
                 continue;
             }
@@ -337,6 +381,52 @@ function parseQueueArgs(args: string[]): QueueCommand {
     const id = args.filter(arg => arg !== "--json")[0];
     if (!id || id.startsWith("-")) throw usageError("用法：zbot session queue <id> [--json]");
     return { kind: "queue", id, json };
+}
+
+/**
+ * `wait` 的参数：id 可省略（当前会话），选择器二选一，超时可省略（一直等）。
+ *
+ * `--msg` 是 `session send` 输出的 msgId（最可靠：把消息与回合绑在一起）；
+ * `--turn` 是 `session show --json` 的 turnDetails[].id；都不给则等最近一轮。
+ */
+function parseWaitArgs(args: string[]): WaitCommand {
+    const command: WaitCommand = { kind: "wait", id: "", json: false };
+    for (let index = 0; index < args.length; index += 1) {
+        const arg = args[index]!;
+        if (arg === "--json") { command.json = true; continue; }
+        if (arg === "--msg") {
+            command.msgId = requireValue(args[index + 1], "--msg");
+            index += 1;
+            continue;
+        }
+        if (arg.startsWith("--msg=")) {
+            command.msgId = requireValue(arg.slice("--msg=".length), "--msg");
+            continue;
+        }
+        if (arg === "--turn") {
+            command.turnId = requireValue(args[index + 1], "--turn");
+            index += 1;
+            continue;
+        }
+        if (arg.startsWith("--turn=")) {
+            command.turnId = requireValue(arg.slice("--turn=".length), "--turn");
+            continue;
+        }
+        if (arg === "--timeout") {
+            command.timeoutSeconds = parsePositiveInt(args[index + 1], "--timeout");
+            index += 1;
+            continue;
+        }
+        if (arg.startsWith("--timeout=")) {
+            command.timeoutSeconds = parsePositiveInt(arg.slice("--timeout=".length), "--timeout");
+            continue;
+        }
+        if (arg.startsWith("-")) throw usageError(`wait 不支持参数：${arg}`);
+        if (command.id) throw usageError("wait 只接受一个会话 id");
+        command.id = arg;
+    }
+    if (command.msgId && command.turnId) throw usageError("--msg 与 --turn 不能同时使用");
+    return command;
 }
 
 function parseRunArgs(args: string[]): RunCommand {

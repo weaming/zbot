@@ -5,13 +5,14 @@
 
 import { PeerConnectError, PeerConnection } from "../../control/client.js";
 import { getSocketPath } from "../../control/paths.js";
-import { createPeerMessage, isCancelledStopReason, type PeerResult } from "../../control/protocol.js";
+import { createPeerMessage, type PeerResult } from "../../control/protocol.js";
 import { probeOwnership } from "../../control/registry.js";
 import { shortSessionId } from "../../utils/session-id.js";
 import { SessionCliError, usageError } from "./args.js";
 import type { QueueCommand, SendCommand } from "./args.js";
 import type { SessionCliIO } from "./io.js";
 import { runSendLocally } from "./one-shot.js";
+import { waitForTurn, type TurnOutcome } from "./wait.js";
 import { resolveSendTarget } from "./store.js";
 import { formatTimestamp } from "./view.js";
 
@@ -42,7 +43,7 @@ export async function runSend(
         from: `cli-${process.pid}`,
         to: sessionId,
         text,
-        ...(command.waitSeconds === undefined ? {} : { expectResult: true }),
+        ...(command.wait ? { expectResult: true } : {}),
         ...(command.queue ? { queueIfBusy: true } : {}),
         expiresAt: new Date(Date.now() + command.expiresSeconds * 1000).toISOString(),
     });
@@ -70,12 +71,14 @@ export async function runSend(
 
         const queued = reply.queued === true;
         const position = reply.position;
-        if (command.waitSeconds === undefined) {
+        if (!command.wait) {
             if (command.json) {
+                // status 只说投递事实：queued/delivered 都不是完成，别让脚本把 ack 当成结果
                 write(`${JSON.stringify({
                     sessionId,
                     msgId: message.id,
                     delivered: true,
+                    status: queued ? "queued" : "delivered",
                     queued,
                     ...(position !== undefined ? { position } : {}),
                     ...(queued ? { expiresAt: message.expiresAt } : {}),
@@ -94,36 +97,87 @@ export async function runSend(
             write(`已排队到 ${shortSessionId(sessionId)}（第 ${position ?? "?"} 位，${message.id}），等待执行...\n`);
         }
 
-        const result = await withTimeout(resultPromise, command.waitSeconds * 1000, sessionId, message.id);
-        if (!result.ok) {
+        const outcome = await waitForAckResult({
+            sessionId,
+            msgId: message.id,
+            resultPromise,
+            queryPending: msgIds => connection.queryPending(msgIds),
+            ...(command.waitSeconds !== undefined ? { timeoutMs: command.waitSeconds * 1000 } : {}),
+        });
+        if (outcome.status !== "succeeded") {
             // 失败也把已产出的部分输出带出来：人类模式进 stderr，--json 进 details
             // 失败时 text 可能已是错误原因本身（命令拒绝/非法参数），别把它当"部分输出"再打一遍
-            const partial = result.text && result.text !== result.error
-                ? `\n（部分输出）\n${result.text}`
+            const partial = outcome.content && outcome.content !== outcome.error
+                ? `\n（部分输出）\n${outcome.content}`
                 : "";
+            // 取消是终态但没有结果：单独给 peer_cancelled，别含糊成「执行失败」
+            const cancelled = outcome.status === "cancelled";
             throw new SessionCliError(
-                "peer_failed",
-                `${result.error ?? `会话 ${shortSessionId(sessionId)} 执行失败：${result.stopReason}`}${partial}`,
+                cancelled ? "peer_cancelled" : "peer_failed",
+                cancelled
+                    ? `会话 ${shortSessionId(sessionId)} 的回合已取消（${outcome.stopReason}）${partial}`
+                    : `${outcome.error ?? `会话 ${shortSessionId(sessionId)} 执行失败：${outcome.stopReason}`}${partial}`,
                 1,
-                { sessionId, msgId: message.id, delivered: true, stopReason: result.stopReason, partialText: result.text },
+                {
+                    sessionId,
+                    msgId: message.id,
+                    turnId: outcome.turnId,
+                    status: outcome.status,
+                    delivered: true,
+                    stopReason: outcome.stopReason,
+                    partialText: outcome.content,
+                },
             );
         }
         if (command.json) {
             write(`${JSON.stringify({
                 sessionId,
-                ...result,
+                msgId: message.id,
+                turnId: outcome.turnId || null,
+                status: outcome.status,
+                ok: true,
+                text: outcome.content,
+                stopReason: outcome.stopReason,
                 delivered: true,
+                source: outcome.source,
+                waitedMs: outcome.waitedMs,
                 ...(queued ? { queued: true, ...(position !== undefined ? { position } : {}) } : {}),
             }, null, 2)}\n`);
             return;
         }
-        // 被取消的回合没有产出：如实说"已取消"，不要含糊成"没有输出"
-        const emptyText = isCancelledStopReason(result.stopReason)
-            ? "（对方回合已取消，没有输出）\n"
-            : "（对方回合没有输出）\n";
-        write(result.text ? `${result.text}\n` : emptyText);
+        // 走到这里一定是 succeeded：取消/失败上面已经按 peer_failed 抛出
+        write(outcome.content ? `${outcome.content}\n` : "（对方回合没有输出）\n");
     } finally {
         connection.close();
+    }
+}
+
+/**
+ * 等待已受理消息的终态：事件日志 + 在线结果双源，中途 Ctrl-C 只停止等待。
+ * 单独包一层是为了把信号处理收在一处，且不干扰后续的 finally（连接必须关）。
+ */
+async function waitForAckResult(input: {
+    sessionId: string;
+    msgId: string;
+    resultPromise: Promise<PeerResult>;
+    queryPending: (msgIds: string[]) => Promise<{ done: PeerResult[]; pending: string[] }>;
+    timeoutMs?: number;
+}): Promise<TurnOutcome> {
+    const controller = new AbortController();
+    const interrupt = () => controller.abort();
+    process.once("SIGINT", interrupt);
+    process.once("SIGTERM", interrupt);
+    try {
+        return await waitForTurn({
+            sessionId: input.sessionId,
+            selector: { kind: "msg", msgId: input.msgId },
+            peer: { promise: input.resultPromise, queryPending: input.queryPending },
+            ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+            signal: controller.signal,
+        });
+    } finally {
+        process.removeListener("SIGINT", interrupt);
+        process.removeListener("SIGTERM", interrupt);
     }
 }
 
@@ -254,33 +308,3 @@ function describeAckError(sessionId: string, code: string): string {
 }
 
 
-function withTimeout(
-    promise: Promise<PeerResult>,
-    timeoutMs: number,
-    sessionId: string,
-    msgId: string,
-): Promise<PeerResult> {
-    return new Promise<PeerResult>((resolve, reject) => {
-        const timer = setTimeout(() => {
-            // 超时≠失败投递：消息已进对方回合，重发会在目标会话里多压一轮
-            reject(new SessionCliError(
-                "wait_timeout",
-                `等待会话 ${shortSessionId(sessionId)} 的结果超时（${Math.round(timeoutMs / 1000)}s）；`
-                + `消息已投递（msgId=${msgId}），不要重复发送`,
-                2,
-                { sessionId, msgId, delivered: true },
-            ));
-        }, timeoutMs);
-        timer.unref?.();
-        promise.then(
-            (result) => {
-                clearTimeout(timer);
-                resolve(result);
-            },
-            (error) => {
-                clearTimeout(timer);
-                reject(error);
-            },
-        );
-    });
-}

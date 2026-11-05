@@ -57,6 +57,7 @@ import {
 import { bindGlobalKeys, type GlobalKeyHost } from "./keybindings.js";
 import { buildStatusBarModel } from "./status-bar-model.js";
 import { protocolStatusLabel } from "../utils/responses-transport.js";
+import { writeCurrentSessionPointer } from "../utils/session-pointer.js";
 import { ChatLayout } from "./chat-layout.js";
 import { TurnStateStore } from "./turn-state.js";
 import {
@@ -482,8 +483,12 @@ export class ChatApp {
     /**
      * `skipInitialView` 供 CLI 恢复会话：启动时不弹会话选择面板、不推「请选择会话」提示，
      * 由 `openResumedSession` 直接切到目标会话。
+     * `autoNewSession` 供普通启动：直接新建一个空会话并进入（历史会话仍可用 ⌘P 打开）。
      */
-    async init(startupMessage?: string, options: { skipInitialView?: boolean } = {}): Promise<void> {
+    async init(
+        startupMessage?: string,
+        options: { skipInitialView?: boolean; autoNewSession?: boolean } = {},
+    ): Promise<void> {
         // 恢复上次退出前各会话的输入草稿（切回对应会话时填回输入框）
         for (const [sessionId, draft] of loadRichDrafts()) {
             this.drafts.set(sessionId, typeof draft === "string" ? draft : draft.text, typeof draft === "string" ? [] : draft.images);
@@ -554,7 +559,10 @@ export class ChatApp {
             await this.refreshSessions();
             // 先取一份归属快照，面板首帧就能显示 ●/◎/◌ 与他实例的忙闲
             void this.ownership.refresh(true);
-            if (!options.skipInitialView) this.openInitialView();
+            if (!options.skipInitialView) {
+                if (options.autoNewSession) await this.startInitialSession();
+                else this.openInitialView();
+            }
             this.renderStatusBar();
         } catch (error: any) {
             this.store.pushSystemMessage(`⚠️ TUI 初始化失败：${error?.message ?? error}`);
@@ -1133,11 +1141,29 @@ export class ChatApp {
         }
     }
 
-    /** 彻底删除会话（任意会话）：删掉事件日志、快照与 console 日志。 */
-    private async deleteSessionById(sessionId: string): Promise<void> {
+    /**
+     * 彻底删除会话（任意会话）：删掉事件日志、快照与 console 日志；返回是否真的删掉。
+     *
+     * `onlyIfEmpty` 供 `/close` 用：先让宿主「判空 + 删除」一次完成，没命中（有内容/正忙/
+     * 已被接管）就原样返回 false，UI 与持有权都不动，调用方继续走正常关闭流程。
+     */
+    private async deleteSessionById(
+        sessionId: string,
+        options: { flashText?: string; onlyIfEmpty?: boolean } = {},
+    ): Promise<boolean> {
         if (this.agent.isSessionBusy(sessionId)) {
             this.tui.flash("会话执行中，暂不能删除");
-            return;
+            return false;
+        }
+        if (options.onlyIfEmpty) {
+            const deleteIfEmpty = (this.agent as Partial<SessionHost>).deleteSessionIfEmpty;
+            if (typeof deleteIfEmpty !== "function") return false;
+            try {
+                if (!await deleteIfEmpty.call(this.agent, sessionId)) return false;
+            } catch (error: any) {
+                this.store.pushSystemMessage(`⚠️ 删除空会话失败: ${error.message}`);
+                return false;
+            }
         }
         const isCurrent = this.store.currentSessionId === sessionId;
         let hasDeleted = false;
@@ -1150,7 +1176,8 @@ export class ChatApp {
             setLogSession(null);
         }
         try {
-            await this.agent.deleteSession(sessionId);
+            // onlyIfEmpty 已在上面由宿主删掉；其余情况在这里删
+            if (!options.onlyIfEmpty) await this.agent.deleteSession(sessionId);
             hasDeleted = true;
             this.agent.releaseSession(sessionId, { cause: "delete" });
             void this.ownership.refresh(true);
@@ -1163,10 +1190,12 @@ export class ChatApp {
             } else {
                 this.renderTabBar();
             }
-            this.tui.flash("🗑️ 已删除会话");
+            this.tui.flash(options.flashText ?? "🗑️ 已删除会话");
+            return true;
         } catch (error: any) {
             if (isCurrent && !hasDeleted) setLogSession(sessionId);
             this.store.pushSystemMessage(`⚠️ 删除失败: ${error.message}`);
+            return false;
         } finally {
             if (isCurrent) {
                 this.turnState.unlock(sessionId, "clearing");
@@ -1917,6 +1946,26 @@ export class ChatApp {
     }
 
     /**
+     * 普通启动的落点：新建一个空会话并进入，不等用户先做选择。
+     *
+     * 每次启动都生成新的 ULID（见 createSessionSilently），不会复用或覆盖上一次的会话；
+     * 历史会话仍可通过会话面板打开。新建失败时退回旧的「选择会话」视图，不至于卡住。
+     */
+    async startInitialSession(): Promise<void> {
+        try {
+            await this.newSession();
+        } catch (error: any) {
+            this.store.pushSystemMessage(`⚠️ 新建会话失败：${error?.message ?? error}`);
+            this.openInitialView();
+            return;
+        }
+        const sessionId = this.store.currentSessionId;
+        this.store.pushSystemMessage(
+            `👋 已新建空会话${sessionId ? ` ${sessionId.slice(-8)}` : ""}：⌘P 打开历史会话，⌃N 再新建。`,
+        );
+    }
+
+    /**
      * 启动视图：不认领任何会话。
      * 已有会话时打开面板让用户主动开启；没有会话时提示新建。
      */
@@ -2027,6 +2076,10 @@ export class ChatApp {
         this.editor.disableSubmit = true;
         try {
             this.store.setCurrentSession(sessionId);
+            // 命令行「无 id 的 show / wait」读这份指针；写失败只记日志，不影响切会话
+            void writeCurrentSessionPointer(sessionId).catch((error: unknown) => {
+                console.warn("⚠️ [TUI] 记录当前会话失败:", (error as Error)?.message ?? error);
+            });
             this.currentModelSelection = modelSelection;
             // 切会话：todo 缓存按 sessionId 键控，但仍主动失效以立即反映目标会话
             this.todoCache = null;
@@ -2332,6 +2385,15 @@ export class ChatApp {
             this.tui.flash("会话执行中，暂不能关闭（⎋ 中止后再试）");
             return;
         }
+        // 从未用过、也没留下草稿的会话：关闭即删除，不留 0 轮垃圾。
+        // 判空/归属/忙闲由宿主在删除前一起复查，与退出清理同一条路径。
+        if (!this.hasUnsavedDraft(sessionId)
+            && await this.deleteSessionById(sessionId, {
+                flashText: "🗑️ 空会话已删除（从未发过消息）",
+                onlyIfEmpty: true,
+            })) {
+            return;
+        }
 
         this.pending.clear(sessionId);
         this.turnState.lock(sessionId, "switching");
@@ -2346,6 +2408,41 @@ export class ChatApp {
             this.syncSubmitState();
             this.restoreFocus();
         }
+    }
+
+    /**
+     * 退出时清理本实例持有的空会话（从未产生过内容、也没有未发送草稿）。
+     *
+     * 主要针对启动即新建的空会话：用过就退出不该在磁盘上越积越多。
+     * 判空、归属与忙闲由宿主在删除前一起复查（缩小被别的实例接管的窗口）；
+     * 有草稿的一律跳过——宁可留一个空会话，也不误删数据。
+     */
+    private async deleteEmptySessionsHeld(): Promise<void> {
+        const removeIfEmpty = (this.agent as Partial<SessionHost>).deleteSessionIfEmpty;
+        if (typeof removeIfEmpty !== "function") return; // 旧宿主/测试替身：不做清理
+        for (const sessionId of this.agent.claimedSessionIds()) {
+            if (this.hasUnsavedDraft(sessionId)) continue;
+            try {
+                if (!await removeIfEmpty.call(this.agent, sessionId)) continue;
+                this.drafts.delete(sessionId);
+                this.editor.clearSessionPastes(sessionId);
+            } catch (error) {
+                console.warn("⚠️ [TUI] 清理空会话失败:", (error as Error)?.message ?? error);
+            }
+        }
+    }
+
+    /** 有未发送的草稿（含当前输入框）时保留会话：草稿也是用户输入，不能跟着空会话一起删。 */
+    private hasUnsavedDraft(sessionId: string): boolean {
+        if (sessionId === this.store.currentSessionId) {
+            if (this.editor.getText().trim()) return true;
+            if (this.editor.getImageAttachments().length > 0) return true;
+        }
+        const draft = this.drafts.get(sessionId);
+        if (!draft) return false;
+        return typeof draft === "string"
+            ? draft.trim().length > 0
+            : draft.text.trim().length > 0 || draft.images.length > 0;
     }
 
     /**
@@ -3109,6 +3206,8 @@ export class ChatApp {
         this.stopSpinnerTimer();
         this.closeActivePanel();
         await this.flushDrafts();
+        // 空会话（从未用过）退出即清理；必须在 close() 之前，会话仍被本实例持有
+        await this.deleteEmptySessionsHeld();
         // 先中止进行中的 turn 并等待其落盘（物化为 interrupted turn），再退出；
         // 否则 process.exit 会丢弃未落盘的 turn，重启后本轮上下文丢失。
         try {

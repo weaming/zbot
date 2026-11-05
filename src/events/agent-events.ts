@@ -29,6 +29,7 @@ export type AgentEventType =
     | "usage_recorded"
     | "session_archived"
     | "session_unarchived"
+    | "session_cleared"
     | "session_renamed"
     | "session_cwd_changed"
     | "model_selected"
@@ -50,6 +51,11 @@ export interface AgentEventPayloads {
         turnId: string;
         /** peer：另一个会话发来的消息或它回传的结果，时间线上按会话卡片渲染。 */
         trigger: "user" | "pending" | "peer";
+        /**
+         * 本回合由哪条会话间消息驱动（入站 msgId）：把 msgId 与 turnId 绑在一起，
+         * 命令行才能按 msgId 在事件日志里等待/复盘该回合的终态。
+         */
+        msgId?: string;
     };
     /**
      * 会话间消息事实源（UI 时间线专用）：入站请求、出站消息、结果回传各一条。
@@ -111,6 +117,11 @@ export interface AgentEventPayloads {
      */
     turn_commit: {
         turnId: string;
+        /**
+         * 本回合由哪条会话间消息驱动（入站 msgId）；用户直接输入/续跑/子会话任务没有该字段。
+         * 与 user_message.msgId 同源，但收尾事件自带更便于按 msgId 直接定位终态。
+         */
+        msgId?: string;
         events: number[];
         userMessages: Array<string | UserMessageInput>;
         stopReason: string;
@@ -157,6 +168,11 @@ export interface AgentEventPayloads {
     session_archived: {};
     /** 取消归档：与 session_archived 成对，末态决定会话是否归档。 */
     session_unarchived: {};
+    /**
+     * 用户清空历史（/clear）。历史被截断后日志里看不出「用过」，留这条事实，
+     * 退出/关闭时的空会话清理才不会把它当成从未用过的新会话删掉。
+     */
+    session_cleared: {};
     /** 用户双击 tab 重命名会话标题（tab 显示优先于首条用户消息）。 */
     session_renamed: { title: string };
     /** 会话工作目录被改写（cwd 工具 / /cwd 命令）：最后一条决定当前目录。 */

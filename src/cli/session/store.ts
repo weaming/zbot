@@ -14,6 +14,7 @@ import { getSessionsDir } from "../../utils/runtime-paths.js";
 import { isUlid, sanitizeSessionId, shortSessionId } from "../../utils/session-id.js";
 import { probeOwnership } from "../../control/registry.js";
 import type { SessionSummary } from "../../host/session-host-types.js";
+import { readCurrentSessionPointer } from "../../utils/session-pointer.js";
 import { SessionCliError } from "./args.js";
 
 
@@ -64,6 +65,54 @@ export function resolveSessionIdFrom(input: string, savedIds: string[]): string 
 
 export async function resolveSessionId(input: string): Promise<string> {
     return resolveSessionIdFrom(input, listSavedSessionIds());
+}
+
+/**
+ * 「当前会话」的原始输入：`ZBOT_SESSION_ID`（脚本显式指定）优先，其次是 TUI
+ * 最近一次进入的会话指针。返回 undefined 表示无从判断，由调用方给出用法提示。
+ */
+export function currentSessionInput(): string | undefined {
+    const fromEnv = process.env.ZBOT_SESSION_ID?.trim();
+    if (fromEnv) return fromEnv;
+    return readCurrentSessionPointer()?.sessionId;
+}
+
+/**
+ * 当前会话的完整 id（解析失败时 undefined）：供列表标记这类「尽力而为」的用途，
+ * 不像 resolveCurrentSessionId 那样抛错。指针/环境变量给前缀或末几位同样能对上。
+ */
+export function resolveCurrentSessionIdFrom(savedIds: string[]): string | undefined {
+    const raw = currentSessionInput();
+    if (!raw) return undefined;
+    try {
+        return resolveSessionIdFrom(raw, savedIds);
+    } catch {
+        return undefined;
+    }
+}
+
+/** 当前会话的完整 id；没有指针或指针已失效时给「下一步怎么做」。 */
+export async function resolveCurrentSessionId(): Promise<string> {
+    const raw = currentSessionInput();
+    if (!raw) {
+        throw new SessionCliError(
+            "usage",
+            "没有记录的当前会话：显式给出 id、加 --last，或用 `zbot session list` 挑一个",
+        );
+    }
+    try {
+        return await resolveSessionId(raw);
+    } catch (error) {
+        if (error instanceof SessionCliError && error.code === "not_found") {
+            throw new SessionCliError(
+                "not_found",
+                `当前会话 ${raw} 已不存在（可能在别处被删除）：用 --last 取最近会话，或显式给出 id`,
+                1,
+                error.details,
+            );
+        }
+        throw error;
+    }
 }
 
 /**

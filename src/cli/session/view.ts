@@ -23,8 +23,16 @@ import { shortSessionId } from "../../utils/session-id.js";
 import { patchArgumentsJson } from "../../utils/patch-args.js";
 import type { StoredChatMessage } from "../../types/session.js";
 import type { SessionSummary } from "../../host/session-host-types.js";
-import type { ListCommand, ShowCommand } from "./args.js";
-import { eventLog, eventFileMtime, readSessionMeta, replay, resolveSessionId } from "./store.js";
+import { SessionCliError, type ListCommand, type ShowCommand } from "./args.js";
+import {
+    eventLog,
+    eventFileMtime,
+    readSessionMeta,
+    replay,
+    resolveCurrentSessionId,
+    resolveCurrentSessionIdFrom,
+    resolveSessionId,
+} from "./store.js";
 
 /** 非 --full 时单条消息的预览列宽。 */
 const MESSAGE_PREVIEW_COLUMNS = 200;
@@ -44,11 +52,11 @@ export interface SessionListRow extends SessionOrderItem {
     corrupted?: boolean;
 }
 
-export async function runList(command: ListCommand, write: (text: string) => void): Promise<void> {
-    const savedIds = listSavedSessionIds();
-    const ownership = await listOwnership(savedIds);
+/** 把磁盘上的会话 id 逐一投影成列表行（摘要 + 归属 + 真实创建时间）。 */
+async function buildRows(sessionIds: string[]): Promise<SessionListRow[]> {
+    const ownership = await listOwnership(sessionIds);
     const rows: SessionListRow[] = [];
-    for (const sessionId of savedIds) {
+    for (const sessionId of sessionIds) {
         const meta = await readSessionMeta(sessionId);
         if (!meta) {
             // 事件日志存在却读不出有效事件：留一行标注，避免脚本以为会话"不存在"；
@@ -73,21 +81,36 @@ export async function runList(command: ListCommand, write: (text: string) => voi
             ...(meta.createdAt ? { createdAt: meta.createdAt } : {}),
         });
     }
-    const visible = sortSessions(rows).filter(row => command.all || !row.summary.archived);
+    return rows;
+}
+
+export async function runList(command: ListCommand, write: (text: string) => void): Promise<void> {
+    const savedIds = listSavedSessionIds();
+    const currentId = resolveCurrentSessionIdFrom(savedIds);
+    const rows = sortSessions(await buildRows(savedIds))
+        .filter(row => command.all || !row.summary.archived)
+        .filter(row => !command.held || (row.ownership?.state ?? "free") !== "free");
+    const visible = command.limit !== undefined ? rows.slice(0, command.limit) : rows;
 
     if (command.json) {
-        write(`${JSON.stringify(visible.map(toJsonRow), null, 2)}\n`);
+        write(`${JSON.stringify(visible.map(row => toJsonRow(row, currentId)), null, 2)}\n`);
         return;
     }
     if (visible.length === 0) {
         write("（没有会话）\n");
         return;
     }
-    write(`${formatTable(visible).join("\n")}\n`);
+    const lines = formatTable(visible);
+    // 当前会话先给一行再上表格：`--limit` 截断后表里可能看不到它，别让人误判"没有当前会话"
+    const current = currentId ? visible.find(row => row.summary.sessionId === currentId) : undefined;
+    if (current) {
+        lines.unshift(`当前会话：${shortSessionId(current.summary.sessionId)}  ${current.summary.title ?? "（未命名）"}`, "");
+    }
+    write(`${lines.join("\n")}\n`);
 }
 
 export async function runShow(command: ShowCommand, write: (text: string) => void): Promise<void> {
-    const sessionId = await resolveSessionId(command.id);
+    const sessionId = await resolveShowTarget(command);
 
     // 事件视图：只读增量，不重放整段历史
     if (command.sinceSeq !== undefined) {
@@ -273,10 +296,11 @@ function renderLiteTurn(
 }
 
 
-function toJsonRow(row: SessionListRow): Record<string, unknown> {
+function toJsonRow(row: SessionListRow, currentId?: string): Record<string, unknown> {
     const { summary } = row;
     return {
         sessionId: summary.sessionId,
+        current: currentId === summary.sessionId,
         title: summary.title ?? null,
         cwd: summary.cwd ?? null,
         origin: summary.origin ?? null,
@@ -301,6 +325,29 @@ function toJsonOwnership(
     if (ownership.state === "mine") return { status: "mine", holderPid: process.pid, busy: null, queued: null };
     const info = ownership.info;
     return { status: "held", holderPid: info?.pid ?? null, busy: info?.busy ?? null, queued: info?.queued ?? null };
+}
+
+/**
+ * show 的目标：显式 id > --last（最近更新）> 当前会话指针。
+ *
+ * 三者都不成立时给「下一步怎么做」而不是裸的 not_found：命令行最常见的困惑是
+ * "我不知道当前会话是哪个"。
+ */
+async function resolveShowTarget(command: ShowCommand): Promise<string> {
+    if (command.id) return resolveSessionId(command.id);
+    if (command.last) return resolveLatestSessionId();
+
+    return resolveCurrentSessionId();
+}
+
+/** 最近更新的会话：优先未归档；一个会话都没有时才报错。 */
+async function resolveLatestSessionId(): Promise<string> {
+    const rows = sortSessions(await buildRows(listSavedSessionIds()));
+    const latest = rows.find(row => !row.summary.archived) ?? rows[0];
+    if (!latest) {
+        throw new SessionCliError("not_found", "还没有任何会话：启动 `zbot` 或 `zbot session new` 后再试", 1);
+    }
+    return latest.summary.sessionId;
 }
 
 // ── 展示 ─────────────────────────────────────────────────────
