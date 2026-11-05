@@ -26,12 +26,13 @@ zbot session wait <id> --msg=<msgId>                  # 中断/断线后继续�
 zbot session wait <id> --turn=<turnId> --timeout=60   # 按回合等（show --json 有 turnId）
 zbot session wait                                     # 等当前会话最近一轮进入终态
 zbot session queue <id> --json                        # 查看排队中的消息
-zbot session run "跑测试并修 lint" --json          # 新建会话并立即执行（原子认领）
 zbot session show <id> --json --since=<seq>           # 事件级增量读取
 zbot session show <id> --json --lite                  # 精简视图（不含完整消息）
 zbot resume <id>                       # 载入旧会话，打开 TUI
-zbot resume <id> -p --json "继续修 lint"  # 无 UI 续聊一轮，输出最终结果
 ```
+
+`zbot -p`、`zbot resume <id> -p` 和 `zbot session run` 不再在 CLI 进程内直接执行模型。
+CLI 投递只通过控制通道交给已运行的 TUI/后台持有者；也可通过 `zbot serve` 的任务接口提交后台任务。
 
 普通启动 `zbot`（不带参数）每次都会**新建一个空会话**并进入 TUI：新建总是分配新的 ULID，
 不会复用或覆盖上一次的会话；旧会话用 `zbot resume <id>` 或 TUI 的会话面板（⌘P）打开。
@@ -127,11 +128,8 @@ zbot session wait                                       # 当前会话的最近�
 - 未知 `/xxx` 仍是普通文本；`/review [附加说明]` 仍是模型指令，附加说明拼在固定指令之后。
 - 命令在「本次投递已占住的会话互斥」里执行，不重抢、不代释；忙时按现有每会话有界
   FIFO 排队（`--queue`/默认、`--expires`、`--cancel`、msgId 幂等），不另建队列。
-- **目标会话无人持有**（进程退出、归档后释放）时，`send` 由本进程临时接管执行这一条：
-  命令直接跑（`/review` 转成模型指令）、普通文本跑一轮模型，结束后释放
-  （`--json` 带 `executedLocally: true`）。这是 `/archive` 之后还能 `send /unarchive` 的原因。
-  该路径沿用调用方的 `ZBOT_STATE_DIR`，`--queue`/`--expires` 无意义，也没有 msgId 幂等
-  （重复调用即重复执行）。
+- **目标会话无人持有**（进程退出、归档后释放）时，`send` 返回 `no_holder`，不会本地接管或启动模型。
+  先用 `zbot resume <id>` 在 TUI 打开会话；归档态用 `zbot session unarchive <id>` 解档后再恢复。
 - 归档态会话只接受只读/生命周期命令（白名单见下表 `归档` 列），且**不写目标时间线**：
   往 `session_archived` 之后追加任何事件都会把它悄悄解除归档。其余命令回明确错误
   「先 `/unarchive`」。
@@ -168,20 +166,11 @@ zbot session wait                                       # 当前会话的最近�
 `session send` 共用同一份解析；执行器在 `src/host/peer-command.ts`（宿主层，
 复用真实业务能力，不复制 TUI 面板实现）。
 
-## 创建并执行（run）
+## 无 TUI 的执行边界
 
-`session new` 只落 `session_created` 事件，不认领会话，因此随后 `session send` 会因为没有持有者而失败。
-`session run` 把「新建 → 认领 → 执行一轮 → 释放」合成一条命令，适合 AI 一次性派活：
-
-```sh
-zbot session run "跑测试并修掉失败用例" --title "修 CI" --cwd ~/src/infra --json
-# {"sessionId":"…","content":"…","aborted":false,"toolCalls":12}
-```
-
-- 与 `resume -p` 共用执行骨架；会话在命令结束后保留（可继续 `show` / `resume`）。
-- 认领是原子的：创建后立即 bind 控制 socket，其他实例无法并发认领，不存在双写竞态。
-- 失败语义同 `resume -p`：`--json` 输出结构化错误，退出码 0/1/130/143。
-- 需要「先建会话、稍后再派活」时仍用 `session new` + `resume`。
+`session run` 保留为兼容入口，但会返回 `tui_or_backend_required`，不会创建一次性宿主。
+`zbot -p` 与 `zbot resume <id> -p` 同样拒绝直接执行。要从 CLI 发起回合，目标 session
+必须由 TUI 或后台实例持有，然后用 `session send` 投递；后台独立任务使用 `zbot serve`。
 
 ## 增量读取（show）
 
@@ -204,18 +193,13 @@ zbot session show <id> --all --full --json      # 完整历史（原有能力）
 `zbot resume <id>` 用于「进入」已有会话，而不是新建：
 
 - 不带 `-p`：载入该会话并打开 TUI。
-- `zbot resume <id> -p [文本]`：无 UI 续聊一轮，把本回合最终 assistant 文本写到 stdout；
-  未给文本时从 stdin 读。加 `--json` 输出 `{sessionId, content, aborted, toolCalls}`。
-- 开关必须写在续聊文本之前：正文开始后不再解析开关（避免正文里的 `--json` 被吞掉）；
-  首个正文词以 `-` 开头时用 `--` 分隔，例如 `zbot resume <id> -p -- --json 是什么意思`。
+- `zbot resume <id> -p`：已禁用，CLI 不会创建一次性宿主执行模型回合；请去掉 `-p` 打开 TUI。
 - `--unarchive`：目标会话已归档时先恢复；缺省拒绝，避免误改归档历史。
 - 恢复前会**不协商地**认领会话。被其他实例（TUI/serve）持有时直接失败，提示改用
   `zbot session send`；不会抢锁造成双写。
 - `id` 规则与 `session` 子命令一致（完整 id / 唯一前缀 / 末几位）。
 
-无 UI 恢复的失败码：`not_found` / `ambiguous` / `usage` / `session_busy`（含 `holderPid` 与
-`reason`）/ `session_claim_failed`（bind 等内部错误）/ `session_archived` 等；
-`--json` 时错误对象与其他子命令同形。
+`resume -p` 会返回 `tui_or_backend_required`。
 
 ## 读写规则
 

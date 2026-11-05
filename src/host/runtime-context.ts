@@ -179,8 +179,8 @@ export function resolveHostEnvironment(
 /**
  * 将本地工具依赖的路径和宿主服务地址切换为 TUI 所在环境。
  *
- * `stateDir`/`startupCwd` 供一次性 CLI（`session run`、无持有者时的 `session send`）覆盖：
- * 调用方可能已经用自定义状态目录解析出会话，这里再切回 `~/.zbot` 就会「会话不存在」。
+ * `stateDir`/`startupCwd` 供独立宿主（如 TUI 与 serve）覆盖：调用方可能已经用自定义
+ * 状态目录解析出会话，这里再切回 `~/.zbot` 就会「会话不存在」。
  */
 export function configureHostEnvironment(
     options: { stateDir?: string; startupCwd?: string } = {},

@@ -92,106 +92,13 @@ describe("extractResumeResult", () => {
 });
 
 describe("runResumeCli", () => {
-    function fakeHost() {
-        let listener: ((sessionId: string, event: AgentEvent | null) => void) | undefined;
-        const calls: string[] = [];
-        const host = {
-            isSessionArchived: async () => false,
-            claimSession: async (_id: string, options: { noNegotiate?: boolean }) => {
-                calls.push(`claim:${options.noNegotiate === true}`);
-                return { ok: true as const };
-            },
-            unarchiveSession: async () => { calls.push("unarchive"); },
-            releaseSession: () => { calls.push("release"); },
-            subscribeEvents: (next: (sessionId: string, event: AgentEvent | null) => void) => {
-                listener = next;
-                return () => { listener = undefined; };
-            },
-            sendMessage: async (_id: string, text: string) => {
-                calls.push(`send:${text}`);
-                listener?.("s1", {
-                    seq: 1,
-                    ts: "2026-01-01T00:00:00+08:00",
-                    sessionId: "s1",
-                    type: "turn_message",
-                    payload: { turnId: "t1", message: { role: "assistant", content: "续聊结果" } as never },
-                });
-                return { aborted: false };
-            },
-            abortSession: async () => true,
-        };
-        return { host, calls };
-    }
-
-    test("-p --json：认领、续聊并输出结构化结果，最后关闭宿主", async () => {
-        const { host, calls } = fakeHost();
-        const output: string[] = [];
-        let closed = false;
-        await runResumeCli(
-            { id: "s1", print: true, prompt: ["继续"], json: true, unarchive: false },
-            {
-                write: text => output.push(text),
-                resolveId: id => id,
-                createHost: async () => ({
-                    host: host as never,
-                    close: async () => { closed = true; },
-                }),
-            },
-        );
-
-        expect(JSON.parse(output.join(""))).toEqual({
-            sessionId: "s1",
-            content: "续聊结果",
-            aborted: false,
-            toolCalls: 0,
-        });
-        expect(calls).toEqual(["claim:true", "send:继续"]);
-        expect(closed).toBe(true);
-    });
-
-    test("没有续聊文本且 stdin 为空时报 usage", async () => {
-        await expect(runResumeCli(
-            { id: "s1", print: true, prompt: [], json: false, unarchive: false },
-            { readStdin: async () => "  " },
-        )).rejects.toMatchObject({ code: "usage" });
-    });
-
-    test("--unarchive 透传给恢复前置，认领失败也关闭宿主", async () => {
-        const { host, calls } = fakeHost();
-        let closed = false;
-        await runResumeCli(
-            { id: "s1", print: true, prompt: ["继续"], json: false, unarchive: true },
-            {
-                write: () => undefined,
-                resolveId: id => id,
-                createHost: async () => ({
-                    host: { ...host, isSessionArchived: async () => true },
-                    close: async () => { closed = true; },
-                }),
-            },
-        );
-        expect(calls).toEqual(["claim:true", "unarchive", "send:继续"]);
-        expect(closed).toBe(true);
-    });
-
-    test("恢复前置失败：抛出原因并关闭宿主", async () => {
-        const { host } = fakeHost();
-        let closed = false;
-        const failingHost = {
-            ...host,
-            isSessionArchived: async () => true,
-        };
-        await expect(runResumeCli(
-            { id: "s1", print: true, prompt: ["继续"], json: false, unarchive: false },
-            {
-                write: () => undefined,
-                resolveId: id => id,
-                createHost: async () => ({
-                    host: failingHost,
-                    close: async () => { closed = true; },
-                }),
-            },
-        )).rejects.toMatchObject({ code: "session_archived" });
-        expect(closed).toBe(true);
+    test("无 UI 续聊拒绝创建本地宿主", async () => {
+        await expect(runResumeCli({
+            id: "s1",
+            print: true,
+            prompt: ["继续"],
+            json: false,
+            unarchive: false,
+        })).rejects.toMatchObject({ code: "tui_or_backend_required" });
     });
 });

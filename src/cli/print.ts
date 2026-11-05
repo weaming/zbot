@@ -1,8 +1,6 @@
 import path from "node:path";
 import os from "node:os";
-import { DEFAULT_MEMORY_USER_ID } from "../utils/runtime-paths.js";
-import { redirectLogsToFile } from "../host/runtime-context.js";
-import { readStdinText } from "../utils/stdin.js";
+import { AppError } from "../utils/app-error.js";
 
 export interface PrintArgs {
     prompt: string[];
@@ -50,58 +48,9 @@ export function parsePrintArgs(argv: string[]): PrintArgs {
 }
 
 export async function runPrintCli(argv: string[]): Promise<void> {
-    const args = parsePrintArgs(argv);
-    const prompt = (args.prompt.length > 0 ? args.prompt.join(" ") : await readStdinText()).trim();
-    if (!prompt) throw new Error("请提供任务文本，或通过 stdin 输入任务");
-
-    const restoreConsole = redirectLogsToFile();
-    try {
-        const [skills, runtime, mcp] = await Promise.all([
-            import("../skills/skill-registry.js"),
-            import("../services/chat-runtime.js"),
-            import("../mcp/client-manager.js"),
-        ]);
-        try {
-            await skills.skillRegistry.load();
-            await mcp.initMcpClients({ mode: "tui" });
-
-            const settings = runtime.getChatApiSettings();
-            const settingsError = runtime.validateChatApiSettings(settings);
-            if (settingsError) throw new Error(`LLM provider 配置无效：${settingsError}`);
-
-        const controller = new AbortController();
-        const onInterrupt = (exitCode: 130 | 143): (() => void) => () => {
-            process.exitCode = exitCode;
-            controller.abort();
-        };
-        const onSigint = onInterrupt(130);
-        const onSigterm = onInterrupt(143);
-        process.once("SIGINT", onSigint);
-        process.once("SIGTERM", onSigterm);
-            try {
-                const systemPrompt = runtime.buildSystemPrompt(args.cwd);
-                const result = await runtime.runChatQuery({
-                    query: prompt,
-                    systemPrompt,
-                    cwd: args.cwd,
-                    userId: DEFAULT_MEMORY_USER_ID,
-                    modelOverride: args.model,
-                    signal: controller.signal,
-                    stream: false,
-                });
-                if (args.json) {
-                    process.stdout.write(`${JSON.stringify({ content: result.content, toolCalls: result.toolCalls ?? 0 })}\n`);
-                } else {
-                    process.stdout.write(`${result.content}\n`);
-                }
-            } finally {
-                process.removeListener("SIGINT", onSigint);
-                process.removeListener("SIGTERM", onSigterm);
-            }
-        } finally {
-            await mcp.closeAllMcpClients();
-        }
-    } finally {
-        restoreConsole();
-    }
+    parsePrintArgs(argv);
+    throw new AppError(
+        "tui_or_backend_required",
+        "CLI 不会在没有 TUI 或后台持有者时直接运行模型。请启动 zbot TUI 后用 `zbot session send <id> <文本> --wait`，或把任务提交到 `zbot serve`。",
+    );
 }

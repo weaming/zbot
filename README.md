@@ -50,8 +50,10 @@ Responses API 和 Chat Completions 可使用各自的 `OPENAI_RESPONSES_*` 与 `
 ~/.bun/bin/zbot session show            # 不带 id = 当前会话；--last 取最近更新的
 ~/.bun/bin/zbot session send <id> "跑一下测试" --wait          # 一直等到回合终态
 ~/.bun/bin/zbot session wait <id> --msg=<msgId>                # 中断/断线后继续等结果
-~/.bun/bin/zbot resume <id> -p --json "继续"
 ```
+
+CLI 只负责把消息投递给运行中的 TUI 或后台实例，不会在本地无 UI 启动模型回合。
+没有持有者时，请打开 TUI，或通过 `zbot serve` 的任务接口提交后台任务。
 
 也可以常驻成无 UI 宿主，用 HTTP 发布任务、SSE 订阅进度：
 

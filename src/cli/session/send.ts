@@ -1,6 +1,5 @@
 /**
- * 会话间投递：`send` 通过控制 socket 把消息交给运行中的实例，`queue` 查看排队快照。
- * 没有实例持有时交给一次性宿主本地接管（见 one-shot.ts）。
+ * 会话间投递：`send` 通过控制 socket 把消息交给运行中的 TUI 或后台实例，`queue` 查看排队快照。
  */
 
 import { PeerConnectError, PeerConnection } from "../../control/client.js";
@@ -11,7 +10,6 @@ import { shortSessionId } from "../../utils/session-id.js";
 import { SessionCliError, usageError } from "./args.js";
 import type { QueueCommand, SendCommand } from "./args.js";
 import type { SessionCliIO } from "./io.js";
-import { runSendLocally } from "./one-shot.js";
 import { waitForTurn, type TurnOutcome } from "./wait.js";
 import { resolveSendTarget } from "./store.js";
 import { formatTimestamp } from "./view.js";
@@ -30,9 +28,12 @@ export async function runSend(
 
     const ownership = await probeOwnership(sessionId);
     if (ownership.state === "free") {
-        // 没有实例持有：由本进程临时接管执行一条（命令直接跑，普通文本跑一轮），
-        // 否则归档后的 /unarchive 这类命令永远没有可达路径。
-        return runSendLocally(command, sessionId, text, write, io);
+        throw new SessionCliError(
+            "no_holder",
+            `会话 ${shortSessionId(sessionId)} 没有运行中的 TUI 或后台实例；CLI 不会自行启动模型。请先用 zbot resume ${sessionId} 打开 TUI，或启动 zbot serve。`,
+            1,
+            { sessionId, delivered: false },
+        );
     }
 
     let settleResult: (result: PeerResult) => void = () => undefined;

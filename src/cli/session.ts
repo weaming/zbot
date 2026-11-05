@@ -5,10 +5,10 @@
  * - 读操作（list / show）只读事件日志，任何时刻可执行；
  * - 写操作（new / rename / archive / unarchive / delete）要求目标会话未被任何实例持有
  *   （控制 socket 无监听者），并在会话锁内落盘，避免与运行中的 TUI 双写事件序列；
- * - send 是唯一需要"有实例持有"的操作：它通过控制 socket 投递给运行中的会话。
+ * - send 通过控制 socket 投递给运行中的 TUI 或后台实例；没有持有者时拒绝执行。
  *
  * 输出默认人类可读，`--json` 给结构化数据（供其他 AI 解析）。
- * 解析、查询、写操作、投递与一次性宿主分别在 `session/` 下的模块里，这里只做路由。
+ * 解析、查询、写操作与投递分别在 `session/` 下的模块里，这里只做路由。
  */
 
 import { SESSION_CLI_USAGE } from "./help.js";
@@ -16,7 +16,6 @@ import { SessionCliError, isSessionCliInvocation, parseSessionArgs } from "./ses
 import { readSessionStdin } from "./session/io.js";
 import type { SessionCliIO } from "./session/io.js";
 import { runArchive, runDelete, runNew, runRename } from "./session/mutate.js";
-import { runSessionTask } from "./session/one-shot.js";
 import { runQueue, runSend } from "./session/send.js";
 import { runList, runShow } from "./session/view.js";
 import { runWait } from "./session/wait.js";
@@ -68,6 +67,9 @@ export async function runSessionCli(argv: string[], io: SessionCliIO = {}): Prom
         case "wait":
             return runWait(command, write);
         case "run":
-            return runSessionTask(command, write, io.readStdin ?? readSessionStdin, io);
+            throw new SessionCliError(
+                "tui_or_backend_required",
+                "session run 不会在 CLI 进程里直接运行模型。请启动 TUI 后使用 `session send`，或通过 `zbot serve` 提交后台任务。",
+            );
     }
 }

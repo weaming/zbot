@@ -958,7 +958,7 @@ export class LocalSessionHost implements SessionHost {
     }
 
     /**
-     * 立即落盘模型/强度选择（会话间命令与一次性宿主用）。
+     * 立即落盘模型/强度选择（会话间命令与后台宿主用）。
      * `setSessionModelSelection` 只是"下一回合生效"的内存等待区，宿主进程退出就丢了，
      * 所以远程 /model 必须当场写事件。
      */

@@ -12,8 +12,8 @@ export const MAIN_CLI_USAGE = [
     "用法：zbot [子命令] [参数]",
     "",
     "  zbot                       启动 TUI（默认）：自动新建空会话并进入",
-    "  zbot -p <文本>             单次问答，回答后退出",
-    "  zbot resume <id>           载入旧会话：默认进 TUI，加 -p 则无 UI 续聊",
+    "  zbot -p <文本>             已禁用：模型回合必须由 TUI 或后台实例执行",
+    "  zbot resume <id>           载入旧会话并进入 TUI（无 UI 续聊已禁用）",
     "  zbot session <子命令>      会话管理：list/show/new/run/rename/archive/send/wait/queue/delete",
     "  zbot serve                 启动 Web 任务看板与 HTTP 接口",
     "  zbot mcp <子命令>          配置 MCP 服务：list/add/remove",
@@ -35,14 +35,11 @@ export const SERVE_CLI_USAGE = [
 ].join("\n");
 
 export const PRINT_CLI_USAGE = [
-    "用法：zbot -p <文本> [选项]",
+    "用法：zbot -p <文本> [选项]（已禁用）",
     "",
-    "  -p, --print      单次问答模式，必须作为首个参数",
-    "  --cwd <目录>     工作目录，默认当前目录",
-    "  --model <名称>   本次覆盖使用的模型",
-    "  --json           输出 {\"content\",\"toolCalls\"} 结构化结果",
+    "CLI 不会在没有 TUI 或后台持有者时直接启动模型回合。",
     "",
-    "不给文本时从 stdin 读取任务。",
+    "请启动 zbot TUI 后用 `zbot session send <id> <文本> --wait`，或通过 `zbot serve` 提交后台任务。",
 ].join("\n");
 
 export const SESSION_CLI_USAGE = [
@@ -53,14 +50,14 @@ export const SESSION_CLI_USAGE = [
     "                                            查看会话与消息（默认当前会话，最近 3 轮）",
     "  new [--title 标题] [--cwd 目录] [--json]  新建会话",
     "  run <文本> [--title 标题] [--cwd 目录] [--json]",
-    "                                            新建会话并立即执行（原子认领）",
+    "                                            已禁用：请使用 TUI 或后台任务服务",
     "  rename <id> <标题>                        重命名会话",
     "  archive <id> / unarchive <id>             归档 / 取消归档",
     "  delete <id>                               彻底删除会话的全部落盘数据",
     "  send <id> <文本> [--wait[=秒]] [--json]   向会话投递消息；--wait 一直等到回合终态",
     "       [--no-queue] [--expires=秒]          目标忙时默认排队；--no-queue 立即失败",
     "       [--cancel=<msgId>]                    撤销排队中的消息",
-    "       无人持有（如归档后已释放）时由本进程临时接管执行这一条",
+    "       目标必须由 TUI 或后台实例持有；无人持有时拒绝执行",
     "  wait [id] [--msg=<msgId>|--turn=<turnId>] [--timeout=秒] [--json]",
     "                                            等回合进入终态并输出最终结果/错误",
     "  queue <id> [--json]                       查看排队中的投递",
@@ -77,13 +74,11 @@ export const RESUME_CLI_USAGE = [
     "用法：zbot resume <id> [选项]",
     "",
     "  <id>              会话 id：完整 id、唯一前缀或末几位",
-    "  -p, --print       无 UI 续聊：把本回合最终输出写到 stdout（不给文本时读 stdin）",
-    "  --json            与 -p 一起用：输出 {sessionId,content,aborted,toolCalls}",
+    "  -p, --print       已禁用：CLI 不会自行启动模型回合",
     "  --unarchive       目标会话已归档时先恢复再进入",
     "",
-    "开关要写在续聊文本之前（正文开始后不再解析开关）；文本本身以 - 开头时用 `--` 分隔。",
-    "不带 -p 时载入旧会话并打开 TUI。会话被其他实例持有时直接失败；",
-    "如需让运行中的实例继续处理，请改用 `zbot session send` 投递消息。",
+    "载入旧会话并打开 TUI。需要从 CLI 发消息时，目标会话必须由 TUI 或后台实例持有，",
+    "使用 `zbot session send <id> <文本> --wait` 投递并等待结果。",
 ].join("\n");
 
 const HELP_FLAGS = new Set(["-h", "--help"]);

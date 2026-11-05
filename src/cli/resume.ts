@@ -1,25 +1,15 @@
 /**
  * `zbot resume`：进入旧会话。
  * - 不带 -p：由 TUI 载入该会话（入口在 tui/main.ts 里装配）。
- * - 带 -p：无 UI 续聊，把本回合最终输出写到 stdout，供 AI/脚本调用。
+ * - 带 -p：旧无 UI 执行模式，保留参数解析但明确拒绝。
  *
  * 所有权规则：恢复前必须不协商地认领会话；被其他实例持有直接失败并提示
  * `session send`，避免两个进程同时写同一份事件日志。
  */
 
+import type { AgentEvent } from "../events/agent-events.js";
 import { listSavedSessionIds } from "../events/session-files.js";
-import { redirectLogsToFile } from "../host/runtime-context.js";
-import { prepareSessionResume } from "../host/session-resume.js";
-import { LocalSessionHost, initializeSessionHostRuntime } from "../host/session-host.js";
-import type {
-    SessionEventSource,
-    SessionLifecycle,
-    SessionQuery,
-    SessionTurnHost,
-} from "../host/session-host-types.js";
 import { AppError } from "../utils/app-error.js";
-import { readStdinText } from "../utils/stdin.js";
-import { extractTurnResult, runHostTurn } from "./session-turn.js";
 import { resolveSessionIdFrom } from "./session.js";
 
 export interface ResumeArgs {
@@ -29,23 +19,6 @@ export interface ResumeArgs {
     json: boolean;
     unarchive: boolean;
 }
-
-export interface ResumeCliIO {
-    /** 默认写 process.stdout。 */
-    write?: (text: string) => void;
-    /** -p 未给文本时读 stdin；默认读到 EOF。 */
-    readStdin?: () => Promise<string>;
-    /** 测试注入：会话 id 解析（默认走磁盘会话列表）。 */
-    resolveId?: (input: string) => string;
-    /** 测试注入：宿主工厂；默认创建真实的 LocalSessionHost + MCP 客户端。 */
-    createHost?: () => Promise<{ host: ResumeSessionHost; close: () => Promise<void> }>;
-}
-
-/** `resume -p` 需要的能力：归档判定与认领/释放，加上订阅事件与驱动/中止回合。 */
-type ResumeSessionHost = Pick<SessionQuery, "isSessionArchived">
-    & Pick<SessionLifecycle, "claimSession" | "unarchiveSession" | "releaseSession">
-    & Pick<SessionEventSource, "subscribeEvents">
-    & Pick<SessionTurnHost, "sendMessage" | "abortSession">;
 
 export function parseResumeArgs(argv: string[]): ResumeArgs {
     const args: ResumeArgs = { id: "", print: false, prompt: [], json: false, unarchive: false };
@@ -99,63 +72,23 @@ export function resolveResumeId(input: string): string {
     return resolveSessionIdFrom(input, listSavedSessionIds());
 }
 
-/** 保留旧导出名：测试与其他调用方沿用它。 */
-export const extractResumeResult = extractTurnResult;
+/** 兼容旧入口名，但不再允许 CLI 自建宿主执行回合。 */
+export async function runResumeCli(_args: ResumeArgs): Promise<void> {
+    throw new AppError(
+        "tui_or_backend_required",
+        "resume -p 已禁用：CLI 不会自行启动模型。请使用 `zbot resume <id>` 打开 TUI 后发送消息，或通过 `zbot serve` 提交后台任务。",
+    );
+}
 
-/** 交互式终端下等待 stdin 时给一行提示，避免用户以为命令卡住。 */
-const readStdin = (): Promise<string> => readStdinText({ hint: "从 stdin 读取续聊文本，^D 结束" });
-
-/**
- * 无 UI 恢复：认领 → 续聊一轮 → 输出结果。
- * 退出码：0 成功；130/143 信号中止；其它失败由 AppError.exitCode 决定。
- */
-export async function runResumeCli(args: ResumeArgs, io: ResumeCliIO = {}): Promise<void> {
-    const write = io.write ?? ((text: string) => { process.stdout.write(text); });
-    const prompt = (args.prompt.length > 0 ? args.prompt.join(" ") : await (io.readStdin ?? readStdin)()).trim();
-    if (!prompt) throw new AppError("usage", "请提供续聊文本，或通过 stdin 输入");
-
-    const sessionId = (io.resolveId ?? resolveResumeId)(args.id);
-    if (io.createHost) {
-        const injected = await io.createHost();
-        try {
-            await prepareSessionResume(injected.host, sessionId, { unarchive: args.unarchive });
-            await runHostTurn({ host: injected.host, sessionId, prompt, json: args.json, write });
-        } finally {
-            await injected.close();
-        }
-        return;
+/** 从历史事件取最后一条有正文的 assistant 消息及工具调用数。 */
+export function extractResumeResult(events: AgentEvent[]): { content: string; toolCalls: number } {
+    let content = "";
+    let toolCalls = 0;
+    for (const event of events) {
+        if (event.type !== "turn_message" || event.payload.message.role !== "assistant") continue;
+        const message = event.payload.message;
+        if (typeof message.content === "string" && message.content.trim()) content = message.content;
+        toolCalls += message.tool_calls?.length ?? 0;
     }
-
-    const restoreConsole = redirectLogsToFile();
-    try {
-        const mcp = await import("../mcp/client-manager.js");
-        // 归档/占用检查先于 MCP 初始化：失败路径不必拉起客户端，命令能立刻退出
-        let openRuntime!: () => void;
-        let failRuntime!: (error: unknown) => void;
-        const runtimeGate = new Promise<void>((resolve, reject) => {
-            openRuntime = resolve;
-            failRuntime = reject;
-        });
-        const host = new LocalSessionHost(runtimeGate, { startupCwd: process.cwd() });
-        // 运行时初始化失败时 gate 会被 reject；没人接的话 Bun 会打出崩溃报告
-        void runtimeGate.catch(() => undefined);
-        try {
-            await prepareSessionResume(host, sessionId, { unarchive: args.unarchive });
-            // 一次性命令：不挂技能文件监听，否则监听句柄会让进程用完不退出
-            const runtimeReady = initializeSessionHostRuntime({ watchSkills: false });
-            runtimeReady.then(openRuntime, failRuntime);
-            void runtimeReady.catch(() => undefined);
-            await runtimeReady;
-            await runHostTurn({ host, sessionId, prompt, json: args.json, write });
-        } finally {
-            await host.close().catch((error) => {
-                console.error("⚠️ [resume] 关闭会话宿主失败:", error);
-            });
-            await mcp.closeAllMcpClients().catch((error) => {
-                console.error("⚠️ [resume] 关闭 MCP 客户端失败:", error);
-            });
-        }
-    } finally {
-        restoreConsole();
-    }
+    return { content, toolCalls };
 }
