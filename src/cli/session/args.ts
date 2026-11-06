@@ -13,7 +13,7 @@ const DEFAULT_SHOW_TURNS = 3;
  * 排队投递的默认有效期：只限制"排队等多久"，不影响已开始执行的回合。
  * 与等待上限无关：`--wait` 不设上限，排队到期会回传明确的终态结果（不会静静丢消息）。
  */
-const DEFAULT_QUEUE_EXPIRES_SECONDS = 270;
+export const DEFAULT_QUEUE_EXPIRES_SECONDS = 270;
 /**
  * 带机器可读分类与退出码的 CLI 错误：`--json` 调用方靠 code / exitCode 判断下一步
  * （例如 wait_timeout 表示"消息已投递，不要重发"）。

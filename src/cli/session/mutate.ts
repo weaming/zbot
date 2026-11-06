@@ -22,15 +22,21 @@ export async function runNew(command: NewCommand, write: (text: string) => void)
     if (!isDirectory(cwd)) throw usageError(`cwd 不是已存在的目录：${cwd}`);
     const title = command.title ? cleanTitle(command.title) : undefined;
 
-    const sessionId = createUlid();
-    await eventLog.append(sessionId, "session_created", { cwd, origin: "user" });
-    if (title) await eventLog.append(sessionId, "session_renamed", { title });
+    const sessionId = await createSession({ cwd, ...(title ? { title } : {}) });
 
     if (command.json) {
         write(`${JSON.stringify({ sessionId, cwd, title: title ?? null }, null, 2)}\n`);
         return;
     }
     write(`已创建会话 ${sessionId}（${abbreviatePath(cwd, process.env.HOME, CWD_COLUMNS)}）${title ? `「${title}」` : ""}\n`);
+}
+
+/** 落盘一个空会话（可选标题）：`session new` 与 `herdr spawn` 共用。 */
+export async function createSession(input: { cwd: string; title?: string }): Promise<string> {
+    const sessionId = createUlid();
+    await eventLog.append(sessionId, "session_created", { cwd: input.cwd, origin: "user" });
+    if (input.title) await eventLog.append(sessionId, "session_renamed", { title: input.title });
+    return sessionId;
 }
 
 export async function runRename(command: RenameCommand, write: (text: string) => void): Promise<void> {
@@ -122,18 +128,23 @@ function renameFailure(sessionId: string, title: string, error: string | undefin
 
 export async function runArchive(command: ArchiveCommand, write: (text: string) => void): Promise<void> {
     const sessionId = await resolveSessionId(command.id);
-    await withSessionLockFree(sessionId, async () => {
-        await eventLog.append(
-            sessionId,
-            command.kind === "archive" ? "session_archived" : "session_unarchived",
-            {},
-        );
-    });
+    await setSessionArchived(sessionId, command.kind === "archive");
     if (command.json) {
         write(`${JSON.stringify({ sessionId, action: command.kind, archived: command.kind === "archive" }, null, 2)}\n`);
         return;
     }
     write(`${command.kind === "archive" ? "已归档" : "已取消归档"} ${shortSessionId(sessionId)}\n`);
+}
+
+/** 直接改写归档状态：要求会话无人持有（有人持有时只能走 `/archive`、`/unarchive`）。 */
+export async function setSessionArchived(sessionId: string, archived: boolean): Promise<void> {
+    await withSessionLockFree(sessionId, async () => {
+        await eventLog.append(
+            sessionId,
+            archived ? "session_archived" : "session_unarchived",
+            {},
+        );
+    });
 }
 
 export async function runDelete(command: DeleteCommand, write: (text: string) => void): Promise<void> {

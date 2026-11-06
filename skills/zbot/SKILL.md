@@ -1,6 +1,6 @@
 ---
 name: zbot
-description: "用 CLI/HTTP 驱动 zbot 实例：查会话、投递消息并等结果、远程执行 slash 命令、用 serve 提交后台任务。当需要让另一个 AI 实例干活（多实例协作）、从脚本给运行中的 zbot 发消息、或无人值守跑长任务时使用。关键词：zbot、session send、session wait、zbot serve、jobs、会话投递、多实例、后台任务。"
+description: "用 CLI/HTTP 驱动 zbot 实例：在 herdr 里开新标签页与新会话、查会话、投递消息并等结果、远程执行 slash 命令、用 serve 提交后台任务。当需要让另一个 AI 实例干活（多实例协作）、从脚本给运行中的 zbot 发消息、或无人值守跑长任务时使用。关键词：zbot、herdr spawn、新标签页、session send、session wait、zbot serve、jobs、会话投递、多实例、后台任务。"
 ---
 
 # zbot 操作手册
@@ -51,11 +51,23 @@ description: "用 CLI/HTTP 驱动 zbot 实例：查会话、投递消息并等�
 - `130` 之后用同一条 `--msg=<msgId>` 续等，不要重发消息。
 - `status: delivered|queued` 只表示受理，不是完成；`wait_lost` 表示进程没了又无终态，别当成功。
 
-**典型用法**：给另一个项目开一个会话，让它去改代码。
+**典型用法**：在 herdr 里给另一个项目开一个标签页 + 会话，让它去干活。
 
-    ID=$(zbot session new --title "修 lint" --cwd ~/src/other --json | jq -r .sessionId)
-    zbot resume "$ID"                       # 需要人打开一次 TUI 认领（或交给 serve）
-    zbot session send "$ID" "修掉 lint 报错，只改必要的文件" --wait
+    zbot herdr spawn "修掉 lint 报错，只改必要的文件" --title "修 lint" --cwd ~/src/other --json
+    # --title / --cwd 必填（标题同时是标签页标签）
+    # → sessionId / herdr{workspaceId,tabId,paneId,tab,pane,caller} / msgId / commands / hints
+    # commands = {wait?, send, sendAndWait, show, archive, close, closeTab, teardown}：后续动作全用返回里的命令
+    # hints = {current?, later, observe}：current 等首条输入这一轮、later 是后续发消息怎么等、observe 看进度
+    zbot session wait <id> --msg=<msgId>    # spawn 只等到「首条输入投递成功」就返回，结果用 commands.wait 等
+
+spawn 不会归档、也不会让 TUI 退出：回合结束后 pane 里的 zbot 保持 idle，可继续 `commands.send`；
+收尾直接用 `commands.teardown`（= `zbot herdr teardown <id> --tab=<tabId>`：归档 + 关标签页，
+投递成功即返回，不等落盘）。单独动作仍有 `archive`（`/archive`：归档并释放）/
+`close`（`/close`：只释放）——两者**二选一**，先 archive 再 close 只会得到 `no_holder`；
+会话正在跑回合时 teardown 会以 `busy` 拒绝，先 `commands.wait` 等完。
+
+`herdr spawn` 需要 `HERDR_ENV=1`（在 herdr pane 里执行），否则报 `herdr_unavailable`；
+不在 herdr 里就退回手工三步：`session new` → `zbot resume <id>`（人开一次 TUI 认领）→ `session send`。
 
 ## 改标题（运行时也能改）
 
@@ -132,6 +144,7 @@ job 状态机 `queued → leased → running → succeeded/failed/cancelled`，`
 | 现象 | 原因与处理 |
 | --- | --- |
 | `tui_or_backend_required` | CLI 不跑模型：开 TUI 或走 serve |
+| `herdr_unavailable` | 不在 herdr pane 内：改用 serve，或手工 `session new` + `resume` |
 | `no_holder` | 会话没人持有：`resume` 打开，或先 `session unarchive` |
 | `queue_full` | 排队已满 8 条：等一会儿，先 `session queue` 看清 |
 | 退出码 2 | 已投递但超时：用 `wait --msg` 续等，别重发 |

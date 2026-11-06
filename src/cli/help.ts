@@ -15,6 +15,7 @@ export const MAIN_CLI_USAGE = [
     "  zbot -p <文本>             已禁用：模型回合必须由 TUI 或后台实例执行",
     "  zbot resume <id>           载入旧会话并进入 TUI（无 UI 续聊已禁用）",
     "  zbot session <子命令>      会话管理：list/show/new/run/rename/archive/send/wait/queue/delete",
+    "  zbot herdr <子命令>        在 herdr 里开新标签页并启动新会话：spawn",
     "  zbot serve                 启动 Web 任务看板与 HTTP 接口",
     "  zbot mcp <子命令>          配置 MCP 服务：list/add/remove",
     "  zbot help [子命令]         查看用法",
@@ -81,6 +82,31 @@ export const RESUME_CLI_USAGE = [
     "使用 `zbot session send <id> <文本> --wait` 投递并等待结果。",
 ].join("\n");
 
+export const HERDR_CLI_USAGE = [
+    "用法：zbot herdr <子命令> [参数]",
+    "",
+    "  spawn [文本] [选项]        新建 herdr 标签页并启动一个新 zbot 会话",
+    "  teardown <id> [选项]       收尾：归档会话 + 关掉它的标签页（投递成功即返回）",
+    "",
+    "  --title 标题               会话标题（必填）；也作为新标签页的默认标签",
+    "  --label 标签               标签页标签（默认同 --title）",
+    "  --cwd 目录                 新标签页与会话的工作目录（必填，相对路径按当前目录）",
+    "  --workspace id             目标 herdr workspace，默认 $HERDR_WORKSPACE_ID",
+    "  --focus                    新标签页建好后切换过去（默认不抢焦点）",
+    "  --ready-timeout=秒         等新 TUI 认领会话的上限，默认 30；0 表示不等",
+    "  --json                     输出会话元数据、herdr 元数据与后续命令（commands/hints）",
+    "  -h, --help                 查看用法",
+    "",
+    "只能在 herdr 内运行（HERDR_ENV=1），否则直接报 herdr_unavailable。",
+    "位置参数是首条用户输入，正文以 - 开头时用 -- 分隔；不给正文就只建标签页与会话。",
+    "返回里的 commands 覆盖后续动作：wait 等结果、send 继续发、show 看进度、",
+    "archive 归档、close 让 TUI 释放会话、closeTab 关标签页、teardown 归档+关标签页。",
+    "",
+    "teardown 选项：--tab=<tabId> / --pane=<paneId> / --workspace=<id> 指定目标",
+    "（缺省在同一 workspace 内按 pane 元数据自动匹配），",
+    "--json 输出结构化结果。会话正在执行回合时拒绝，先等这一轮结束。",
+].join("\n");
+
 const HELP_FLAGS = new Set(["-h", "--help"]);
 
 function usageFor(topic: string): string {
@@ -93,6 +119,8 @@ function usageFor(topic: string): string {
         case "session":
         case "sessions":
             return SESSION_CLI_USAGE;
+        case "herdr":
+            return HERDR_CLI_USAGE;
         case "resume":
             return RESUME_CLI_USAGE;
         case "mcp":

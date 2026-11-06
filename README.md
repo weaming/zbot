@@ -50,6 +50,8 @@ Responses API 和 Chat Completions 可使用各自的 `OPENAI_RESPONSES_*` 与 `
 ~/.bun/bin/zbot session show            # 不带 id = 当前会话；--last 取最近更新的
 ~/.bun/bin/zbot session send <id> "跑一下测试" --wait          # 一直等到回合终态
 ~/.bun/bin/zbot session wait <id> --msg=<msgId>                # 中断/断线后继续等结果
+~/.bun/bin/zbot herdr spawn "只读复审这次改动" --title 复审 --cwd ~/src/app  # herdr 内：新标签页 + 新会话
+~/.bun/bin/zbot herdr teardown <id> --tab=<tabId>              # 收尾：归档 + 关掉那个标签页
 ```
 
 CLI 只负责把消息投递给运行中的 TUI 或后台实例，不会在本地无 UI 启动模型回合。

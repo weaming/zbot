@@ -35,6 +35,8 @@ const isHelpCli = printCliHelp(cliArgs);
  * 整条静态模块图拉进 TUI 进程，TUI 静态依赖里就会多出 HTTP 前端。
  */
 const isServeCli = cliArgs[0] === "serve";
+/** herdr 分支同样用字面量判断：这条路径只调 herdr CLI 与事件日志，不该拉进 TUI 模块图。 */
+const isHerdrCli = cliArgs[0] === "herdr";
 
 /**
  * 会话 CRUD 分支：必须在 dotenv 与 configureHostEnvironment 之前分流 ——
@@ -49,6 +51,14 @@ if (isHelpCli) {
     try {
         const { runSessionCli } = await import("../cli/session.js");
         await runSessionCli(cliArgs.slice(1));
+    } catch (error) {
+        const { writeCliError } = await import("../utils/app-error.js");
+        writeCliError(error, cliArgs.includes("--json"));
+    }
+} else if (isHerdrCli) {
+    try {
+        const { runHerdrCli } = await import("../cli/herdr.js");
+        await runHerdrCli(cliArgs.slice(1));
     } catch (error) {
         const { writeCliError } = await import("../utils/app-error.js");
         writeCliError(error, cliArgs.includes("--json"));
@@ -280,8 +290,9 @@ async function main(): Promise<void> {
 }
 
 // 末尾启动：模块级常量（SHUTDOWN_SIGNALS 等）此时已初始化，main() 不会在 TDZ 里跑。
-// serve 分支自己跑完生命周期（长驻到收到终止信号），不能再落回 TUI 的 main()。
-if (!isHelpCli && !isSessionCli && !isServeCli) {
+// serve 分支自己跑完生命周期（长驻到收到终止信号），CLI 分支跑完就该退出，
+// 都不能再落回 TUI 的 main() —— 否则 `zbot herdr spawn` 会在调用方 pane 里起一个 TUI。
+if (!isHelpCli && !isSessionCli && !isHerdrCli && !isServeCli) {
     main().catch((error) => {
         console.error(`💥 TUI main() rejected: ${error?.message ?? error}`);
         process.exit(1);

@@ -26,81 +26,44 @@ export async function runSend(
     const text = command.text || (await readStdinText()).trim();
     if (!text) throw usageError("send 需要消息正文");
 
-    const ownership = await probeOwnership(sessionId);
-    if (ownership.state === "free") {
-        throw new SessionCliError(
-            "no_holder",
-            `会话 ${shortSessionId(sessionId)} 没有运行中的 TUI 或后台实例；CLI 不会自行启动模型。请先用 zbot resume ${sessionId} 打开 TUI，或启动 zbot serve。`,
-            1,
-            { sessionId, delivered: false },
-        );
-    }
-
-    let settleResult: (result: PeerResult) => void = () => undefined;
-    const resultPromise = new Promise<PeerResult>((resolve) => {
-        settleResult = resolve;
-    });
-    const message = createPeerMessage({
-        from: `cli-${process.pid}`,
-        to: sessionId,
+    const delivered = await deliverPeerText({
+        sessionId,
         text,
-        ...(command.wait ? { expectResult: true } : {}),
-        ...(command.queue ? { queueIfBusy: true } : {}),
-        expiresAt: new Date(Date.now() + command.expiresSeconds * 1000).toISOString(),
+        queue: command.queue,
+        expiresSeconds: command.expiresSeconds,
+        expectResult: command.wait,
     });
-    const connection = new PeerConnection({
-        socketPath: getSocketPath(sessionId),
-        onResult: (result) => settleResult(result),
-    });
-
+    const { msgId, queued, position, expiresAt, connection, resultPromise } = delivered;
     try {
-        const reply = await connection.deliver(message);
-        if (reply.type !== "ack") {
-            throw new SessionCliError(
-                "bad_reply",
-                `会话 ${shortSessionId(sessionId)} 返回了非预期应答`,
-                1,
-                { sessionId, delivered: false },
-            );
-        }
-        if (!reply.ok) {
-            throw new SessionCliError(reply.error, describeAckError(sessionId, reply.error), 1, {
-                sessionId,
-                delivered: false,
-            });
-        }
-
-        const queued = reply.queued === true;
-        const position = reply.position;
         if (!command.wait) {
             if (command.json) {
                 // status 只说投递事实：queued/delivered 都不是完成，别让脚本把 ack 当成结果
                 write(`${JSON.stringify({
                     sessionId,
-                    msgId: message.id,
+                    msgId,
                     delivered: true,
                     status: queued ? "queued" : "delivered",
                     queued,
                     ...(position !== undefined ? { position } : {}),
-                    ...(queued ? { expiresAt: message.expiresAt } : {}),
+                    ...(queued ? { expiresAt } : {}),
                 }, null, 2)}\n`);
             } else if (queued) {
-                write(`已排队到 ${shortSessionId(sessionId)}（第 ${position ?? "?"} 位，${message.id}）`
-                    + `，会话空闲后执行；最晚 ${formatTimestamp(message.expiresAt)}\n`);
+                write(`已排队到 ${shortSessionId(sessionId)}（第 ${position ?? "?"} 位，${msgId}）`
+                    + `，会话空闲后执行；最晚 ${formatTimestamp(expiresAt)}\n`);
             } else {
-                write(`已投递到 ${shortSessionId(sessionId)}（${message.id}）\n`);
+                write(`已投递到 ${shortSessionId(sessionId)}（${msgId}）\n`);
             }
             return;
         }
 
         // 等待结果时先把排队状态告诉人类，避免看起来一直没反应
         if (queued && !command.json) {
-            write(`已排队到 ${shortSessionId(sessionId)}（第 ${position ?? "?"} 位，${message.id}），等待执行...\n`);
+            write(`已排队到 ${shortSessionId(sessionId)}（第 ${position ?? "?"} 位，${msgId}），等待执行...\n`);
         }
 
         const outcome = await waitForAckResult({
             sessionId,
-            msgId: message.id,
+            msgId,
             resultPromise,
             queryPending: msgIds => connection.queryPending(msgIds),
             ...(command.waitSeconds !== undefined ? { timeoutMs: command.waitSeconds * 1000 } : {}),
@@ -121,7 +84,7 @@ export async function runSend(
                 1,
                 {
                     sessionId,
-                    msgId: message.id,
+                    msgId,
                     turnId: outcome.turnId,
                     status: outcome.status,
                     delivered: true,
@@ -133,7 +96,7 @@ export async function runSend(
         if (command.json) {
             write(`${JSON.stringify({
                 sessionId,
-                msgId: message.id,
+                msgId,
                 turnId: outcome.turnId || null,
                 status: outcome.status,
                 ok: true,
@@ -150,6 +113,89 @@ export async function runSend(
         write(outcome.content ? `${outcome.content}\n` : "（对方回合没有输出）\n");
     } finally {
         connection.close();
+    }
+}
+
+export interface DeliveredPeerText {
+    msgId: string;
+    queued: boolean;
+    position?: number;
+    expiresAt: string;
+    /** 调用方负责 close：要等结果的路径还得用它收推送与补查。 */
+    connection: PeerConnection;
+    resultPromise: Promise<PeerResult>;
+}
+
+/**
+ * 建控制连接并投递一条文本，返回受理凭证（不等待结果）。
+ * `session send` 与 `herdr spawn` 共用；目标必须由 TUI/后台实例持有，否则 no_holder。
+ */
+export async function deliverPeerText(input: {
+    sessionId: string;
+    text: string;
+    queue: boolean;
+    expiresSeconds: number;
+    expectResult?: boolean;
+}): Promise<DeliveredPeerText> {
+    const { sessionId, text } = input;
+    const ownership = await probeOwnership(sessionId);
+    if (ownership.state === "free") {
+        throw new SessionCliError(
+            "no_holder",
+            `会话 ${shortSessionId(sessionId)} 没有运行中的 TUI 或后台实例；CLI 不会自行启动模型。请先用 zbot resume ${sessionId} 打开 TUI，或启动 zbot serve。`,
+            1,
+            { sessionId, delivered: false },
+        );
+    }
+
+    let settleResult: (result: PeerResult) => void = () => undefined;
+    const resultPromise = new Promise<PeerResult>((resolve) => {
+        settleResult = resolve;
+    });
+    const expiresAt = new Date(Date.now() + input.expiresSeconds * 1000).toISOString();
+    const message = createPeerMessage({
+        from: `cli-${process.pid}`,
+        to: sessionId,
+        text,
+        ...(input.expectResult ? { expectResult: true } : {}),
+        ...(input.queue ? { queueIfBusy: true } : {}),
+        expiresAt,
+    });
+    const connection = new PeerConnection({
+        socketPath: getSocketPath(sessionId),
+        onResult: (result) => settleResult(result),
+    });
+
+    // 投递失败（含 ack 拒绝）就自己关连接：成功才把连接交给调用方
+    let accepted = false;
+    try {
+        const reply = await connection.deliver(message);
+        if (reply.type !== "ack") {
+            throw new SessionCliError(
+                "bad_reply",
+                `会话 ${shortSessionId(sessionId)} 返回了非预期应答`,
+                1,
+                { sessionId, delivered: false },
+            );
+        }
+        if (!reply.ok) {
+            throw new SessionCliError(reply.error, describeAckError(sessionId, reply.error), 1, {
+                sessionId,
+                delivered: false,
+            });
+        }
+
+        accepted = true;
+        return {
+            msgId: message.id,
+            queued: reply.queued === true,
+            ...(reply.position !== undefined ? { position: reply.position } : {}),
+            expiresAt,
+            connection,
+            resultPromise,
+        };
+    } finally {
+        if (!accepted) connection.close();
     }
 }
 
@@ -307,5 +353,3 @@ function describeAckError(sessionId: string, code: string): string {
             return `会话 ${shortSessionId(sessionId)} 拒绝了消息（${code}）`;
     }
 }
-
-

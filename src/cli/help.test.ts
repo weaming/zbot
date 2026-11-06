@@ -138,7 +138,7 @@ describe("用法文本与实现同步", () => {
     });
 
     test("总览列出全部分支入口", () => {
-        for (const entry of ["zbot -p", "zbot resume", "zbot session", "zbot serve", "zbot mcp", "zbot help"]) {
+        for (const entry of ["zbot -p", "zbot resume", "zbot session", "zbot herdr", "zbot serve", "zbot mcp", "zbot help"]) {
             expect(MAIN_CLI_USAGE).toContain(entry);
         }
     });
