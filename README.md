@@ -39,7 +39,7 @@ Responses API 和 Chat Completions 可使用各自的 `OPENAI_RESPONSES_*` 与 `
 ~/.bun/bin/zbot resume <id>
 ```
 
-从未发过消息的空会话会在退出或 `/close` 时自动删除（有草稿或会话间消息则保留）。
+从未发过消息的空会话会在打开其他会话、退出或 `/close` 时自动删除（有草稿或会话间消息则保留）。
 
 各子命令都支持 `-h` / `--help`（如 `zbot session --help`）。
 

@@ -258,6 +258,8 @@ export class ChatApp {
     /** 进程级 UI 占位：只覆盖与具体会话无关的操作（重载、切会话）。会话自身的忙闲在 turnState。 */
     private runtimeReloading = false;
     private switching = false;
+    /** 切换会话的序号：只有最新一轮才能收尾清理，避免并发切换删掉对方正要打开的会话。 */
+    private switchSeq = 0;
     /** 模型 / MCP 浮层的装配与 lazy 启用集串行落盘（状态与决策在 ModelMcpPanels）。 */
     private readonly modelMcp: ModelMcpPanels;
     private detailed = false;
@@ -2051,6 +2053,8 @@ export class ChatApp {
     }
 
     private async selectSession(sessionId: string): Promise<void> {
+        // 并发切换时只让最后一轮收尾：序号在第一个 await 之前取，中途被顶掉的一轮不再清理
+        const switchSeq = ++this.switchSeq;
         // 打开前先取得持有权：认领成功才谈得上读写这个会话
         await this.ensureClaimed(sessionId);
         const modelSelection = await this.agent.getSessionModelSelection(sessionId);
@@ -2066,12 +2070,12 @@ export class ChatApp {
         if (this.pending.isEmpty(sessionId)) this.pending.adoptRoot(sessionId);
         else this.pending.clear(null);
 
-        const currentId = this.store.currentSessionId;
-        if (currentId && currentId !== sessionId) {
+        const previousSessionId = this.store.currentSessionId;
+        if (previousSessionId && previousSessionId !== sessionId) {
             // 草稿保存 marker 文本（保持输入框折叠显示）；切回时由 SessionPasteStore
             // （PromptEditor.setSessionContext / setText）恢复该会话的 pastes Map 与
             // pasteCounter，保证 marker 展开正确且 id 不与新粘贴冲突。
-            this.setDraft(currentId, this.editor.getText(), this.editor.getImageAttachments());
+            this.setDraft(previousSessionId, this.editor.getText(), this.editor.getImageAttachments());
             // 提问浮层只服务当前会话：切走先收起（问题本身仍挂在原会话上）
             this.questions.close();
         }
@@ -2119,6 +2123,12 @@ export class ChatApp {
             // 目标会话挂着未作答的提问：切进来就把浮层弹出来
             this.questions.sync();
             this.syncHerdrMetadata();
+        }
+
+        // 切走后再清空会话：新会话已经渲染完才动手，删旧会话不影响这次切换的显示。
+        // 期间又发起了新的切换（它可能正打开这个空会话）就不动手，交给那一轮判断。
+        if (previousSessionId && previousSessionId !== sessionId && switchSeq === this.switchSeq) {
+            await this.discardEmptySession(previousSessionId);
         }
     }
 
@@ -2434,6 +2444,28 @@ export class ChatApp {
             } catch (error) {
                 console.warn("⚠️ [TUI] 清理空会话失败:", (error as Error)?.message ?? error);
             }
+        }
+    }
+
+    /**
+     * 切走时清掉刚被替下的空会话：典型是启动即新建的空会话，
+     * 用户直接打开历史会话后不该继续占着 tab 条。
+     *
+     * 与退出清理、`/close` 同一条路径（宿主复查判空/归属/忙闲）；
+     * 有未发送草稿、正在执行、或已经重新成为当前会话的一律保留，绝不误删数据。
+     */
+    private async discardEmptySession(sessionId: string): Promise<void> {
+        // 期间可能又切回了它：此时它不再是「被替下的会话」
+        if (this.exiting) return;
+        if (this.store.currentSessionId === sessionId) return;
+        if (this.hasUnsavedDraft(sessionId) || this.agent.isSessionBusy(sessionId)) return;
+        try {
+            await this.deleteSessionById(sessionId, {
+                onlyIfEmpty: true,
+                flashText: "🗑️ 空会话已自动删除（从未发过消息）",
+            });
+        } catch (error) {
+            console.warn("⚠️ [TUI] 清理空会话失败:", (error as Error)?.message ?? error);
         }
     }
 
