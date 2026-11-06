@@ -127,6 +127,7 @@ interface RecordingHost extends SessionControlHost {
     spawnedSessions: string[];
     createdCwds: string[];
     archivedSessions: Array<{ sessionId: string; automatic: boolean }>;
+    renamed: Array<{ sessionId: string; title: string }>;
     busy: Set<string>;
 }
 
@@ -141,6 +142,7 @@ function makeHost(): RecordingHost {
         spawnedSessions: [],
         createdCwds: [],
         archivedSessions: [],
+        renamed: [],
         busy: new Set<string>(),
         title: (sessionId) => `会话 ${sessionId}`,
         isBusy: (sessionId) => host.busy.has(sessionId),
@@ -157,6 +159,10 @@ function makeHost(): RecordingHost {
             if (host.busy.has(message.to)) return { status: "busy" as const };
             host.accepted.push(message);
             return { status: "accepted" as const };
+        },
+        rename: (sessionId, title) => {
+            host.renamed.push({ sessionId, title });
+            return title.slice(0, 200);
         },
         onOutbound: (_from, message) => host.outbound.push(message),
         onResult: (requester, _message, result, options) => host.results.push({
@@ -817,6 +823,27 @@ async function fetchRelease(_control: SessionControl, sessionId: string): Promis
     if (reply.type !== "release_result") return "error";
     return reply.ok ? "ok" : "busy";
 }
+
+describe("运行时改标题", () => {
+    test("持有者落盘并回传生效值，空标题给明确原因", async () => {
+        const host = makeHost();
+        const control = makeControl(host);
+        await control.claim("t1");
+
+        const ok = await requestOnce(getSocketPath("t1"), { type: "rename", id: "n1", title: "  重构标题  " }, 500);
+        expect(ok.type).toBe("rename_result");
+        if (ok.type !== "rename_result") throw new Error("预期 rename_result");
+        expect(ok.ok).toBe(true);
+        expect(ok.title).toBe("重构标题");
+        expect(host.renamed).toEqual([{ sessionId: "t1", title: "重构标题" }]);
+
+        const blank = await requestOnce(getSocketPath("t1"), { type: "rename", id: "n2", title: "   " }, 500);
+        if (blank.type !== "rename_result") throw new Error("预期 rename_result");
+        expect(blank.ok).toBe(false);
+        expect(blank.error).toContain("不能为空");
+        expect(host.renamed).toHaveLength(1);
+    });
+});
 
 describe("结果文本形态", () => {
     test("正常完成、未完成、已取消三种终态措辞互不混淆", () => {

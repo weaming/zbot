@@ -106,6 +106,11 @@ export class PeerConnection {
         return this.request({ type: "queue_state", id: createFrameId() });
     }
 
+    /** 交给持有者改会话标题；结果帧是 rename_result。 */
+    rename(title: string): Promise<PeerReply> {
+        return this.request({ type: "rename", id: createFrameId(), title });
+    }
+
     /**
      * 只读补查某些消息的终态结果（不消费对方暂存，可重复调用）。
      * 覆盖「推送丢了/连接半死」与命令行 wait 的并发轮询；连不上时抛 PeerConnectError。

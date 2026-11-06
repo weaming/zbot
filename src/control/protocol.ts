@@ -103,6 +103,8 @@ export type PeerReply =
     | { type: "pending_state"; id: string; done: PeerResult[]; pending: string[] }
     | { type: "cancel_queued_result"; id: string; ok: boolean; reason?: "not_found" | "running" }
     | { type: "queue_state"; id: string; entries: PeerQueuedEntry[] }
+    /** 改标题由持有者落盘：ok=false 时 error 是给人看的原因。 */
+    | { type: "rename_result"; id: string; ok: boolean; title?: string; error?: string }
     | { type: "pong"; id: string };
 
 /** 异步推送：结果到达时随时发给发起方，没有对应的请求 id。 */
@@ -116,6 +118,8 @@ export type PeerRequest =
     | { type: "query_pending"; id: string; msgIds: string[]; keep?: boolean }
     | { type: "cancel_queued"; id: string; msgId: string }
     | { type: "queue_state"; id: string }
+    /** 让持有者把会话标题改成 title（命令行的运行时改名走这条路）。 */
+    | { type: "rename"; id: string; title: string }
     | { type: "ping"; id: string };
 
 export type PeerFrame = PeerRequest | PeerReply | PeerPush;

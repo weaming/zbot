@@ -39,6 +39,8 @@ export interface PeerServerHandlers {
     cancelQueued?(msgId: string): { ok: true } | { ok: false; reason: "not_found" | "running" };
     /** 当前排队快照（观测用）。 */
     queueState?(): PeerQueuedEntry[];
+    /** 改会话标题：返回真正生效的标题（宿主按自己的上限截断）。忙时也允许。 */
+    rename?(title: string): Promise<string> | string;
     /** 协商释放：忙时返回 false，持有者只在空闲时放行。 */
     release(): Promise<boolean> | boolean;
     /**
@@ -220,6 +222,9 @@ export class PeerServer {
             case "cancel_queued":
                 this.handleCancelQueued(socket, frame.id, frame.msgId);
                 return;
+            case "rename":
+                await this.handleRename(socket, frame.id, frame.title);
+                return;
             case "deliver":
                 await this.handleDeliver(socket, frame.id, frame.message);
                 return;
@@ -250,6 +255,25 @@ export class PeerServer {
             ok: result.ok,
             ...(result.ok ? {} : { reason: result.reason }),
         });
+    }
+
+    /** 改标题：空标题与宿主报错都回 ok=false，让命令行拿到明确原因而不是超时。 */
+    private async handleRename(socket: net.Socket, id: string, rawTitle: unknown): Promise<void> {
+        const title = typeof rawTitle === "string" ? rawTitle.trim() : "";
+        if (!title) {
+            writeFrame(socket, { type: "rename_result", id, ok: false, error: "标题不能为空" });
+            return;
+        }
+        if (!this.handlers.rename) {
+            writeFrame(socket, { type: "rename_result", id, ok: false, error: "持有者不支持运行时改标题，请升级" });
+            return;
+        }
+        try {
+            const applied = await this.handlers.rename(title);
+            writeFrame(socket, { type: "rename_result", id, ok: true, title: applied });
+        } catch (error: any) {
+            writeFrame(socket, { type: "rename_result", id, ok: false, error: error?.message ?? "重命名失败" });
+        }
     }
 
     private async handleRelease(socket: net.Socket, id: string): Promise<void> {

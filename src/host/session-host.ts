@@ -158,6 +158,8 @@ export class LocalSessionHost implements SessionHost {
     onSessionSpawned?: (sessionId: string, title?: string) => void;
     /** 会话工作目录被改写（cwd 工具 / /cwd）时回调宿主：状态栏与工具基准要跟着换。 */
     onSessionCwdChanged?: (sessionId: string, cwd: string) => void;
+    /** 会话标题被改写（⌘R 或控制通道 rename）时回调宿主：tab 栏与外部元数据要跟着换。 */
+    onSessionRenamed?: (sessionId: string, title: string) => void;
     /** 已归档会话恢复并被本实例认领后回调宿主。 */
     onSessionWoken?: (sessionId: string) => void;
 
@@ -183,6 +185,10 @@ export class LocalSessionHost implements SessionHost {
                 this.releaseSession(sessionId, { cause: automatic ? "auto" : "tool" });
             },
             cancelSpawnedSession: (sessionId, close) => this.cancelSpawnedSession(sessionId, close),
+            rename: async (sessionId, title) => {
+                await this.renameSession(sessionId, title);
+                return title.trim().slice(0, MAX_SESSION_TITLE_LENGTH);
+            },
             accept: (message) => this.acceptPeerMessage(message),
             cancelQueued: (sessionId, msgId) => this.cancelQueuedPeerMessage(sessionId, msgId),
             queueState: (sessionId) => this.peerInbox.snapshot(sessionId),
@@ -864,14 +870,23 @@ export class LocalSessionHost implements SessionHost {
         const cleanTitle = title.trim().slice(0, MAX_SESSION_TITLE_LENGTH);
         if (!cleanTitle) return;
 
-        this.beginSessionOperation(sessionId);
+        // 标题是元数据而不是回合状态：回合执行中也允许改（⌘R / session rename 的"运行时"语义）。
+        // 忙时不再抢会话互斥（那会直接判 busy），只借事件日志锁串行化这次追加；
+        // 空闲时保持原样，确保与删除/归档/清空互斥。
+        const isTurnRunning = this.activeSessions.get(sessionId)?.abortController !== undefined;
+        if (!isTurnRunning) this.beginSessionOperation(sessionId);
         let lock: SessionLockHandle | undefined;
         try {
             lock = await acquireSessionLock(sessionId);
             const active = this.activeSessions.get(sessionId);
             if (active) active.session.title = cleanTitle;
 
-            let lastSeq = await this.eventLog.lastSeq(sessionId, { forceRefresh: true });
+            // 有 active 会话时本进程的 seq 缓存就是权威（回合与改名共用同一个 append 串行器）；
+            // forceRefresh 会把磁盘尾部值无条件写回缓存，可能覆盖掉并发回合刚写入的新 seq，
+            // 让下一次 append 生成重复 seq。只有没有 active 会话（本进程不写它）时才回读磁盘。
+            let lastSeq = active
+                ? await this.eventLog.lastSeq(sessionId)
+                : await this.eventLog.lastSeq(sessionId, { forceRefresh: true });
             if (lastSeq === 0) {
                 // 空临时会话未落盘：先补 session_created（cwd 取绑定目录），让改名后的会话可持久化
                 const created = await this.eventLog.append(sessionId, "session_created", {
@@ -881,11 +896,17 @@ export class LocalSessionHost implements SessionHost {
             }
             const renamed = await this.eventLog.append(sessionId, "session_renamed", { title: cleanTitle });
             this.updateActiveSeq(sessionId, renamed.seq);
+            // 回调跑在落盘之后：它抛异常不能让"已经写成功的改名"以失败回给调用方
+            try {
+                this.onSessionRenamed?.(sessionId, cleanTitle);
+            } catch (error: any) {
+                console.warn(`⚠️ [host] 标题变更回调失败 (${sessionId}):`, error?.message ?? error);
+            }
         } finally {
             try {
                 await this.releaseSessionLockSafely(lock);
             } finally {
-                this.endSessionOperation(sessionId);
+                if (!isTurnRunning) this.endSessionOperation(sessionId);
             }
         }
     }

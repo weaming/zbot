@@ -55,6 +55,8 @@ function startFakePeer(
         queuePosition?: number;
         queueEntries?: Array<Record<string, unknown>>;
         cancelResult?: { ok: boolean; reason?: "not_found" | "running" };
+        /** 持有者对改名帧的应答；缺省按收到的标题回 ok。 */
+        renameResult?: { ok: boolean; title?: string; error?: string };
     } = {},
 ): Promise<void> {
     const socketPath = getSocketPath(sessionId);
@@ -85,6 +87,17 @@ function startFakePeer(
                         id: frame.id,
                         ok: result.ok,
                         ...(result.reason ? { reason: result.reason } : {}),
+                    }));
+                    continue;
+                }
+                if (frame.type === "rename") {
+                    const result = options.renameResult ?? { ok: true };
+                    socket.write(encodeFrame({
+                        type: "rename_result",
+                        id: frame.id,
+                        ok: result.ok,
+                        ...(result.title !== undefined ? { title: result.title } : { title: frame.title }),
+                        ...(result.error ? { error: result.error } : {}),
                     }));
                     continue;
                 }
@@ -366,17 +379,34 @@ describe("会话命令行端到端", () => {
         expect((error as SessionCliError).code).toBe("send_running");
     });
 
-    test("被持有时的写操作一律拒绝，且不落任何事件", async () => {
+    test("被持有时 rename 交给持有者，其余写操作仍拒绝且不落任何事件", async () => {
         const created = await run(["new", "--json"]);
         const { sessionId } = JSON.parse(created) as { sessionId: string };
         await startFakePeer(sessionId);
         const eventFile = path.join(tmpDir, "sessions", "events", `${sessionId}.jsonl`);
         const before = fs.readFileSync(eventFile, "utf8");
 
-        for (const argv of [["rename", sessionId, "新标题"], ["archive", sessionId], ["delete", sessionId]]) {
+        // 标题是元数据：运行中也能改，由持有者落盘，CLI 不写本地日志
+        const renamed = await run(["rename", sessionId, "新标题"]);
+        expect(renamed).toContain("已重命名");
+        expect(renamed).toContain("新标题");
+        expect(fs.readFileSync(eventFile, "utf8")).toBe(before);
+
+        for (const argv of [["archive", sessionId], ["delete", sessionId]]) {
             await expect(run(argv)).rejects.toThrow("正被其他实例持有");
         }
         expect(fs.readFileSync(eventFile, "utf8")).toBe(before);
+    });
+
+    test("持有者拒绝改名时把原因带出来，不写成成功", async () => {
+        const created = await run(["new", "--json"]);
+        const { sessionId } = JSON.parse(created) as { sessionId: string };
+        await startFakePeer(sessionId, { renameResult: { ok: false, error: "标题不能为空" } });
+
+        const error = await run(["rename", sessionId, "随便什么"]).catch(error => error);
+        expect(error).toBeInstanceOf(SessionCliError);
+        expect(error.code).toBe("rename_failed");
+        expect(error.message).toContain("标题不能为空");
     });
 
     test("send --wait 超时：标记已投递并给出独立退出码", async () => {

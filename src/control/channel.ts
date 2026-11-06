@@ -90,6 +90,11 @@ export interface SessionControlHost {
     cancelQueued?(sessionId: string, msgId: string): { ok: true } | { ok: false; reason: "not_found" | "running" };
     /** 指定会话的排队快照（who / queue_state 观测用）。 */
     queueState?(sessionId: string): PeerQueuedEntry[];
+    /**
+     * 改会话标题并返回真正生效的标题。标题是元数据：回合执行中也允许改，
+     * 由持有者在本进程内落盘，避免命令行跨进程写同一份事件日志。
+     */
+    rename?(sessionId: string, title: string): Promise<string> | string;
     /** 出站消息已成功投递（落时间线用）。 */
     onOutbound(from: string, message: PeerMessage): void;
     /** 结果到达请求者会话：已进结果队列，宿主负责落时间线与提示。 */
@@ -187,6 +192,9 @@ export class SessionControl {
                     : this.host.accept(message),
                 cancelQueued: (msgId) => this.host.cancelQueued?.(sessionId, msgId) ?? { ok: false, reason: "not_found" },
                 queueState: () => this.host.queueState?.(sessionId) ?? [],
+                ...(this.host.rename
+                    ? { rename: (title: string) => this.host.rename!(sessionId, title) }
+                    : {}),
                 release: () => {
                     if (this.host.isBusy(sessionId)) return false;
                     this.servers.delete(sessionId);

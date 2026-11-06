@@ -255,6 +255,8 @@ export interface SessionHostCallbacks {
     onSessionSpawned?: (sessionId: string, title?: string) => void;
     /** 会话工作目录被改写后的回调（见 SessionSettings.setSessionCwd）。 */
     onSessionCwdChanged?: (sessionId: string, cwd: string) => void;
+    /** 会话标题被改写后的回调（⌘R 或控制通道 rename）：tab 栏与外部元数据要跟着换。 */
+    onSessionRenamed?: (sessionId: string, title: string) => void;
     /** 归档会话被 session_wake 恢复并认领后回调宿主刷新会话列表。 */
     onSessionWoken?: (sessionId: string) => void;
     /**

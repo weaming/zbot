@@ -48,6 +48,7 @@ import {
     resolveModelUse,
 } from "../commands/slash-model.js";
 import { buildReviewPrompt, parseSlashCommand } from "../commands/slash-command.js";
+import { MAX_SESSION_TITLE_LENGTH } from "../types/session.js";
 import {
     formatBackgroundTaskDetails,
     formatElapsed,
@@ -578,6 +579,10 @@ export class ChatApp {
         // cwd 工具 / /cwd 改写会话目录：状态栏与工具基准一起换，会话面板的目录列也跟着刷新
         this.agent.onSessionCwdChanged = (sessionId, cwd) => {
             this.handleSessionCwdChanged(sessionId, cwd);
+        };
+        // 标题可能由控制通道（命令行 rename）改写：回调里补上 tab 栏与 herdr 元数据
+        this.agent.onSessionRenamed = (sessionId, title) => {
+            this.handleSessionRenamed(sessionId, title);
         };
         this.agent.onSessionWoken = sessionId => {
             void this.handleSessionWoken(sessionId);
@@ -2945,12 +2950,45 @@ export class ChatApp {
         this.syncHerdrMetadata();
     }
 
-    /** ⌘R：当前会话进入标题重命名（输入框预填当前标题，回车保存 / Esc 取消）。 */
+    /** 标题被改写（本实例 ⌘R，或控制通道的 rename）：同步会话列表、tab 栏与 herdr 元数据。 */
+    private handleSessionRenamed(sessionId: string, title: string): void {
+        const summary = this.store.sessions.find(session => session.sessionId === sessionId);
+        if (summary) summary.title = title;
+        this.renderTabBar();
+        this.syncHerdrMetadata();
+    }
+
+    /** 落盘新标题：落盘后由 handleSessionRenamed 统一刷新 UI，这里只负责错误提示。 */
+    private async applySessionTitle(sessionId: string, rawTitle: string): Promise<void> {
+        const cleanTitle = rawTitle.trim();
+        if (!cleanTitle) {
+            this.tui.flash("标题不能为空");
+            return;
+        }
+        const summary = this.store.sessions.find(session => session.sessionId === sessionId);
+        if (summary?.title === cleanTitle) {
+            this.tui.flash("标题未变化");
+            return;
+        }
+        try {
+            await this.agent.renameSession(sessionId, cleanTitle);
+            // 宿主回调已刷新过一次；这里再调一次是幂等的，覆盖 agent 未回调的场景（如测试桩）
+            this.handleSessionRenamed(sessionId, cleanTitle.slice(0, MAX_SESSION_TITLE_LENGTH));
+            this.tui.flash(`✎ 标题已更新: ${truncateInline(cleanTitle, 20)}`);
+        } catch (error: any) {
+            this.tui.flash(`⚠️ 重命名失败: ${error.message}`);
+        }
+    }
+
+    /**
+     * ⌘R：当前会话进入标题重命名（输入框预填当前标题，回车保存 / Esc 取消）。
+     * 标题是元数据，回合执行中也允许改；草稿会被暂存并在 commit/cancel 时还原。
+     */
     private async beginRename(sessionId: string): Promise<void> {
         const target = this.store.sessions.find(session => session.sessionId === sessionId);
         if (!target || target.archived) return;
-        if (this.agent.isSessionBusy(sessionId) || this.switching) {
-            this.tui.flash("会话执行中，暂不能重命名");
+        if (this.switching) {
+            this.tui.flash("会话切换中，稍后再试");
             return;
         }
         if (this.renameSessionId === sessionId) return;
@@ -2994,20 +3032,7 @@ export class ChatApp {
             this.tui.flash("标题为空，已取消重命名");
             return;
         }
-        const summary = this.store.sessions.find(session => session.sessionId === sessionId);
-        if (summary?.title === cleanTitle) {
-            this.tui.flash("标题未变化");
-            return;
-        }
-        try {
-            await this.agent.renameSession(sessionId, cleanTitle);
-            if (summary) summary.title = cleanTitle.slice(0, 200);
-            this.renderTabBar();
-            this.syncHerdrMetadata();
-            this.tui.flash(`✎ 标题已更新: ${truncateInline(cleanTitle, 20)}`);
-        } catch (error: any) {
-            this.tui.flash(`⚠️ 重命名失败: ${error.message}`);
-        }
+        await this.applySessionTitle(sessionId, cleanTitle);
     }
 
     /** 流式 delta 高频触发时按帧合并同步，避免每 token 全量重建组件。 */

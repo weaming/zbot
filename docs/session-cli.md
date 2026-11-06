@@ -204,7 +204,8 @@ zbot session show <id> --all --full --json      # 完整历史（原有能力）
 ## 读写规则
 
 - `list` / `show` 只读事件日志，任何时候都能执行，会话正被 TUI 打开也安全。
-- `new` / `rename` / `archive` / `unarchive` / `delete` 要求目标会话**没有被任何实例持有**（控制 socket 无监听者），否则拒绝并提示去持有它的实例里操作。写入在会话锁内完成，避免与 TUI 双写事件序列。
+- `new` / `archive` / `unarchive` / `delete` 要求目标会话**没有被任何实例持有**（控制 socket 无监听者），否则拒绝并提示去持有它的实例里操作。写入在会话锁内完成，避免与 TUI 双写事件序列。
+- `rename` 是例外：标题属于元数据，会话被 TUI/serve 持有时由 CLI 通过控制 socket 交给持有者落盘（回合执行中也允许改），没人持有时才由 CLI 自己写日志。两种路径都会按同一上限截断，`--json` 的 `title` 是真正生效的值。
 - `send` 是唯一要求"有实例持有"的子命令：它通过控制 socket 把消息投递给运行中的会话；不带 `--wait` 时只投递不等结果（结果不会回传），带 `--wait` 时一直等到对方回合终态并把最终输出打到 stdout（`--wait=秒` 才是显式上限，秒数必须写成 `--wait=秒`）。
 - `send` 的正文以 `-` 开头时用 `--` 分隔：`zbot session send <id> -- "-正文"`。
 - 新建的会话不会被认领，等 TUI 打开它才真正开始执行。
@@ -220,9 +221,9 @@ zbot session show <id> --all --full --json      # 完整历史（原有能力）
   `--wait` 成功时是完整结果（`ok` / `text` / `stopReason` / `msgId` / `turnId` / `status` / `source` / `delivered`）。
 - `wait --json`：`sessionId` / `msgId` / `turnId` / `status`（`succeeded` | `failed` | `cancelled`）/ `ok` /
   `content` / `stopReason` / `error` / `source`（`events` | `peer`）/ `waitedMs`。退出码见上文。
-- `rename --json`：`sessionId` / `action:"rename"` / `title`；`archive`/`unarchive`：`action` + `archived`；`delete`：`action:"delete"` / `deleted` / `turns`。
+- `rename --json`：`sessionId` / `action:"rename"` / `title`（生效标题，持有者可能按上限截断）；`archive`/`unarchive`：`action` + `archived`；`delete`：`action:"delete"` / `deleted` / `turns`。
 
-失败时 `--json` 会在 stdout 输出 `{"error":{"code","message",…}}`，`code` 取值：`not_found`（不存在）、`ambiguous`（id 有歧义）、`usage`（参数/用法错误）、`held`（被实例持有或取锁失败）、`no_holder`（无人持有，仅 send）、`busy`（对方执行中）、`unreachable`、`bad_reply`（协议异常）、`peer_failed`（对方回合失败，`partialText` 带部分输出）、`peer_cancelled`（对方回合已取消）、
+失败时 `--json` 会在 stdout 输出 `{"error":{"code","message",…}}`，`code` 取值：`not_found`（不存在）、`ambiguous`（id 有歧义）、`usage`（参数/用法错误）、`held`（被实例持有或取锁失败）、`no_holder`（无人持有，仅 send）、`busy`（对方执行中）、`rename_failed`（持有者拒绝改名，`message` 是原因）、`unreachable`、`bad_reply`（协议异常）、`peer_failed`（对方回合失败，`partialText` 带部分输出）、`peer_cancelled`（对方回合已取消）、
 `wait_timeout`（显式超时）、`wait_lost`（目标消失且没有终态）、`no_turn`（会话还没有回合可等）、
 `interrupted`（Ctrl-C 停止等待）、`failed`（其余）。
 

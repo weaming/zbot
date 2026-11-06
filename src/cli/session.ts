@@ -3,8 +3,9 @@
  *
  * 与 TUI 并存时的安全边界：
  * - 读操作（list / show）只读事件日志，任何时刻可执行；
- * - 写操作（new / rename / archive / unarchive / delete）要求目标会话未被任何实例持有
+ * - 写操作（new / archive / unarchive / delete）要求目标会话未被任何实例持有
  *   （控制 socket 无监听者），并在会话锁内落盘，避免与运行中的 TUI 双写事件序列；
+ * - rename 例外：会话被持有时交给持有者改（控制帧 rename），回合执行中也允许；
  * - send 通过控制 socket 投递给运行中的 TUI 或后台实例；没有持有者时拒绝执行。
  *
  * 输出默认人类可读，`--json` 给结构化数据（供其他 AI 解析）。

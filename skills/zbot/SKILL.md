@@ -57,6 +57,14 @@ description: "用 CLI/HTTP 驱动 zbot 实例：查会话、投递消息并等�
     zbot resume "$ID"                       # 需要人打开一次 TUI 认领（或交给 serve）
     zbot session send "$ID" "修掉 lint 报错，只改必要的文件" --wait
 
+## 改标题（运行时也能改）
+
+    zbot session rename <id> "新标题"
+
+标题是元数据：会话被 TUI/serve 持有时，CLI 通过控制通道交给持有者落盘，回合执行中也能改；
+没人持有时 CLI 自己写日志。`--json` 返回的 `title` 是真正生效的值（上限 200 字）。
+TUI 内的交互式入口是 ⌘R（同样允许在回合执行中使用）。
+
 ## 远程执行 slash 命令
 
 `session send` 的正文**第一个字符就是 `/` 且是完整命令名**时，在目标会话里执行命令并把结果回传（不发给模型）。

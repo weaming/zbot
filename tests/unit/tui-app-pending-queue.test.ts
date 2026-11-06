@@ -1442,6 +1442,29 @@ describe("ChatApp Ctrl+C 快捷键", () => {
         expect((app as any).drafts.get("sess-draft-keep")).toBe("未发送的草稿");
     });
 
+    test("回合执行中也能进重命名（标题是元数据），提交后不吃掉正在跑的回合", async () => {
+        const agent = makeFakeAgent();
+        const store = new ChatStore();
+        const app = new ChatApp(agent as any, store);
+        await app.init();
+        store.currentSessionId = "sess-busy-rename";
+        store.sessions = [{ sessionId: "sess-busy-rename", title: "旧标题", messageCount: 1 }];
+        agent.isSessionBusy = () => true;
+
+        const renamed: Array<{ sessionId: string; title: string }> = [];
+        agent.renameSession = async (sessionId: string, title: string) => {
+            renamed.push({ sessionId, title });
+        };
+
+        await (app as any).beginRename("sess-busy-rename");
+        expect((app as any).editor.getText()).toBe("旧标题");
+        await (app as any).commitRename("sess-busy-rename", "忙时标题");
+
+        expect(renamed).toEqual([{ sessionId: "sess-busy-rename", title: "忙时标题" }]);
+        expect((app as any).tui.flashCalls).toContain("✎ 标题已更新: 忙时标题");
+        expect(store.sessions[0]?.title).toBe("忙时标题");
+    });
+
     test("草稿落盘后重启可恢复", async () => {
         const agent = makeFakeAgent();
         const first = new ChatApp(agent as any, new ChatStore());
