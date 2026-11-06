@@ -48,11 +48,11 @@ export function buildReviewPrompt(extra?: string): string {
     return trimmed ? `${REVIEW_PROMPT}\n\n${trimmed}` : REVIEW_PROMPT;
 }
 
-export const REVIEW_PROMPT = [
-    "Do dev-review-fix loop，until review pass, then commit.",
-    "Reuse same subagent, close(archive) it after review pass.",
-    "Keep content to be reviewed unstaged, stage them after each review, then fix, next review; so each review can read less diff.",
-    "Don't auto start this loop after your commit.",
+export const REVIEW_PROMPT =  [
+    "1. Run a dev → review → fix loop until the review passes, then commit.",
+    "2. Reuse the same subagent across rounds; close (archive) it once the review passes.",
+    "3. Keep changes under review unstaged. After each review, stage them, then fix — so the next review only sees the incremental unstaged diff.",
+    "4. Do not auto-start this loop after committing.",
 ].join("\n");
 
 const TASK_ACTIONS = ["list", "status", "wait", "stop"] as const;
