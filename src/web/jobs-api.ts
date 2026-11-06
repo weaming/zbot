@@ -117,13 +117,13 @@ async function applyToBoundSessions(
 ): Promise<void> {
     for (const sessionId of sessionIds) {
         if (ctx.host.isSessionBusy(sessionId)) {
-            console.warn(`⚠️ [serve] 会话 ${sessionId} 正在执行，跳过${label}`);
+            console.warn(`⚠️ [web] 会话 ${sessionId} 正在执行，跳过${label}`);
             continue;
         }
         try {
             await action(sessionId);
         } catch (error) {
-            console.warn(`⚠️ [serve] ${label}会话失败 ${sessionId}:`, error instanceof Error ? error.message : error);
+            console.warn(`⚠️ [web] ${label}会话失败 ${sessionId}:`, error instanceof Error ? error.message : error);
         }
     }
 }
@@ -456,7 +456,7 @@ export async function handleJobsRoute(
                 if (prompt) {
                     void ctx.host
                         .sendMessage(created.sessionId, prompt)
-                        .catch(error => console.error("[serve] 分支会话回合失败:", error));
+                        .catch(error => console.error("[web] 分支会话回合失败:", error));
                 }
                 return json({ sessionId: created.sessionId }, 201);
             }
@@ -577,7 +577,7 @@ export async function handleJobsRoute(
     } catch (error) {
         if (error instanceof JobNotFoundError) return fail("任务不存在", 404);
         if (error instanceof JobConflictError) return fail(error.message, 409);
-        console.error("[serve] Job 请求处理失败:", error);
+        console.error("[web] Job 请求处理失败:", error);
         return fail("服务端内部错误，详见服务端日志", 500);
     }
 }

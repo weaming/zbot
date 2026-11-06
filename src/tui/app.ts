@@ -2188,7 +2188,7 @@ export class ChatApp {
 
     /** 新建会话但不切换焦点：会话条由 setSessions 触发重绘。 */
     private async createSessionSilently(): Promise<string> {
-        // 与 serve 同一口径：默认选中集（= 配置里没标 lazy 的服务）在建会话时一次写好，
+        // 与 web 同一口径：默认选中集（= 配置里没标 lazy 的服务）在建会话时一次写好，
         // 之后 /mcp 的切换决定下发，执行期不再回头看 lazy 配置
         const { sessionId } = await this.agent.createSession(undefined, {
             selectedServers: defaultMcpSelection(),

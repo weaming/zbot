@@ -6,7 +6,7 @@ import {
     MAIN_CLI_USAGE,
     PRINT_CLI_USAGE,
     RESUME_CLI_USAGE,
-    SERVE_CLI_USAGE,
+    WEB_CLI_USAGE,
     SESSION_CLI_USAGE,
     printCliHelp,
 } from "./help.js";
@@ -41,8 +41,8 @@ describe("printCliHelp", () => {
     });
 
     test("子命令后的 -h / --help 输出对应用法", () => {
-        expect(capture(() => printCliHelp(["serve", "--help"])).output.trim()).toBe(SERVE_CLI_USAGE);
-        expect(capture(() => printCliHelp(["serve", "-h"])).output.trim()).toBe(SERVE_CLI_USAGE);
+        expect(capture(() => printCliHelp(["web", "--help"])).output.trim()).toBe(WEB_CLI_USAGE);
+        expect(capture(() => printCliHelp(["web", "-h"])).output.trim()).toBe(WEB_CLI_USAGE);
         expect(capture(() => printCliHelp(["session", "-h"])).output.trim()).toBe(SESSION_CLI_USAGE);
         expect(capture(() => printCliHelp(["-p", "--help"])).output.trim()).toBe(PRINT_CLI_USAGE);
         expect(capture(() => printCliHelp(["resume", "-h"])).output.trim()).toBe(RESUME_CLI_USAGE);
@@ -51,13 +51,13 @@ describe("printCliHelp", () => {
 
     test("帮助开关出现在参数之后也认", () => {
         expect(capture(() => printCliHelp(["session", "list", "--help"])).output.trim()).toBe(SESSION_CLI_USAGE);
-        expect(capture(() => printCliHelp(["serve", "--port", "1", "-h"])).output.trim()).toBe(SERVE_CLI_USAGE);
+        expect(capture(() => printCliHelp(["web", "--port", "1", "-h"])).output.trim()).toBe(WEB_CLI_USAGE);
         expect(capture(() => printCliHelp(["mcp", "list", "-h"])).output.trim()).toBe(MCP_CLI_USAGE);
         expect(capture(() => printCliHelp(["-p", "写个测试", "--help"])).output.trim()).toBe(PRINT_CLI_USAGE);
     });
 
     test("help <子命令> 也能定位，未知主题回落到总览", () => {
-        expect(capture(() => printCliHelp(["help", "serve"])).output.trim()).toBe(SERVE_CLI_USAGE);
+        expect(capture(() => printCliHelp(["help", "web"])).output.trim()).toBe(WEB_CLI_USAGE);
         expect(capture(() => printCliHelp(["help", "sessions"])).output.trim()).toBe(SESSION_CLI_USAGE);
         expect(capture(() => printCliHelp(["help", "resume"])).output.trim()).toBe(RESUME_CLI_USAGE);
         expect(capture(() => printCliHelp(["help", "mcp"])).output.trim()).toBe(MCP_CLI_USAGE);
@@ -67,7 +67,7 @@ describe("printCliHelp", () => {
     test("只是取值像帮助的普通调用不拦截", () => {
         const cases = [
             [],
-            ["serve", "--port", "9000"],
+            ["web", "--port", "9000"],
             ["-p", "写个测试"],
             ["-p", "help"],
             ["session", "list"],
@@ -121,11 +121,11 @@ describe("用法文本与实现同步", () => {
         return [...new Set([...usage.matchAll(/--[a-z][a-z-]*/g)].map(match => match[0]))].sort();
     }
 
-    test("serve 用法与 parseServeArgs 双向对齐", () => {
-        const implemented = implementedFlags("cli/serve.ts");
+    test("web 用法与 parseWebArgs 双向对齐", () => {
+        const implemented = implementedFlags("cli/web.ts");
 
         expect(implemented.length).toBeGreaterThan(0);
-        expect(documentedFlags(SERVE_CLI_USAGE)).toEqual(implemented);
+        expect(documentedFlags(WEB_CLI_USAGE)).toEqual(implemented);
     });
 
     test("print 用法与 parsePrintArgs 双向对齐", () => {
@@ -138,7 +138,7 @@ describe("用法文本与实现同步", () => {
     });
 
     test("总览列出全部分支入口", () => {
-        for (const entry of ["zbot -p", "zbot resume", "zbot session", "zbot herdr", "zbot serve", "zbot mcp", "zbot help"]) {
+        for (const entry of ["zbot -p", "zbot resume", "zbot session", "zbot herdr", "zbot mcp", "zbot help"]) {
             expect(MAIN_CLI_USAGE).toContain(entry);
         }
     });

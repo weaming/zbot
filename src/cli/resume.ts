@@ -76,7 +76,7 @@ export function resolveResumeId(input: string): string {
 export async function runResumeCli(_args: ResumeArgs): Promise<void> {
     throw new AppError(
         "tui_or_backend_required",
-        "resume -p 已禁用：CLI 不会自行启动模型。请使用 `zbot resume <id>` 打开 TUI 后发送消息，或通过 `zbot serve` 提交后台任务。",
+        "resume -p 已禁用：CLI 不会自行启动模型。请使用 `zbot resume <id>` 打开 TUI 后发送消息。",
     );
 }
 

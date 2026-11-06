@@ -32,7 +32,7 @@ zbot resume <id>                       # 载入旧会话，打开 TUI
 ```
 
 `zbot -p`、`zbot resume <id> -p` 和 `zbot session run` 不再在 CLI 进程内直接执行模型。
-CLI 投递只通过控制通道交给已运行的 TUI/后台持有者；也可通过 `zbot serve` 的任务接口提交后台任务。
+CLI 投递只通过控制通道交给已运行的持有者（TUI，或独立的长驻宿主）。
 
 普通启动 `zbot`（不带参数）每次都会**新建一个空会话**并进入 TUI：新建总是分配新的 ULID，
 不会复用或覆盖上一次的会话；旧会话用 `zbot resume <id>` 或 TUI 的会话面板（⌘P）打开。
@@ -170,7 +170,7 @@ zbot session wait                                       # 当前会话的最近�
 
 `session run` 保留为兼容入口，但会返回 `tui_or_backend_required`，不会创建一次性宿主。
 `zbot -p` 与 `zbot resume <id> -p` 同样拒绝直接执行。要从 CLI 发起回合，目标 session
-必须由 TUI 或后台实例持有，然后用 `session send` 投递；后台独立任务使用 `zbot serve`。
+必须由 TUI（或独立的长驻宿主）持有，然后用 `session send` 投递。
 
 ## 增量读取（show）
 
@@ -195,7 +195,7 @@ zbot session show <id> --all --full --json      # 完整历史（原有能力）
 - 不带 `-p`：载入该会话并打开 TUI。
 - `zbot resume <id> -p`：已禁用，CLI 不会创建一次性宿主执行模型回合；请去掉 `-p` 打开 TUI。
 - `--unarchive`：目标会话已归档时先恢复；缺省拒绝，避免误改归档历史。
-- 恢复前会**不协商地**认领会话。被其他实例（TUI/serve）持有时直接失败，提示改用
+- 恢复前会**不协商地**认领会话。被其他实例（TUI）持有时直接失败，提示改用
   `zbot session send`；不会抢锁造成双写。
 - `id` 规则与 `session` 子命令一致（完整 id / 唯一前缀 / 末几位）。
 
@@ -205,7 +205,7 @@ zbot session show <id> --all --full --json      # 完整历史（原有能力）
 
 - `list` / `show` 只读事件日志，任何时候都能执行，会话正被 TUI 打开也安全。
 - `new` / `archive` / `unarchive` / `delete` 要求目标会话**没有被任何实例持有**（控制 socket 无监听者），否则拒绝并提示去持有它的实例里操作。写入在会话锁内完成，避免与 TUI 双写事件序列。
-- `rename` 是例外：标题属于元数据，会话被 TUI/serve 持有时由 CLI 通过控制 socket 交给持有者落盘（回合执行中也允许改），没人持有时才由 CLI 自己写日志。两种路径都会按同一上限截断，`--json` 的 `title` 是真正生效的值。
+- `rename` 是例外：标题属于元数据，会话被 TUI 持有时由 CLI 通过控制 socket 交给持有者落盘（回合执行中也允许改），没人持有时才由 CLI 自己写日志。两种路径都会按同一上限截断，`--json` 的 `title` 是真正生效的值。
 - `send` 是唯一要求"有实例持有"的子命令：它通过控制 socket 把消息投递给运行中的会话；不带 `--wait` 时只投递不等结果（结果不会回传），带 `--wait` 时一直等到对方回合终态并把最终输出打到 stdout（`--wait=秒` 才是显式上限，秒数必须写成 `--wait=秒`）。
 - `send` 的正文以 `-` 开头时用 `--` 分隔：`zbot session send <id> -- "-正文"`。
 - 新建的会话不会被认领，等 TUI 打开它才真正开始执行。

@@ -16,23 +16,22 @@ export const MAIN_CLI_USAGE = [
     "  zbot resume <id>           载入旧会话并进入 TUI（无 UI 续聊已禁用）",
     "  zbot session <子命令>      会话管理：list/show/new/run/rename/archive/send/wait/queue/delete",
     "  zbot herdr <子命令>        在 herdr 里开新标签页并启动新会话：spawn",
-    "  zbot serve                 启动 Web 任务看板与 HTTP 接口",
     "  zbot mcp <子命令>          配置 MCP 服务：list/add/remove",
     "  zbot help [子命令]         查看用法",
     "",
-    "每个子命令都支持 -h / --help，例如 `zbot serve --help`。",
+    "每个子命令都支持 -h / --help，例如 `zbot session --help`。",
 ].join("\n");
 
-export const SERVE_CLI_USAGE = [
-    "用法：zbot serve [选项]",
+export const WEB_CLI_USAGE = [
+    "用法：zbot web [选项]",
     "",
     "  --port <端口>    监听端口，默认 8787",
     "  --bind <地址>    监听地址，默认 127.0.0.1",
     "  --cwd <目录>     任务与会话的默认工作目录，默认当前目录",
-    "  --token <令牌>   访问令牌；缺省取 ZBOT_SERVE_TOKEN，再取 ~/.zbot/serve/token",
+    "  --token <令牌>   访问令牌；缺省取 ZBOT_WEB_TOKEN，再取 ~/.zbot/web/token",
     "",
     "首次启动生成令牌并落盘（0600）。启动后用浏览器打开 http://127.0.0.1:<端口>/，",
-    "页面壳不需要令牌；数据接口需带 Authorization: Bearer <令牌>（SSE 与图片用 ?token=）。",
+    "页面壳不需要令牌；数据接口（含 SSE 与图片）一律带 Authorization: Bearer <令牌>。",
 ].join("\n");
 
 export const PRINT_CLI_USAGE = [
@@ -40,7 +39,7 @@ export const PRINT_CLI_USAGE = [
     "",
     "CLI 不会在没有 TUI 或后台持有者时直接启动模型回合。",
     "",
-    "请启动 zbot TUI 后用 `zbot session send <id> <文本> --wait`，或通过 `zbot serve` 提交后台任务。",
+    "请启动 zbot TUI 后用 `zbot session send <id> <文本> --wait` 投递任务。",
 ].join("\n");
 
 export const SESSION_CLI_USAGE = [
@@ -111,8 +110,8 @@ const HELP_FLAGS = new Set(["-h", "--help"]);
 
 function usageFor(topic: string): string {
     switch (topic) {
-        case "serve":
-            return SERVE_CLI_USAGE;
+        case "web":
+            return WEB_CLI_USAGE;
         case "-p":
         case "--print":
             return PRINT_CLI_USAGE;

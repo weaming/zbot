@@ -4,10 +4,10 @@
  * 规则表是唯一事实源，测试与命令行共用同一口径：
  * - 引擎层（events / tools / services / control / mcp / skills / types / pricing）
  *   与宿主层（host）、格式化层（format）不得 import 任何前端；
- * - 两个前端（tui / server）互不 import，也都不 import cli；
+ * - 两个前端（tui / web）互不 import，也都不 import cli；
  * - cli 是装配层，允许 import 任意层（唯一的跨层入口）。
- * - 例外是前端入口 `cli/serve.ts`：它装配的是 server 前端，规则按 server 层算，
- *   否则"serve 不碰任何 TUI 组件"就只是口头约定（见 FRONTEND_ENTRY_LAYERS）。
+ * - 例外是前端入口 `cli/web.ts`：它装配的是 web 前端，规则按 web 层算，
+ *   否则"web 入口不碰任何 TUI 组件"就只是口头约定（见 FRONTEND_ENTRY_LAYERS）。
  *
  * 只检查项目内相对 import（`./x`、`../x`），跳过测试文件与外部包。
  */
@@ -17,22 +17,22 @@ import path from "node:path";
 
 /** 层名（src 下一级目录）→ 禁止依赖的层。改这里就是改规则。 */
 const LAYER_RULES: Record<string, string[]> = {
-    events: ["tui", "server", "cli", "host"],
-    tools: ["tui", "server", "cli", "host"],
-    services: ["tui", "server", "cli", "host"],
-    commands: ["tui", "server", "cli", "host"],
-    control: ["tui", "server", "cli"],
-    mcp: ["tui", "server", "cli"],
-    skills: ["tui", "server", "cli"],
-    types: ["tui", "server", "cli", "host"],
-    pricing: ["tui", "server", "cli", "host"],
-    utils: ["tui", "server", "cli", "host"],
-    format: ["tui", "server", "cli", "host"],
-    host: ["tui", "server", "cli"],
+    events: ["tui", "web", "cli", "host"],
+    tools: ["tui", "web", "cli", "host"],
+    services: ["tui", "web", "cli", "host"],
+    commands: ["tui", "web", "cli", "host"],
+    control: ["tui", "web", "cli"],
+    mcp: ["tui", "web", "cli"],
+    skills: ["tui", "web", "cli"],
+    types: ["tui", "web", "cli", "host"],
+    pricing: ["tui", "web", "cli", "host"],
+    utils: ["tui", "web", "cli", "host"],
+    format: ["tui", "web", "cli", "host"],
+    host: ["tui", "web", "cli"],
     /** Job 层依赖宿主执行，但不得反过来被宿主依赖，也不认识任何前端。 */
-    jobs: ["tui", "server", "cli"],
-    tui: ["server"],
-    server: ["tui", "cli"],
+    jobs: ["tui", "web", "cli"],
+    tui: ["web"],
+    web: ["tui", "cli"],
 };
 
 export interface BoundaryViolation {
@@ -46,11 +46,11 @@ export interface BoundaryViolation {
 }
 
 /**
- * 前端入口按对应前端层校验：`cli/serve.ts` 是 server 前端的装配入口，
- * 与 server/ 一样不得反向依赖 tui/ —— 否则"serve 不碰任何 TUI 组件"就没有守卫。
+ * 前端入口按对应前端层校验：`cli/web.ts` 是 web 前端的装配入口，
+ * 与 web/ 一样不得反向依赖 tui/ —— 否则"web 入口不碰任何 TUI 组件"就没有守卫。
  */
 const FRONTEND_ENTRY_LAYERS: Record<string, string> = {
-    "cli/serve.ts": "server",
+    "cli/web.ts": "web",
 };
 
 /** 递归列出源文件，跳过 .d.ts 与测试文件。 */

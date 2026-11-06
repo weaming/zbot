@@ -51,6 +51,6 @@ export async function runPrintCli(argv: string[]): Promise<void> {
     parsePrintArgs(argv);
     throw new AppError(
         "tui_or_backend_required",
-        "CLI 不会在没有 TUI 或后台持有者时直接运行模型。请启动 zbot TUI 后用 `zbot session send <id> <文本> --wait`，或把任务提交到 `zbot serve`。",
+        "CLI 不会在没有 TUI 或后台持有者时直接运行模型。请启动 zbot TUI 后用 `zbot session send <id> <文本> --wait`。",
     );
 }

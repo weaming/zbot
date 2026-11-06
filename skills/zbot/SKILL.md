@@ -1,6 +1,6 @@
 ---
 name: zbot
-description: "用 CLI/HTTP 驱动 zbot 实例：在 herdr 里开新标签页与新会话、查会话、投递消息并等结果、远程执行 slash 命令、用 serve 提交后台任务。当需要让另一个 AI 实例干活（多实例协作）、从脚本给运行中的 zbot 发消息、或无人值守跑长任务时使用。关键词：zbot、herdr spawn、新标签页、session send、session wait、zbot serve、jobs、会话投递、多实例、后台任务。"
+description: "用 CLI/HTTP 驱动 zbot 实例：在 herdr 里开新标签页与新会话、查会话、投递消息并等结果、远程执行 slash 命令。当需要让另一个 AI 实例干活（多实例协作）、从脚本给运行中的 zbot 发消息、或无人值守跑长任务时使用。关键词：zbot、herdr spawn、新标签页、session send、session wait、会话投递、多实例、后台任务。"
 ---
 
 # zbot 操作手册
@@ -8,10 +8,9 @@ description: "用 CLI/HTTP 驱动 zbot 实例：在 herdr 里开新标签页与�
 `zbot`（默认 `~/.bun/bin/zbot`）是终端 AI 助手。**它有两个执行宿主，CLI 只是客户端**：
 
     TUI（人开的窗口）         ── 持有会话、跑模型回合
-    zbot serve（无 UI 常驻）   ── 持有会话、跑任务、跑模型回合
-    zbot session / HTTP 接口   ── 只投递、只读取，自己不跑模型
+    zbot session              ── 只投递、只读取，自己不跑模型
 
-任何「让 zbot 干活」的动作都拆成两步：**找到被持有的会话 → 投递并等结果**；或者 **提交一个 serve job**。
+任何「让 zbot 干活」的动作都拆成两步：**找到被持有的会话 → 投递并等结果**（写操作必须有 TUI 持有）。
 
 ## 硬边界：CLI 不会自己跑模型
 
@@ -19,7 +18,7 @@ description: "用 CLI/HTTP 驱动 zbot 实例：在 herdr 里开新标签页与�
     zbot session run "…"        → tui_or_backend_required
     zbot session send <id> "…"  → no_holder（目标会话没有进程持有）
 
-遇到 `no_holder` 只有两个选择：`zbot resume <id>` 进 TUI 打开它，或用 `zbot serve` 提交任务。
+遇到 `no_holder` 只有一个选择：`zbot resume <id>` 或用 `zbot herdr spawn` 开一个 TUI 认领它。
 不要试图自己 spawn 一次性宿主，这条路被实现禁掉了。
 
 ## 找会话
@@ -73,7 +72,7 @@ spawn 不会归档、也不会让 TUI 退出：回合结束后 pane 里的 zbot 
 
     zbot session rename <id> "新标题"
 
-标题是元数据：会话被 TUI/serve 持有时，CLI 通过控制通道交给持有者落盘，回合执行中也能改；
+标题是元数据：会话被 TUI 持有时，CLI 通过控制通道交给持有者落盘，回合执行中也能改；
 没人持有时 CLI 自己写日志。`--json` 返回的 `title` 是真正生效的值（上限 200 字）。
 TUI 内的交互式入口是 ⌘R（同样允许在回合执行中使用）。
 
@@ -97,41 +96,11 @@ TUI 内的交互式入口是 ⌘R（同样允许在回合执行中使用）。
 - 归档态只接受只读/生命周期命令（`/sessions /keys /skills /help /unarchive /delete`），其余回「先 /unarchive」。
 - `/archive`、`/close`、`/delete` 是**先把结果送达、再释放**，所以能拿到回执。
 
-## 后台任务：zbot serve
-
-    zbot serve --port 8787 --cwd ~/src/project
-    TOKEN=$(cat ~/.zbot/serve/token)        # 首次启动生成，0600
-    AUTH="Authorization: Bearer $TOKEN"
-
-    # 提交任务（只入队，不执行）
-    curl -s -X POST -H "$AUTH" -H 'content-type: application/json' \
-      -d '{"prompt":"修一下 lint 报错","workspace":"'"$HOME"'/src/zbot","title":"lint"}' \
-      http://127.0.0.1:8787/api/jobs
-    # 开始执行（卡片详情里的「开始」）
-    curl -s -X POST -H "$AUTH" http://127.0.0.1:8787/api/jobs/<id>/start
-    # 看状态与执行会话事件
-    curl -s -H "$AUTH" 'http://127.0.0.1:8787/api/jobs?state=queued,running'
-    curl -sN -H "$AUTH" 'http://127.0.0.1:8787/api/jobs/<id>/live?since=0'
-
-直连会话（忙时 409，不排队）：
-
-    curl -s -X POST -H "$AUTH" -H 'content-type: application/json' -d '{"text":"跑测试"}' \
-      http://127.0.0.1:8787/api/sessions/<id>/messages
-    curl -s -X POST -H "$AUTH" -H 'content-type: application/json' \
-      -d '{"text":"补一条","mode":"turn"}' http://127.0.0.1:8787/api/sessions/<id>/inputs
-
-要点：`/api` 一律 Bearer header（`?token=` 已不支持）；`POST /messages` 忙时 409 且不排队，
-想排队走 `/inputs`（`request` = 下次请求前附加，`turn` = 当前回合结束后作为新回合）；
-job 状态机 `queued → leased → running → succeeded/failed/cancelled`，`lost` 是租约过期、**不自动重试**；
-同一 `workspace` 强制串行，并发上限 `ZBOT_JOBS_MAX_CONCURRENT`（默认 2）。
-
 ## 状态目录与配置
 
     ~/.zbot/env                    模型/接口配置（不要 cat 出来，让程序读）
     ~/.zbot/sessions/              会话事件日志（session show 的来源）
     ~/.zbot/current-session.json   当前会话指针
-    ~/.zbot/serve/token            serve 令牌
-    ~/.zbot/serve/db/jobs.sqlite   任务库
     ~/.zbot/mcp-servers.yaml       MCP 配置（zbot mcp list/add/remove 维护）
     ~/.zbot/skills/                用户级技能（优先）
     ~/.agents/skills/              共享技能（同名时被用户级覆盖）
@@ -143,8 +112,8 @@ job 状态机 `queued → leased → running → succeeded/failed/cancelled`，`
 
 | 现象 | 原因与处理 |
 | --- | --- |
-| `tui_or_backend_required` | CLI 不跑模型：开 TUI 或走 serve |
-| `herdr_unavailable` | 不在 herdr pane 内：改用 serve，或手工 `session new` + `resume` |
+| `tui_or_backend_required` | CLI 不跑模型：开 TUI（或 `herdr spawn`）认领会话 |
+| `herdr_unavailable` | 不在 herdr pane 内：手工 `session new` + `resume` |
 | `no_holder` | 会话没人持有：`resume` 打开，或先 `session unarchive` |
 | `queue_full` | 排队已满 8 条：等一会儿，先 `session queue` 看清 |
 | 退出码 2 | 已投递但超时：用 `wait --msg` 续等，别重发 |

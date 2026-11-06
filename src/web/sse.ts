@@ -100,7 +100,7 @@ export function openSseStream(
                 }
             } catch (error) {
                 // 注释帧只放固定文案：错误文本可能含换行，会破坏帧结构
-                console.error(`[serve] ${source.label} 事件回放失败:`, error);
+                console.error(`[web] ${source.label} 事件回放失败:`, error);
                 write(": 回放失败\n\n");
             }
             replaying = false;

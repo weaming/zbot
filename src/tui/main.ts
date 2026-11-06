@@ -31,12 +31,16 @@ const isSessionCli = isSessionCliInvocation(cliArgs);
  */
 const isHelpCli = printCliHelp(cliArgs);
 /**
- * serve 分流用字面量判断而非常量导入：常量导入会把 cli/serve → server/http → host
+ * web 分支用字面量判断而非常量导入：常量导入会把 cli/web → web/http → host
  * 整条静态模块图拉进 TUI 进程，TUI 静态依赖里就会多出 HTTP 前端。
  */
-const isServeCli = cliArgs[0] === "serve";
+const isWebCli = cliArgs[0] === "web";
 /** herdr 分支同样用字面量判断：这条路径只调 herdr CLI 与事件日志，不该拉进 TUI 模块图。 */
 const isHerdrCli = cliArgs[0] === "herdr";
+/**
+ * 已不再对外提供的子命令：明确报错并退出，别让旧脚本静默落到 TUI（非交互环境下会挂住）。
+ */
+const isRemovedCli = cliArgs[0] === "serve";
 
 /**
  * 会话 CRUD 分支：必须在 dotenv 与 configureHostEnvironment 之前分流 ——
@@ -63,13 +67,21 @@ if (isHelpCli) {
         const { writeCliError } = await import("../utils/app-error.js");
         writeCliError(error, cliArgs.includes("--json"));
     }
-} else if (isServeCli) {
-    // 长驻宿主分支：与 TUI 并列，初始化同一套宿主环境后交给 serve 入口，不再进入 TUI。
+} else if (isRemovedCli) {
+    const message = "该子命令已移除：CLI 不启动模型，请用 `zbot session` 投递、`zbot herdr spawn` 开会话";
+    if (cliArgs.includes("--json")) {
+        process.stdout.write(`${JSON.stringify({ error: { code: "subcommand_removed", message } })}\n`);
+    } else {
+        process.stderr.write(`${message}\n`);
+    }
+    process.exitCode = 2;
+} else if (isWebCli) {
+    // 长驻宿主分支：与 TUI 并列，初始化同一套宿主环境后交给 web 入口，不再进入 TUI。
     dotenv.config({ path: envFile, quiet: true });
     configureHostEnvironment();
     try {
-        const { runServe } = await import("../cli/serve.js");
-        await runServe(cliArgs);
+        const { runWeb } = await import("../cli/web.js");
+        await runWeb(cliArgs);
     } catch (error: any) {
         process.stderr.write(`${error?.message ?? error}\n`);
         process.exitCode = 1;
@@ -290,9 +302,9 @@ async function main(): Promise<void> {
 }
 
 // 末尾启动：模块级常量（SHUTDOWN_SIGNALS 等）此时已初始化，main() 不会在 TDZ 里跑。
-// serve 分支自己跑完生命周期（长驻到收到终止信号），CLI 分支跑完就该退出，
+// web 分支自己跑完生命周期（长驻到收到终止信号），CLI 分支跑完就该退出，
 // 都不能再落回 TUI 的 main() —— 否则 `zbot herdr spawn` 会在调用方 pane 里起一个 TUI。
-if (!isHelpCli && !isSessionCli && !isHerdrCli && !isServeCli) {
+if (!isHelpCli && !isSessionCli && !isHerdrCli && !isWebCli && !isRemovedCli) {
     main().catch((error) => {
         console.error(`💥 TUI main() rejected: ${error?.message ?? error}`);
         process.exit(1);

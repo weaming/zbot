@@ -4,7 +4,7 @@
  * 用 AsyncLocalStorage 而不是全局变量：同一进程会并行跑多个任务，
  * 全局变量会把 A 任务的评论写到 B 卡片上。
  *
- * 评论写入器由装配层（serve）注册，tools 层不反向依赖 jobs 层。
+ * 评论写入器由装配层（web）注册，tools 层不反向依赖 jobs 层。
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";

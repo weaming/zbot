@@ -70,7 +70,7 @@ export async function runSessionCli(argv: string[], io: SessionCliIO = {}): Prom
         case "run":
             throw new SessionCliError(
                 "tui_or_backend_required",
-                "session run 不会在 CLI 进程里直接运行模型。请启动 TUI 后使用 `session send`，或通过 `zbot serve` 提交后台任务。",
+                "session run 不会在 CLI 进程里直接运行模型。请启动 TUI 后使用 `session send` 投递。",
             );
     }
 }

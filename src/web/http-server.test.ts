@@ -96,7 +96,7 @@ function event(seq: number, sessionId = "s1"): AgentEvent {
 }
 
 /** 起一个只监听回环、端口由系统分配的实例。 */
-function serve(host: SessionApiHost, heartbeatMs = 60_000): HttpServerHandle {
+function web(host: SessionApiHost, heartbeatMs = 60_000): HttpServerHandle {
     return startHttpServer({ host, port: 0, token: TOKEN, heartbeatMs });
 }
 
@@ -150,7 +150,7 @@ async function waitForListenerCleanup(stub: StubHost): Promise<number> {
 describe("http-server 鉴权与路由", () => {
     test("缺令牌与错误令牌都返回 401，query 令牌可用", async () => {
         const { host } = createStubHost();
-        const handle = serve(host);
+        const handle = web(host);
         try {
             expect((await fetch(`${handle.url}/api/healthz`)).status).toBe(401);
             expect((await fetch(`${handle.url}/api/healthz`)).status).toBe(401);
@@ -173,7 +173,7 @@ describe("http-server 鉴权与路由", () => {
 
     test("未知路径 404，端点清单在 /endpoints", async () => {
         const { host } = createStubHost();
-        const handle = serve(host);
+        const handle = web(host);
         try {
             expect((await call(handle, "/api/nope")).status).toBe(404);
             const endpoints = await call(handle, "/api/endpoints");
@@ -190,7 +190,7 @@ describe("http-server 鉴权与路由", () => {
 describe("http-server 会话接口", () => {
     test("创建会话后立即认领（命令行也能投递）", async () => {
         const { host, calls } = createStubHost();
-        const handle = serve(host);
+        const handle = web(host);
         try {
             const res = await call(handle, "/api/sessions", {
                 method: "POST",
@@ -208,7 +208,7 @@ describe("http-server 会话接口", () => {
 
     test("wait=true 等到回合结束并回结果", async () => {
         const { host, calls } = createStubHost();
-        const handle = serve(host);
+        const handle = web(host);
         try {
             const res = await call(handle, "/api/sessions/s1/messages", {
                 method: "POST",
@@ -226,7 +226,7 @@ describe("http-server 会话接口", () => {
 
     test("未持有时先认领再发消息", async () => {
         const { host, calls } = createStubHost({ claimed: false });
-        const handle = serve(host);
+        const handle = web(host);
         try {
             const res = await call(handle, "/api/sessions/s1/messages", {
                 method: "POST",
@@ -244,7 +244,7 @@ describe("http-server 会话接口", () => {
 
     test("会话被其他实例持有时拒绝投递，不夺权", async () => {
         const { host, calls } = createStubHost({ claimed: false, heldByOther: true });
-        const handle = serve(host);
+        const handle = web(host);
         try {
             const res = await call(handle, "/api/sessions/s1/messages", {
                 method: "POST",
@@ -262,7 +262,7 @@ describe("http-server 会话接口", () => {
 
     test("不带 wait 返回 202，空 text 400，忙时 409", async () => {
         const idle = createStubHost();
-        const idleHandle = serve(idle.host);
+        const idleHandle = web(idle.host);
         try {
             const accepted = await call(idleHandle, "/api/sessions/s1/messages", {
                 method: "POST",
@@ -282,7 +282,7 @@ describe("http-server 会话接口", () => {
         }
 
         const busy = createStubHost({ busy: true });
-        const busyHandle = serve(busy.host);
+        const busyHandle = web(busy.host);
         try {
             const res = await call(busyHandle, "/api/sessions/s1/messages", {
                 method: "POST",
@@ -297,7 +297,7 @@ describe("http-server 会话接口", () => {
 
     test("取消投递到 host", async () => {
         const { host, calls } = createStubHost();
-        const handle = serve(host);
+        const handle = web(host);
         try {
             const res = await call(handle, "/api/sessions/s1/cancel", { method: "POST" });
 
@@ -310,7 +310,7 @@ describe("http-server 会话接口", () => {
 
     test("归档会话发送消息时自动取消归档，再照常入队", async () => {
         const stub = createStubHost({ archived: true });
-        const handle = serve(stub.host);
+        const handle = web(stub.host);
         try {
             const res = await call(handle, "/api/sessions/s-archived/inputs", {
                 method: "POST",
@@ -331,7 +331,7 @@ describe("http-server 会话接口", () => {
 
     test("随时输入：空闲直接开跑，忙则按模式排队并可查询", async () => {
         const idle = createStubHost();
-        const idleHandle = serve(idle.host);
+        const idleHandle = web(idle.host);
         try {
             const res = await call(idleHandle, "/api/sessions/sess-idle/inputs", {
                 method: "POST",
@@ -346,7 +346,7 @@ describe("http-server 会话接口", () => {
         }
 
         const busy = createStubHost({ busy: true });
-        const busyHandle = serve(busy.host);
+        const busyHandle = web(busy.host);
         try {
             const queued = await call(busyHandle, "/api/sessions/sess-busy/inputs", {
                 method: "POST",
@@ -366,7 +366,7 @@ describe("http-server 会话接口", () => {
 describe("http-server 事件流", () => {
     test("events 一次性 JSON 把 since 透传给 host 并按游标过滤", async () => {
         const { host, calls } = createStubHost({ history: [event(1), event(2), event(3)] });
-        const handle = serve(host);
+        const handle = web(host);
         try {
             const res = await call(handle, "/api/sessions/s1/events?since=2");
             const events = await res.json() as AgentEvent[];
@@ -380,7 +380,7 @@ describe("http-server 事件流", () => {
 
     test("since 非整数返回 400", async () => {
         const { host } = createStubHost();
-        const handle = serve(host);
+        const handle = web(host);
         try {
             expect((await call(handle, "/api/sessions/s1/events?since=5abc")).status).toBe(400);
             expect((await call(handle, "/api/sessions/s1/events?since=-1")).status).toBe(400);
@@ -391,7 +391,7 @@ describe("http-server 事件流", () => {
 
     test("Last-Event-ID 头优先于 since", async () => {
         const { host, calls } = createStubHost({ history: [event(1), event(2)] });
-        const handle = serve(host);
+        const handle = web(host);
         try {
             // Last-Event-ID 是游标语义，仍按一次性 JSON 接口验证
             const res = await call(handle, "/api/sessions/s1/events?since=0", {
@@ -408,7 +408,7 @@ describe("http-server 事件流", () => {
 
     test("SSE 帧的 data 省掉 seq 与 sessionId（分别在 id: 行与 URL 里）", async () => {
         const stub = createStubHost({ history: [event(1)] });
-        const handle = serve(stub.host);
+        const handle = web(stub.host);
         try {
             const res = await call(handle, "/api/sessions/s1/live?since=0");
             const frames = openFrameReader(res);
@@ -431,7 +431,7 @@ describe("http-server 事件流", () => {
 
     test("SSE 先回放历史再推增量，且按 seq 去重", async () => {
         const stub = createStubHost({ history: [event(1), event(2)] });
-        const handle = serve(stub.host);
+        const handle = web(stub.host);
         try {
             const res = await call(handle, "/api/sessions/s1/live?since=0");
             expect(res.headers.get("content-type")).toContain("text/event-stream");
@@ -452,7 +452,7 @@ describe("http-server 事件流", () => {
 
     test("时间轴重置时下发 reset 帧并归零游标", async () => {
         const stub = createStubHost({ history: [event(5)] });
-        const handle = serve(stub.host);
+        const handle = web(stub.host);
         try {
             const frames = openFrameReader(await call(handle, "/api/sessions/s1/live?since=0"));
             expect((await frames.read(1))[0]).toContain("id: 5");
@@ -472,7 +472,7 @@ describe("http-server 事件流", () => {
 
     test("空闲时下发心跳帧", async () => {
         const { host } = createStubHost();
-        const handle = serve(host, 20);
+        const handle = web(host, 20);
         try {
             const frames = openFrameReader(await call(handle, "/api/sessions/s1/live?since=0"));
             expect((await frames.read(1))[0]).toContain(": ping");
@@ -484,7 +484,7 @@ describe("http-server 事件流", () => {
 
     test("客户端断开后订阅被清理", async () => {
         const stub = createStubHost();
-        const handle = serve(stub.host, 20);
+        const handle = web(stub.host, 20);
         const abort = new AbortController();
         try {
             const res = await fetch(`${handle.url}/api/sessions/s1/live?since=0`, {
@@ -525,7 +525,7 @@ describe("http-server 事件流", () => {
             return realSetInterval(handler as () => void, timeout);
         }) as typeof globalThis.setInterval);
 
-        const handle = serve(stub.host, 20);
+        const handle = web(stub.host, 20);
         const abort = new AbortController();
         try {
             // 慢回放期间不会发出任何帧，服务端可能迟迟不 flush 响应头，这里不 await 请求本身

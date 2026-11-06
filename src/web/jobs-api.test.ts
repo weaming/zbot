@@ -69,7 +69,7 @@ function stubHost(
     } as unknown as JobsApiHost;
 }
 
-function serve(options: { isBusy?: boolean } = {}): {
+function web(options: { isBusy?: boolean } = {}): {
     handle: HttpServerHandle;
     store: JobStore;
     runner: JobRunner;
@@ -115,7 +115,7 @@ function postBody(body: unknown): RequestInit {
 describe("jobs API 创建", () => {
 
     test("创建只入队不执行，点「开始」才授权调度", async () => {
-        const { handle, store } = serve();
+        const { handle, store } = web();
         try {
             const res = await call(handle, "/api/jobs", postBody({ prompt: "跑测试", workspace: WORKSPACE }));
             const job = await res.json() as { id: string; state: string; input: { autoStart?: boolean } };
@@ -132,7 +132,7 @@ describe("jobs API 创建", () => {
     });
 
     test("拖动卡片不会替用户点「开始」", async () => {
-        const { handle, store } = serve();
+        const { handle, store } = web();
         try {
             const { job } = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } });
             expect(store.get(job.id)?.input.autoStart).toBe(false);
@@ -147,7 +147,7 @@ describe("jobs API 创建", () => {
     });
 
     test("PATCH 可以改工作目录：目录必须存在，只影响之后的会话", async () => {
-        const { handle, store } = serve();
+        const { handle, store } = web();
         try {
             const { job } = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } });
 
@@ -173,7 +173,7 @@ describe("jobs API 创建", () => {
     });
 
     test("创建返回 201 与 queued 任务", async () => {
-        const { handle } = serve();
+        const { handle } = web();
         try {
             const res = await call(handle, "/api/jobs", postBody({ prompt: "跑测试", workspace: WORKSPACE }));
             const job = await res.json() as { id: string; state: string; input: { prompt: string } };
@@ -187,7 +187,7 @@ describe("jobs API 创建", () => {
     });
 
     test("同 idempotencyKey 第二次返回 200 且是同一个任务", async () => {
-        const { handle } = serve();
+        const { handle } = web();
         try {
             const first = await call(handle, "/api/jobs", postBody({ prompt: "跑测试", workspace: WORKSPACE, idempotencyKey: "k1" }));
             const second = await call(handle, "/api/jobs", postBody({ prompt: "跑测试", workspace: WORKSPACE, idempotencyKey: "k1" }));
@@ -203,7 +203,7 @@ describe("jobs API 创建", () => {
     });
 
     test("prompt 缺失 400，工作目录不存在 400", async () => {
-        const { handle } = serve();
+        const { handle } = web();
         try {
             const noPrompt = await call(handle, "/api/jobs", postBody({ workspace: WORKSPACE }));
             expect(noPrompt.status).toBe(400);
@@ -224,7 +224,7 @@ describe("jobs API 创建", () => {
 
 describe("jobs API 查询与取消", () => {
     test("拖拽只改卡片所在列，不碰任务状态", async () => {
-        const { handle, store } = serve();
+        const { handle, store } = web();
         try {
             const job = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } }).job;
 
@@ -244,7 +244,7 @@ describe("jobs API 查询与取消", () => {
     });
 
     test("拖到「已取消」列只是挪卡片，不取消任务", async () => {
-        const { handle, store } = serve();
+        const { handle, store } = web();
         try {
             const job = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } }).job;
 
@@ -260,7 +260,7 @@ describe("jobs API 查询与取消", () => {
     });
 
     test("cancel 端点只改状态，不挪卡片", async () => {
-        const { handle, store } = serve();
+        const { handle, store } = web();
         try {
             const job = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } }).job;
             store.updateInput(job.id, { column: "doing" });
@@ -279,7 +279,7 @@ describe("jobs API 查询与取消", () => {
     });
 
     test("列表按状态过滤，未知状态 400", async () => {
-        const { handle, store } = serve();
+        const { handle, store } = web();
         try {
             store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } });
             const queued = await call(handle, "/api/jobs?state=queued");
@@ -293,7 +293,7 @@ describe("jobs API 查询与取消", () => {
     });
 
     test("查不存在的任务 404", async () => {
-        const { handle } = serve();
+        const { handle } = web();
         try {
             expect((await call(handle, "/api/jobs/nope")).status).toBe(404);
         } finally {
@@ -302,7 +302,7 @@ describe("jobs API 查询与取消", () => {
     });
 
     test("取消排队任务后状态变 cancelled；重复取消 409", async () => {
-        const { handle, store } = serve();
+        const { handle, store } = web();
         try {
             const job = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } }).job;
 
@@ -319,7 +319,7 @@ describe("jobs API 查询与取消", () => {
 
 describe("jobs API 事件流", () => {
     test("列表状态：events 出 JSON、stream 出 SSE", async () => {
-        const { handle, store } = serve();
+        const { handle, store } = web();
         try {
             const job = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } }).job;
             const all = await call(handle, "/api/jobs/events?since=0");
@@ -338,7 +338,7 @@ describe("jobs API 事件流", () => {
     });
 
     test("详情流在任务绑定会话后可读（format=json）", async () => {
-        const { handle, store } = serve();
+        const { handle, store } = web();
         try {
             const job = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } }).job;
             store.attachSession(job.id, "s-1");
@@ -355,7 +355,7 @@ describe("jobs API 事件流", () => {
 describe("jobs API 其它端点", () => {
 
     test("已归档会话改 MCP 选中集：先取消归档，改完再归档回去", async () => {
-        const { handle, store, summaries, calls } = serve();
+        const { handle, store, summaries, calls } = web();
         try {
             const { job } = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } });
             store.attachSession(job.id, "s-run");
@@ -373,7 +373,7 @@ describe("jobs API 其它端点", () => {
     });
 
     test("未归档会话改 MCP 选中集不碰归档态", async () => {
-        const { handle, store, calls } = serve();
+        const { handle, store, calls } = web();
         try {
             const { job } = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } });
             store.attachSession(job.id, "s-run");
@@ -388,7 +388,7 @@ describe("jobs API 其它端点", () => {
     });
 
     test("会话列表带上归档态（归档的会话仍留在列表里）", async () => {
-        const { handle, store, summaries } = serve();
+        const { handle, store, summaries } = web();
         try {
             const { job } = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } });
             store.addSession(job.id, "s-run", "run", 1);
@@ -408,7 +408,7 @@ describe("jobs API 其它端点", () => {
     });
 
     test("归档卡片连带归档它名下的会话", async () => {
-        const { handle, store, archived } = serve();
+        const { handle, store, archived } = web();
         try {
             const { job } = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } });
             store.addSession(job.id, "s-attempt", "attempt", 1);
@@ -423,7 +423,7 @@ describe("jobs API 其它端点", () => {
     });
 
     test("删除卡片连带删除它名下的会话", async () => {
-        const { handle, store, archived, deleted } = serve();
+        const { handle, store, archived, deleted } = web();
         try {
             const { job } = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } });
             store.addSession(job.id, "s-attempt", "attempt", 1);
@@ -440,7 +440,7 @@ describe("jobs API 其它端点", () => {
     });
 
     test("会话正在执行时卡片照常归档，只是跳过该会话", async () => {
-        const { handle, store, archived } = serve({ isBusy: true });
+        const { handle, store, archived } = web({ isBusy: true });
         try {
             const { job } = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } });
             store.addSession(job.id, "s-busy", "attempt", 1);
@@ -454,7 +454,7 @@ describe("jobs API 其它端点", () => {
     });
 
     test("会话正在执行时拒绝删除卡片（不可逆操作不半途而废）", async () => {
-        const { handle, store, deleted } = serve({ isBusy: true });
+        const { handle, store, deleted } = web({ isBusy: true });
         try {
             const { job } = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } });
             store.addSession(job.id, "s-busy", "attempt", 1);
@@ -469,7 +469,7 @@ describe("jobs API 其它端点", () => {
     });
 
     test("/events?limit= 取尾部一页，把 before 与条数交给宿主", async () => {
-        const { handle, store, pages } = serve();
+        const { handle, store, pages } = web();
         try {
             const { job } = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } });
             store.attachSession(job.id, "s-run");
@@ -483,7 +483,7 @@ describe("jobs API 其它端点", () => {
     });
 
     test("/events 的 limit 缺省时保持全量语义；非法值报 400", async () => {
-        const { handle, store, pages } = serve();
+        const { handle, store, pages } = web();
         try {
             const { job } = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } });
             store.attachSession(job.id, "s-run");
@@ -501,7 +501,7 @@ describe("jobs API 其它端点", () => {
     });
 
     test("healthz 带上队列统计", async () => {
-        const { handle, store } = serve();
+        const { handle, store } = web();
         try {
             store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } });
             const res = await call(handle, "/api/healthz");
@@ -515,12 +515,12 @@ describe("jobs API 其它端点", () => {
     });
 
     test("根路径返回界面 HTML，且不需要令牌（否则无法输入令牌）", async () => {
-        const { handle } = serve();
+        const { handle } = web();
         try {
             const res = await fetch(`${handle.url}/`);
             expect(res.status).toBe(200);
             expect(res.headers.get("content-type")).toContain("text/html");
-            // 不缓存：否则重启 serve 后浏览器仍按旧 HTML 渲染，看上去像"改动没生效"
+            // 不缓存：否则重启 web 后浏览器仍按旧 HTML 渲染，看上去像"改动没生效"
             expect(res.headers.get("cache-control")).toBe("no-cache");
             expect(await res.text()).toContain("<title>zbot 任务</title>");
 
@@ -532,7 +532,7 @@ describe("jobs API 其它端点", () => {
     });
 
     test("界面壳公开，但数据接口仍要令牌", async () => {
-        const { handle } = serve();
+        const { handle } = web();
         try {
             expect((await fetch(`${handle.url}/api/jobs`)).status).toBe(401);
             expect((await fetch(`${handle.url}/api/endpoints`)).status).toBe(401);

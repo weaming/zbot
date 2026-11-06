@@ -1,17 +1,17 @@
-# serve 接口
+# web 接口
 
-`zbot serve` 是无 UI 的长驻宿主：它与会话 TUI 各自组装同一个 `SessionHost`，两者互不依赖，可同时运行（会话归属由控制 socket 互斥）。
+`zbot web` 是无 UI 的长驻宿主：它与会话 TUI 各自组装同一个 `SessionHost`，两者互不依赖，可同时运行（会话归属由控制 socket 互斥）。仅供远程开发自用，后续可能移除；命令不在 `zbot help` 总览里宣传。
 
 ## 启动
 
 ```sh
-zbot serve [--port 8787] [--bind 127.0.0.1] [--cwd <目录>] [--token <令牌>]
+zbot web [--port 8787] [--bind 127.0.0.1] [--cwd <目录>] [--token <令牌>]
 ```
 
 - 默认只绑 `127.0.0.1`。
 - `--cwd` 是新建会话与工具的默认基准。
-- 令牌优先级：`--token` > `ZBOT_SERVE_TOKEN` > `~/.zbot/serve/token`（首次启动自动生成，权限 0600）。
-- 任务库位于 `~/.zbot/serve/db/jobs.sqlite`。
+- 令牌优先级：`--token` > `ZBOT_WEB_TOKEN` > `~/.zbot/web/token`（首次启动自动生成，权限 0600）。
+- 任务库位于 `~/.zbot/web/db/jobs.sqlite`。
 - 所有 `/api` 请求带 `Authorization: Bearer <token>`；不再接受 `?token=`（URL 会被缓存、写进历史与反代日志）。
   页面首次进入在输入框里粘贴令牌，存在 localStorage；SSE 与图片都由前端 fetch 带 header 取回。
 - **界面壳不需要令牌**（否则没法在页面里输入令牌）：`GET /` 与 `GET /ui` 公开，页面里输入一次后存 localStorage；
@@ -138,7 +138,7 @@ queued ──► leased ──► running ──► succeeded / failed / cancell
 - **一次性拉取**：`?format=json` 返回 `AgentEvent[]`（与 SSE 的 `data` 同形状），按 `since` 过滤。
 - **不漏不重**：服务端先订阅、后回放，回放期间到达的事件进缓冲，回放结束后按 seq 去重补推。
 - **忙时拒绝**：会话已有回合在跑时 `POST .../messages` 返回 409，不会排队。
-- **不夺权**：会话被其他实例（另一个 TUI / serve）持有时同样返回 409，本服务不做协商式接管。
+- **不夺权**：会话被其他实例（另一个 TUI / web）持有时同样返回 409，本服务不做协商式接管。
 - **202 只代表已受理**：不带 `wait` 时后台执行，失败只写服务端日志；要结果就带 `wait: true`。
 - **回合结果**：`wait: true` 返回 `{ok, aborted}`；`aborted: true` 表示回合被取消（不是失败）。
 - **心跳**：空闲每 15s 发一行 SSE 注释（`: ping`），服务端禁用空闲超时以便长连接停留。

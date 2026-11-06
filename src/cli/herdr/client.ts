@@ -47,8 +47,7 @@ export function readHerdrSpawnContext(
     if (env.HERDR_ENV !== "1") {
         throw new HerdrCliError(
             "herdr_unavailable",
-            "zbot herdr 需要在 herdr 里运行（HERDR_ENV != 1）：请在 herdr pane 内执行，"
-            + "或用 `zbot serve` 提交后台任务",
+            "zbot herdr 需要在 herdr 里运行（HERDR_ENV != 1）：请在 herdr pane 内执行",
             1,
             { herdrEnv: env.HERDR_ENV ?? null },
         );

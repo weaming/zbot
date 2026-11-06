@@ -5,7 +5,7 @@
  *  - 日志按 session 分离到 `sessions/log/<sessionId>.log`（与事件日志同域），
  *    启动阶段写 `startup.log`
  *
- * 宿主（host）与 serve 共用这些文件，所以这里不叫 tui-*；只留在 TUI 侧的
+ * 宿主（host）与 web 共用这些文件，所以这里不叫 tui-*；只留在 TUI 侧的
  * 诊断文件（滚轮日志）标注在各自函数上。
  */
 

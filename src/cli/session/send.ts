@@ -142,7 +142,7 @@ export async function deliverPeerText(input: {
     if (ownership.state === "free") {
         throw new SessionCliError(
             "no_holder",
-            `会话 ${shortSessionId(sessionId)} 没有运行中的 TUI 或后台实例；CLI 不会自行启动模型。请先用 zbot resume ${sessionId} 打开 TUI，或启动 zbot serve。`,
+            `会话 ${shortSessionId(sessionId)} 没有运行中的 TUI 或后台实例；CLI 不会自行启动模型。请先用 zbot resume ${sessionId} 打开 TUI。`,
             1,
             { sessionId, delivered: false },
         );

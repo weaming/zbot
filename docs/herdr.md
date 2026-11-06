@@ -117,8 +117,8 @@ zbot 不是 Herdr 内置 kind，因此以下能力**不**提供：
   Alma 侧也没有公开稳定的 transcript 导入协议（只观察到其按 Herdr `agent_session`
   读取 claude/codex/pi 的会话文件）。zbot 自有 JSONL 事件日志不是这两者认可的格式，
   在格式有公开契约前不臆造。
-- **仅 TUI 上报**：`zbot serve` 是后台宿主，不占用交互 pane，也不上报状态；无 UI 的 `-p`
-  运行已禁用，避免绕过 TUI 或后台宿主直接执行模型回合。
+- **仅 TUI 上报**：只有 TUI 占用 pane 并上报状态；独立的长驻宿主不占交互 pane、也不上报。
+  无 UI 的 `-p` 运行已禁用，避免绕过持有者直接执行模型回合。
 
 ## 验证
 

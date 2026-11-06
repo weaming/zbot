@@ -203,7 +203,7 @@ export default function App() {
             <div className="mx-auto mt-[10dvh] w-[min(420px,92vw)] rounded-xl border border-border bg-panel p-5">
                 <h1 className="text-base font-semibold">输入访问令牌</h1>
                 <p className="mt-1 text-xs text-muted">
-                    令牌在 <code className="rounded bg-col px-1">~/.zbot/serve/token</code>，
+                    令牌在 <code className="rounded bg-col px-1">~/.zbot/web/token</code>，
                     粘贴后记在本机 localStorage；令牌只走 Authorization 请求头，不再出现在 URL 里。
                 </p>
                 <form

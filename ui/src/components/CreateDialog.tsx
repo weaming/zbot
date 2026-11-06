@@ -111,7 +111,7 @@ export function CreateDialog({
                     <DirInput
                         value={workspace}
                         placeholder={
-                            defaultCwd ? `留空用 ${abbreviateHome(defaultCwd, home)}` : "留空用 serve 的 cwd"
+                            defaultCwd ? `留空用 ${abbreviateHome(defaultCwd, home)}` : "留空用服务端 cwd"
                         }
                         onChange={setWorkspace}
                     />

@@ -713,7 +713,7 @@ export class LocalSessionHost implements SessionHost {
         if (init?.selectedServers !== undefined) {
             await this.setSessionLazyMcpServers(sessionId, init.selectedServers);
         }
-        // 标题在这里固化：前端回调只负责展示，无 UI 宿主（peer /new、serve）也不会丢标题
+        // 标题在这里固化：前端回调只负责展示，无 UI 宿主（peer /new、web）也不会丢标题
         if (init?.title?.trim()) await this.renameSession(sessionId, init.title);
         return { sessionId };
     }

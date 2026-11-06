@@ -1,6 +1,6 @@
 /**
  * 分层依赖边界守卫：引擎层与宿主层不得反向依赖前端，
- * 两个前端（tui / server）互不依赖。违规时这里会直接失败并列出方向。
+ * 两个前端（tui / web）互不依赖。违规时这里会直接失败并列出方向。
  */
 
 import path from "node:path";
@@ -35,14 +35,14 @@ test("检查器能检出反向依赖（自测，防止空转）", () => {
     }
 });
 
-test("serve 入口按 server 层校验，不得依赖 tui/", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "zbot-boundary-serve-"));
+test("web 入口按 web 层校验，不得依赖 tui/", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "zbot-boundary-web-"));
     try {
         fs.mkdirSync(path.join(root, "tui"));
         fs.mkdirSync(path.join(root, "cli"));
         fs.writeFileSync(path.join(root, "tui", "terminal-state.ts"), "export const reset = 1;\n");
         fs.writeFileSync(
-            path.join(root, "cli", "serve.ts"),
+            path.join(root, "cli", "web.ts"),
             'import { reset } from "../tui/terminal-state.js";\n',
         );
 
@@ -50,9 +50,9 @@ test("serve 入口按 server 层校验，不得依赖 tui/", () => {
 
         expect(violations).toEqual([
             {
-                file: "cli/serve.ts",
+                file: "cli/web.ts",
                 specifier: "../tui/terminal-state.js",
-                from: "server",
+                from: "web",
                 to: "tui",
             },
         ]);

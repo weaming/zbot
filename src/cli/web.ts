@@ -1,8 +1,8 @@
 /**
- * serve 入口：无 UI 的长驻宿主，把会话能力暴露成 HTTP + SSE。
+ * web 入口：无 UI 的长驻宿主，把会话能力暴露成 HTTP + SSE。
  *
  * 与 TUI 并列：两者各自在进程内组装同一个 host，互不依赖、互不要求对方运行。
- * 这里只做装配（参数、令牌、生命周期），接口语义全部在 server/ 与 host/。
+ * 这里只做装配（参数、令牌、生命周期），接口语义全部在 web/ 与 host/。
  */
 
 import fs from "node:fs";
@@ -11,9 +11,9 @@ import { randomBytes } from "node:crypto";
 import { initializeSessionHostRuntime, LocalSessionHost } from "../host/session-host.js";
 import { JobRunner } from "../jobs/runner.js";
 import { JobStore } from "../jobs/store.js";
-import { pushLiveEnd, pushLiveText, pushLiveThinking } from "../server/live-stream.js";
-import { startHttpServer, type HttpServerHandle } from "../server/http-server.js";
-import { joinInputs, takeInputs } from "../server/pending-inputs.js";
+import { pushLiveEnd, pushLiveText, pushLiveThinking } from "../web/live-stream.js";
+import { startHttpServer, type HttpServerHandle } from "../web/http-server.js";
+import { joinInputs, takeInputs } from "../web/pending-inputs.js";
 import { setJobCommentWriter } from "../tools/job-context.js";
 import { expandHomePath, getStateDir, setStartupToolCwd } from "../utils/runtime-paths.js";
 import { discardPendingInput } from "../utils/tty-input.js";
@@ -28,26 +28,26 @@ const DEFAULT_MAX_CONCURRENT = 2;
 /** 收尾超时：MCP stdio 句柄或残留定时器可能让进程挂住，超时后强制退出。 */
 const SHUTDOWN_FORCE_EXIT_MS = 8_000;
 
-/** serve 生命周期里需要收尾的资源，按依赖顺序排列。 */
-interface ServeResources {
+/** web 生命周期里需要收尾的资源，按依赖顺序排列。 */
+interface WebResources {
     server: HttpServerHandle;
     runner: JobRunner;
     host: LocalSessionHost;
     store: JobStore;
 }
 
-export interface ServeArgs {
+export interface WebArgs {
     port: number;
     bind: string;
     cwd: string;
     token?: string;
 }
 
-export function parseServeArgs(argv: string[]): ServeArgs {
+export function parseWebArgs(argv: string[]): WebArgs {
     // 与 tui/main.ts 的分流字面量保持一致：改一处必须改另一处
-    if (argv[0] !== "serve") throw new Error("parseServeArgs 需要以 serve 作为首个参数");
+    if (argv[0] !== "web") throw new Error("parseWebArgs 需要以 web 作为首个参数");
 
-    const args: ServeArgs = {
+    const args: WebArgs = {
         port: DEFAULT_PORT,
         bind: DEFAULT_BIND,
         cwd: process.cwd(),
@@ -87,23 +87,37 @@ export function parseServeArgs(argv: string[]): ServeArgs {
     return args;
 }
 
+/**
+ * 改名前的状态目录（`~/.zbot/serve`）不再读写，但旧令牌与任务库还在里面：
+ * 启动时提示一次，免得浏览器拿着旧令牌一直 401、旧任务历史看起来凭空消失。
+ */
+function warnLegacyStateDir(): void {
+    const legacyDir = getStateDir("serve");
+    if (!fs.existsSync(legacyDir)) return;
+    process.stderr.write(
+        `提示：检测到旧状态目录 ${legacyDir}（改名前的令牌与任务库），当前已改用 ${getStateDir("web")}。`
+        + "需要旧任务历史就把其中的 db/jobs.sqlite 手工挪过去；不需要就直接删掉该目录，这行提示也会消失。"
+        + "令牌会重新生成，页面需重新粘贴。\n",
+    );
+}
+
 /** 令牌文件：与其它宿主状态同目录，首次启动自动生成，便于本机客户端反复使用。 */
-function serveTokenFile(): string {
-    return getStateDir("serve", "token");
+function webTokenFile(): string {
+    return getStateDir("web", "token");
 }
 
 /**
  * 令牌优先级：命令行 > 环境变量 > 本地文件 > 新生成。
  * 自动生成后落盘（0600），避免每次重启都要求客户端换令牌。
  */
-export function resolveServeToken(explicit?: string): string {
+export function resolveWebToken(explicit?: string): string {
     const fromArg = explicit?.trim();
     if (fromArg) return fromArg;
 
-    const fromEnv = process.env.ZBOT_SERVE_TOKEN?.trim();
+    const fromEnv = process.env.ZBOT_WEB_TOKEN?.trim();
     if (fromEnv) return fromEnv;
 
-    const file = serveTokenFile();
+    const file = webTokenFile();
     try {
         const saved = fs.readFileSync(file, "utf8").trim();
         if (saved) return saved;
@@ -126,13 +140,13 @@ async function flushStdio(): Promise<void> {
 }
 
 async function shutdown(
-    resources: ServeResources,
+    resources: WebResources,
     reason: string,
     exitCode = 0,
 ): Promise<void> {
-    process.stderr.write(`zbot serve 正在停止（${reason}）…\n`);
+    process.stderr.write(`zbot web 正在停止（${reason}）…\n`);
     const forceExit = setTimeout(() => {
-        process.stderr.write("zbot serve 收尾超时，强制退出\n");
+        process.stderr.write("zbot web 收尾超时，强制退出\n");
         process.exit(1);
     }, SHUTDOWN_FORCE_EXIT_MS);
     forceExit.unref();
@@ -147,14 +161,14 @@ async function shutdown(
             resources.store.close();
         } catch (error) {
             exitCode = 1;
-            process.stderr.write(`zbot serve 停止失败：${(error as Error)?.message ?? error}\n`);
+            process.stderr.write(`zbot web 停止失败：${(error as Error)?.message ?? error}\n`);
         }
         await flushStdio();
     } catch {
         // stdio 已断开（EPIPE 等）：不再尝试写，但必须继续退出，否则进程永远停不下来
     } finally {
         // 排空 tty 输入队列：终端探针（背景色 / 设备属性 / 光标位置）的回包可能还躺在
-        // 队列里，serve 从不读 stdin，不排掉的话 shell 恢复后会把它当输入回显成一串 ^[。
+        // 队列里，web 从不读 stdin，不排掉的话 shell 恢复后会把它当输入回显成一串 ^[。
         const discarded = await discardPendingInput();
         if (discarded > 0) {
             process.stderr.write(`排空终端输入队列：丢弃 ${discarded} 字节残留应答\n`);
@@ -175,12 +189,13 @@ function resolveMaxConcurrent(): number {
     return Math.min(parsed, 16);
 }
 
-export async function runServe(argv: string[]): Promise<void> {
-    const args = parseServeArgs(argv);
-    const token = resolveServeToken(args.token);
+export async function runWeb(argv: string[]): Promise<void> {
+    const args = parseWebArgs(argv);
+    const token = resolveWebToken(args.token);
+    warnLegacyStateDir();
 
     // 启动信息走 stderr：stdout 留给需要管道化的机器输出。
-    process.stderr.write(`zbot serve 启动中（cwd=${args.cwd}）\n`);
+    process.stderr.write(`zbot web 启动中（cwd=${args.cwd}）\n`);
 
     // 工作目录是任务基准：工具层（TUI_CWD / startupToolCwd）与新会话默认值必须同一口径。
     process.chdir(args.cwd);
@@ -192,7 +207,7 @@ export async function runServe(argv: string[]): Promise<void> {
     await runtimeReady;
 
     // Job 存储与调度与宿主同进程：租约负责崩溃后判定 lost，队列本身持久化在 SQLite
-    const jobsDbPath = getStateDir("serve", "db", "jobs.sqlite");
+    const jobsDbPath = getStateDir("web", "db", "jobs.sqlite");
     const store = new JobStore({ path: jobsDbPath });
     // agent 在任务里用 job_comment 工具写评论：装配层把工具层的写入意图接到存储上
     setJobCommentWriter(({ jobId, sessionId, body }) => {
@@ -217,7 +232,7 @@ export async function runServe(argv: string[]): Promise<void> {
             .sendMessage(sessionId, joinInputs(queued), {
                 consumePendingMessages: () => takeInputs(sessionId, "request"),
             })
-            .catch(error => console.error(`[serve] 会话 ${sessionId} 追加回合失败:`, error));
+            .catch(error => console.error(`[web] 会话 ${sessionId} 追加回合失败:`, error));
     };
 
     let server: HttpServerHandle;
@@ -232,13 +247,13 @@ export async function runServe(argv: string[]): Promise<void> {
         });
     } catch (error) {
         // 端口被占用等启动失败必须退出：否则进程留着但没监听，调用方以为服务在跑
-        process.stderr.write(`zbot serve 启动失败：${(error as Error)?.message ?? error}\n`);
+        process.stderr.write(`zbot web 启动失败：${(error as Error)?.message ?? error}\n`);
         runner.stop();
         host.close().catch(() => undefined);
         process.exit(1);
     }
-    const resources: ServeResources = { server, runner, host, store };
-    process.stderr.write(`zbot serve 已就绪 ${server.url}\n`);
+    const resources: WebResources = { server, runner, host, store };
+    process.stderr.write(`zbot web 已就绪 ${server.url}\n`);
     process.stderr.write(`任务队列：${jobsDbPath}（并发上限 ${resolveMaxConcurrent()}）\n`);
     process.stderr.write(`访问令牌：${token}\n`);
     // 把宿主的事件流接到实时信号：只有界面要渲染的两类——正在生成的正文、是否在思考。
@@ -274,10 +289,10 @@ export async function runServe(argv: string[]): Promise<void> {
         void shutdown(resources, reason, exitCode);
     };
     process.on("unhandledRejection", reason => {
-        console.error("[serve] 未处理的 Promise 拒绝:", reason);
+        console.error("[web] 未处理的 Promise 拒绝:", reason);
     });
     process.on("uncaughtException", error => {
-        console.error("[serve] 未捕获异常:", error);
+        console.error("[web] 未捕获异常:", error);
         // 非 0 退出码：让 systemd/docker 的失败重启策略能识别这次是崩溃而不是正常停止
         stop("uncaughtException", 1);
     });

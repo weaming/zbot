@@ -41,7 +41,7 @@ Responses API 和 Chat Completions 可使用各自的 `OPENAI_RESPONSES_*` 与 `
 
 从未发过消息的空会话会在退出或 `/close` 时自动删除（有草稿或会话间消息则保留）。
 
-各子命令都支持 `-h` / `--help`（如 `zbot serve --help`）。
+各子命令都支持 `-h` / `--help`（如 `zbot session --help`）。
 
 会话也可以在命令行里增删查改（供其他 AI 或脚本调用）：
 
@@ -54,31 +54,7 @@ Responses API 和 Chat Completions 可使用各自的 `OPENAI_RESPONSES_*` 与 `
 ~/.bun/bin/zbot herdr teardown <id> --tab=<tabId>              # 收尾：归档 + 关掉那个标签页
 ```
 
-CLI 只负责把消息投递给运行中的 TUI 或后台实例，不会在本地无 UI 启动模型回合。
-没有持有者时，请打开 TUI，或通过 `zbot serve` 的任务接口提交后台任务。
+CLI 只负责把消息投递给运行中的 TUI，不会在本地无 UI 启动模型回合。
+没有持有者时，请打开 TUI（或在 herdr 里 `zbot herdr spawn` 开一个）。
 
-也可以常驻成无 UI 宿主，用 HTTP 发布任务、SSE 订阅进度：
-
-```sh
-~/.bun/bin/zbot serve --port 8787 --cwd ~/src/project
-```
-
-```sh
-TOKEN=$(cat ~/.zbot/serve/token)
-curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "content-type: application/json" \
-  -d '{"title":"跑测试"}' http://127.0.0.1:8787/api/sessions
-curl -sN -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8787/api/sessions/<id>/events?since=0"
-```
-
-发布任务并排队执行（服务端负责并发、串行、超时与重试），带一个最小 Web 界面：
-
-```sh
-curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "content-type: application/json" \
-  -d '{"prompt":"修一下 lint 报错","workspace":"'"$HOME"'/src/zbot"}' http://127.0.0.1:8787/api/jobs
-open http://127.0.0.1:8787/
-```
-
-界面首次打开会要求输入令牌（读自 `~/.zbot/serve/token`），之后记在浏览器 localStorage；
-首次打开 `http://127.0.0.1:8787/` 时在页面上粘贴令牌即可（存在本机 localStorage，之后自动带上）。
-
-文档：[会话命令行](docs/session-cli.md)、[serve 接口](docs/serve-api.md)、[MCP 多服务配置](docs/mcp.md)、[TUI 链接与终端交互](docs/tui-links.md)、[Herdr 集成](docs/herdr.md)。
+文档：[会话命令行](docs/session-cli.md)、[MCP 多服务配置](docs/mcp.md)、[TUI 链接与终端交互](docs/tui-links.md)、[Herdr 集成](docs/herdr.md)。

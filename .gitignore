@@ -14,5 +14,5 @@ env.*
 dist-pack/
 
 # Web 界面构建产物（bun run build:ui 生成）
-src/server/.ui-dist/
+src/web/.ui-dist/
 dist-ui/

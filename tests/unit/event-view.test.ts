@@ -4,7 +4,7 @@
 
 import { describe, expect, test } from "bun:test";
 import type { AgentEvent } from "../../src/events/agent-events.js";
-import { toSessionEventView, toSessionEventViews } from "../../src/server/event-view.js";
+import { toSessionEventView, toSessionEventViews } from "../../src/web/event-view.js";
 
 function event(type: string, payload: Record<string, unknown>, seq = 1): AgentEvent {
     return { seq, ts: "2026-10-30T00:00:00.000Z", sessionId: "s1", type, payload } as unknown as AgentEvent;

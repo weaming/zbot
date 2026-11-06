@@ -205,13 +205,13 @@ export function startHttpServer(options: HttpServerOptions): HttpServerHandle {
             if (segments.length === 0 || segments[0] === "ui") {
                 if (req.method !== "GET") return fail("不支持的方法", 405);
                 if (!jobs) return fail("Job 接口未启用", 404);
-                // 单页内联：没有静态资源、没有构建产物，随 serve 一起分发
+                // 单页内联：没有静态资源、没有构建产物，随 web 一起分发
                 return new Response(renderUiPage(), {
                     headers: {
                         "content-type": "text/html; charset=utf-8",
                         "x-content-type-options": "nosniff",
-                        // 界面随 serve 一起分发，重启即换新；没有这个头时浏览器会按启发式
-                        // 缓存整页 HTML，重启 serve 后仍显示旧界面，排查时极易误判
+                        // 界面随 web 一起分发，重启即换新；没有这个头时浏览器会按启发式
+                        // 缓存整页 HTML，重启 web 后仍显示旧界面，排查时极易误判
                         "cache-control": "no-cache",
                     },
                 });
@@ -248,7 +248,7 @@ export function startHttpServer(options: HttpServerOptions): HttpServerHandle {
             ];
 
             if (apiPath.length === 0 || apiPath[0] === "endpoints") {
-                return json({ name: "zbot serve", prefix: "/api", endpoints });
+                return json({ name: "zbot web", prefix: "/api", endpoints });
             }
 
             if (apiPath[0] === "healthz") {
@@ -256,7 +256,7 @@ export function startHttpServer(options: HttpServerOptions): HttpServerHandle {
                 return json({
                     ok: true,
                     pid: process.pid,
-                    // 新建任务的默认工作目录：TUI_CWD 就是 serve 启动时定的任务基准
+                    // 新建任务的默认工作目录：TUI_CWD 就是 web 启动时定的任务基准
                     // （用原始入参而不是 chdir 后的值，macOS 上 /tmp 会被解析成 /private/tmp）
                     cwd: process.env.TUI_CWD ?? process.cwd(),
                     // 界面用它把 home 前缀缩成 ~（只影响展示，数据仍是绝对路径）
@@ -385,7 +385,7 @@ export function startHttpServer(options: HttpServerOptions): HttpServerHandle {
                     const turn = host.sendMessage(sessionId, text);
                     if (body?.wait !== true) {
                         // 202 只代表已受理：后台失败只落日志
-                        turn.catch(error => console.error(`[serve] 会话 ${sessionId} 回合失败:`, error));
+                        turn.catch(error => console.error(`[web] 会话 ${sessionId} 回合失败:`, error));
                         return json({ accepted: true, sessionId }, 202);
                     }
                     try {
@@ -442,7 +442,7 @@ export function startHttpServer(options: HttpServerOptions): HttpServerHandle {
                                 consumePendingMessages: () => takeInputs(sessionId, "request"),
                             });
                             turn.catch(error =>
-                                console.error(`[serve] 会话 ${sessionId} 回合失败:`, error),
+                                console.error(`[web] 会话 ${sessionId} 回合失败:`, error),
                             );
                             return json({ started: true, queued: false, mode, unarchived, pending: pendingStats(sessionId) }, 202);
                         }
@@ -456,7 +456,7 @@ export function startHttpServer(options: HttpServerOptions): HttpServerHandle {
                             void host.steerResponse?.(sessionId, text, () => {
                                 if (pendingInput) removeInput(sessionId, pendingInput, mode);
                             }).catch(error => {
-                                console.error(`[serve] 会话 ${sessionId} steer 失败，保留待发消息:`, error);
+                                console.error(`[web] 会话 ${sessionId} steer 失败，保留待发消息:`, error);
                             });
                         }
                         return json({ started: false, queued: true, mode, unarchived, pending: pendingStats(sessionId) }, 202);
@@ -468,7 +468,7 @@ export function startHttpServer(options: HttpServerOptions): HttpServerHandle {
             } catch (error) {
                 const mapped = mapHostError(error);
                 if (mapped) return mapped;
-                console.error("[serve] 请求处理失败:", error);
+                console.error("[web] 请求处理失败:", error);
                 // 只回通用文案：内部错误信息可能带会话 id、路径等实现细节
                 return fail("服务端内部错误，详见服务端日志", 500);
             }

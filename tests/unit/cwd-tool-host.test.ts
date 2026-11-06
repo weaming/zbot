@@ -6,8 +6,8 @@ import path from "node:path";
 /**
  * cwd 工具的宿主能力测试：落盘入口由宿主自己装配，不靠前端注入。
  *
- * 反例就是无 UI 的 `zbot serve`：它没有 TUI，若落盘入口只由前端注入，
- * 工具在 serve 里只能回「当前运行模式不支持切换会话目录」。
+ * 反例就是无 UI 的长驻宿主：它没有 TUI，若落盘入口只由前端注入，
+ * 工具在那边只能回「当前运行模式不支持切换会话目录」。
  */
 
 const { LocalSessionHost } = await import("../../src/host/session-host.js");
