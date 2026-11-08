@@ -52,7 +52,7 @@ export const REVIEW_PROMPT =  [
     "1. Run a dev → review → fix loop until the review passes, then commit.",
     "2. Reuse the same subagent across rounds; close (archive) it once the review passes.",
     "3. Keep changes under review unstaged. After each review, stage them, then fix — so the next review only sees the incremental unstaged diff.",
-    "4. Do not auto-start this loop after committing.",
+    "4. Do not auto-start this loop for next dev after committing.",
 ].join("\n");
 
 const TASK_ACTIONS = ["list", "status", "wait", "stop"] as const;
