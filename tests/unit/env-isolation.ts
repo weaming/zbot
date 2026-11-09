@@ -8,6 +8,8 @@ import { beforeEach } from "bun:test";
 delete process.env.CONTEXT_WINDOW_TOKENS;
 delete process.env.ZBOT_IDENTITY_FILE;
 delete process.env.ZBOT_EXTRA_IDENTITY_FILE;
+// shell 工具会给子进程注入「所属会话」；测试若继承它，CLI 用例的「当前会话」会指到外面那个会话。
+delete process.env.ZBOT_SESSION_ID;
 
 // 宿主机可能本身跑在 herdr pane 里；测试若继承 HERDR_ENV，ChatApp 会真的向那个 pane
 // 上报状态/元数据，把用户的 agent 状态改掉。测试进程一律视为不在 herdr 内。
@@ -31,6 +33,7 @@ process.env.ZBOT_STATE_DIR = testStateDir;
 beforeEach(() => {
     if (process.env.ZBOT_STATE_DIR === undefined) process.env.ZBOT_STATE_DIR = testStateDir;
     if (process.env.ZBOT_TOKENIZER === undefined) process.env.ZBOT_TOKENIZER = "off";
+    if (process.env.ZBOT_SESSION_ID !== undefined) delete process.env.ZBOT_SESSION_ID;
 });
 
 process.on("exit", () => {

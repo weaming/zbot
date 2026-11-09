@@ -26,6 +26,7 @@ import {
 import { listOwnership, probeOwnership, type PeerOwnership } from "./registry.js";
 import { PeerServer } from "./server.js";
 import type { SessionOrigin } from "../types/session.js";
+import { isSameSession } from "../utils/session-id.js";
 
 /** `session_send` 的失败原因：只有 unreachable 表示目标不在线，busy 由调用方决定是否重试。 */
 export type PeerSendError = "unreachable" | "busy" | "queue_full" | "internal";
@@ -408,7 +409,7 @@ export class SessionControl {
             messageId?: string;
         } = {},
     ): Promise<PeerSendOutcome> {
-        if (from === to) throw new PeerSendFailure("internal", "不能给自己发消息");
+        if (isSameSession(from, to)) throw new PeerSendFailure("internal", "不能给自己发消息");
         if (this.closingSpawned.has(to)) {
             throw new PeerSendFailure("busy", `会话 ${to} 正在取消/关闭，请稍后重试`);
         }

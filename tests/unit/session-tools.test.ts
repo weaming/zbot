@@ -555,6 +555,39 @@ describe("session_send", () => {
             __sessionId: SESSIONS[0]!.sessionId,
         });
         expect(result.isError).toBe(true);
+        expect(result.content[0]?.text).toContain("就是你所在的会话");
+        expect(accepted.length).toBe(0);
+        expect(outbound.length).toBe(0);
+    });
+
+    test("末几位短 id 与大小写变体同样算自己：不会投递", async () => {
+        await control.claim(SESSIONS[0]!.sessionId);
+        for (const alias of [SESSIONS[0]!.sessionId.slice(-8), SESSIONS[0]!.sessionId.toLowerCase()]) {
+            const result = await tool("session_send").execute({
+                session: alias,
+                text: "自问自答",
+                __sessionId: SESSIONS[0]!.sessionId,
+            });
+            expect(result.isError).toBe(true);
+            expect(result.content[0]?.text).toContain("就是你所在的会话");
+        }
+        expect(accepted.length).toBe(0);
+        expect(outbound.length).toBe(0);
+    });
+
+    test("目标 id 的大小写写法不影响投递（解析回目录里的完整 id）", async () => {
+        await control.claim(SESSIONS[0]!.sessionId);
+        await control.claim(SESSIONS[1]!.sessionId);
+
+        const result = await tool("session_send").execute({
+            session: SESSIONS[1]!.sessionId.toLowerCase(),
+            text: "把日志读一遍",
+            __sessionId: SESSIONS[0]!.sessionId,
+        });
+
+        expect(result.isError).toBeUndefined();
+        expect(result.content[0]?.text).toContain(SESSIONS[1]!.sessionId.slice(-8));
+        expect(outbound[0]?.to).toBe(SESSIONS[1]!.sessionId);
     });
 
     test("wait_seconds 命中时结果直接作为工具结果返回，且不入队", async () => {

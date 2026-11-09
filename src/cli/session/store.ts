@@ -44,10 +44,13 @@ export function eventFileMtime(sessionId: string): string | undefined {
 export function resolveSessionIdFrom(input: string, savedIds: string[]): string {
     const trimmed = input.trim();
     if (!trimmed) throw new SessionCliError("usage", "需要会话 id");
-    if (savedIds.includes(trimmed)) return trimmed;
+    // 比对一律按大写口径：ULID 是 Crockford Base32，大小写写法的都是同一个会话
+    const wanted = trimmed.toUpperCase();
+    const exact = savedIds.find(sessionId => sessionId.toUpperCase() === wanted);
+    if (exact) return exact;
 
-    const prefix = savedIds.filter(sessionId => sessionId.startsWith(trimmed));
-    const suffix = savedIds.filter(sessionId => sessionId.endsWith(trimmed));
+    const prefix = savedIds.filter(sessionId => sessionId.toUpperCase().startsWith(wanted));
+    const suffix = savedIds.filter(sessionId => sessionId.toUpperCase().endsWith(wanted));
 
     // 前缀与后缀各命中一个但指向不同会话时同样算歧义，不能悄悄取前缀
     const candidates = [...new Set([...prefix, ...suffix])];
@@ -117,14 +120,15 @@ export async function resolveCurrentSessionId(): Promise<string> {
 
 /**
  * send 的目标解析：另一实例刚派生、还没落任何事件的会话不在磁盘上，
- * 只要给的是完整 ULID 就按原样交给控制通道判定可达性（与 session_send 工具一致）。
+ * 只要给的是完整 ULID（大小写写法都认，统一成大写）就交给控制通道判定可达性。
  */
 export async function resolveSendTarget(input: string): Promise<string> {
+    // 完整 ULID 统一成大写下法，避免大小写差异被当成另一个会话投递
     const trimmed = input.trim();
     try {
         return await resolveSessionId(trimmed);
     } catch (error) {
-        if (isUlid(trimmed)) return trimmed;
+        if (isUlid(trimmed.toUpperCase())) return trimmed.toUpperCase();
         throw error;
     }
 }
@@ -172,4 +176,3 @@ export async function withSessionLockFree<T>(sessionId: string, run: () => Promi
         return run();
     });
 }
-

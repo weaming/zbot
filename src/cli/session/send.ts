@@ -6,7 +6,7 @@ import { PeerConnectError, PeerConnection } from "../../control/client.js";
 import { getSocketPath } from "../../control/paths.js";
 import { createPeerMessage, type PeerResult } from "../../control/protocol.js";
 import { probeOwnership } from "../../control/registry.js";
-import { shortSessionId } from "../../utils/session-id.js";
+import { isSameSession, shortSessionId } from "../../utils/session-id.js";
 import { SessionCliError, usageError } from "./args.js";
 import type { QueueCommand, SendCommand } from "./args.js";
 import type { SessionCliIO } from "./io.js";
@@ -138,6 +138,17 @@ export async function deliverPeerText(input: {
     expectResult?: boolean;
 }): Promise<DeliveredPeerText> {
     const { sessionId, text } = input;
+    // 会话内的 shell 会带上所属会话 id：投给自己只会把消息塞回自己的收件箱，直接拒绝
+    const ownSessionId = process.env.ZBOT_SESSION_ID?.trim();
+    if (ownSessionId && isSameSession(ownSessionId, sessionId)) {
+        throw new SessionCliError(
+            "self_target",
+            `会话 ${shortSessionId(sessionId)} 就是你所在的会话，不能给自己发消息`,
+            1,
+            { sessionId, delivered: false },
+        );
+    }
+
     const ownership = await probeOwnership(sessionId);
     if (ownership.state === "free") {
         throw new SessionCliError(

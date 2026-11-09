@@ -557,6 +557,22 @@ describe("同进程直投", () => {
         await control.claim("a");
         await expect(control.send("a", "a", "自问自答")).rejects.toBeInstanceOf(PeerSendFailure);
     });
+
+    test("同一会话的短 id / 大小写变体也算自己", async () => {
+        const control = makeControl(makeHost());
+        const self = "01JAAAAAAAAAAAAAAAAAAAAAA1";
+        await control.claim(self);
+        for (const alias of [self.slice(-8), self.toLowerCase()]) {
+            await expect(control.send(self, alias, "自问自答")).rejects.toThrow(/不能给自己发消息/);
+        }
+    });
+
+    test("过短的尾串不当成自己：按普通目标处理（不可达）", async () => {
+        const control = makeControl(makeHost());
+        const self = "01JAAAAAAAAAAAAAAAAAAAAAA1";
+        await control.claim(self);
+        await expect(control.send(self, "AA1", "hi")).rejects.toThrow(/不可达/);
+    });
 });
 
 describe("跨进程投递", () => {

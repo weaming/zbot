@@ -17,7 +17,7 @@ import {
 } from "../control/channel.js";
 import { describeOwnership } from "../control/registry.js";
 import { isCancelledStopReason } from "../control/protocol.js";
-import { shortSessionId } from "../utils/session-id.js";
+import { isSameSession, isUlid, shortSessionId } from "../utils/session-id.js";
 import {
     getPeerResultHistory,
     getSessionControl,
@@ -205,6 +205,9 @@ const sessionSendTool: ExecutableTool = {
 
         const resolved = await resolveSessionId(target, {}, args.__sessionId);
         if (!resolved.ok) return err(resolved.error);
+        if (isSameSession(resolved.sessionId, from)) {
+            return err(`会话 ${shortSessionId(from)} 就是你所在的会话，不能给自己发消息：直接在本轮输出即可`);
+        }
 
         const waitSeconds = normalizeWaitSeconds(args.wait_seconds);
         const expectResult = args.expect_result === true || waitSeconds > 0;
@@ -390,6 +393,9 @@ const sessionWakeTool: ExecutableTool = {
         if (!directory?.wake) return err("当前环境未提供唤醒归档会话的能力（仅在 TUI 内可用）");
         const resolved = await resolveSessionId(target, { includeArchived: true }, args.__sessionId);
         if (!resolved.ok) return err(resolved.error);
+        if (isSameSession(resolved.sessionId, args.__sessionId)) {
+            return err(`会话 ${shortSessionId(resolved.sessionId)} 就是你所在的会话，不需要唤醒自己`);
+        }
 
         try {
             await directory.wake(resolved.sessionId);
@@ -499,28 +505,37 @@ async function recentResultLines(sessionId: string): Promise<string[]> {
     return ["", `最近结果（来自 ${peer} · ${latest.createdAt} · ${status}）：`, latest.text];
 }
 
-/** 把末几位 id 补全为完整会话 id；匹配不到时用原文（可能是尚未列入目录的会话）。 */
+/**
+ * 把末几位 id 补全为完整会话 id；匹配不到时用原文（可能是尚未列入目录的会话）。
+ * 比对按大写口径（ULID 是 Crockford Base32），返回的始终是目录里的原样 id。
+ */
 async function resolveSessionId(
     input: string,
     options: { includeArchived?: boolean } = {},
     caller?: string,
 ): Promise<{ ok: true; sessionId: string } | { ok: false; error: string }> {
     const directory = getSessionDirectory(caller);
-    if (!directory) return { ok: true, sessionId: input };
+    if (!directory) return { ok: true, sessionId: canonicalFallback(input) };
 
+    const wanted = input.toUpperCase();
     const entries = await directory.list({ includeArchived: options.includeArchived === true });
-    const exact = entries.find(entry => entry.sessionId === input);
+    const exact = entries.find(entry => entry.sessionId.toUpperCase() === wanted);
     if (exact) return { ok: true, sessionId: exact.sessionId };
 
-    const matched = entries.filter(entry => entry.sessionId.endsWith(input));
+    const matched = entries.filter(entry => entry.sessionId.toUpperCase().endsWith(wanted));
     if (matched.length === 0) {
         // 目录里没有：可能是别的实例刚建的会话，按原样尝试，由通道给出不可达错误
-        return { ok: true, sessionId: input };
+        return { ok: true, sessionId: canonicalFallback(input) };
     }
     if (matched.length > 1) {
         return { ok: false, error: `会话 ${input} 匹配到多个候选，请写更长的 id` };
     }
     return { ok: true, sessionId: matched[0]!.sessionId };
+}
+
+/** 目录里查不到时的兜底：完整 ULID 统一成大写，避免大小写写法落到另一个 socket 上。 */
+function canonicalFallback(input: string): string {
+    return isUlid(input.toUpperCase()) ? input.toUpperCase() : input;
 }
 
 export const SESSION_TOOLS: ExecutableTool[] = [

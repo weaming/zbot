@@ -87,6 +87,10 @@ async function executeLocal(options: ShellRunOptions): Promise<string> {
 
   const env = buildExecutionEnv();
 
+  // 子进程里的 `zbot session …` 需要知道「我属于哪个会话」，才能拒绝把消息发给自己
+  if (sessionId) env.ZBOT_SESSION_ID = sessionId;
+  else delete env.ZBOT_SESSION_ID;
+
   if (shouldEnableProxy(command, enableProxy) && PROXY_URL) {
     env.HTTP_PROXY = PROXY_URL;
     env.HTTPS_PROXY = PROXY_URL;

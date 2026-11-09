@@ -49,6 +49,23 @@ test("bash 工具缺少 cwd 或目录不存在时直接报错", async () => {
     expect(notExist.content[0].text).toContain("目录不存在");
 });
 
+test("bash 工具把所属会话 id 注入 ZBOT_SESSION_ID，无会话上下文时不留继承值", async () => {
+    const sessionId = "01JSHELLINJECT000000000001";
+    const inside = await executeShellTool.execute({
+        command: "printf '%s' \"$ZBOT_SESSION_ID\"",
+        cwd: CWD,
+        __sessionId: sessionId,
+    });
+    expect(inside.isError).toBeUndefined();
+    expect(inside.content[0].text).toBe(sessionId);
+
+    const outside = await executeShellTool.execute({
+        command: "printf '%s' \"${ZBOT_SESSION_ID:-none}\"",
+        cwd: CWD,
+    });
+    expect(outside.content[0].text).toBe("none");
+});
+
 test("bash 工具可在前台执行时通过任务管理器转入后台", async () => {
     const sessionId = `execute-shell-background-${Date.now()}`;
     const runPromise = executeShellTool.execute({ command: "sleep 10", cwd: CWD, __sessionId: sessionId });

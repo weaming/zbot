@@ -115,6 +115,7 @@ TUI 内的交互式入口是 ⌘R（同样允许在回合执行中使用）。
 | `tui_or_backend_required` | CLI 不跑模型：开 TUI（或 `herdr spawn`）认领会话 |
 | `herdr_unavailable` | 不在 herdr pane 内：手工 `session new` + `resume` |
 | `no_holder` | 会话没人持有：`resume` 打开，或先 `session unarchive` |
+| `self_target` | 目标就是自己所在的会话：换一个会话 id，本轮的结论直接输出即可 |
 | `queue_full` | 排队已满 8 条：等一会儿，先 `session queue` 看清 |
 | 退出码 2 | 已投递但超时：用 `wait --msg` 续等，别重发 |
 | 退出码 130 | 只是停止等待，目标回合仍在跑 |

@@ -130,6 +130,8 @@ zbot session wait                                       # 当前会话的最近�
   FIFO 排队（`--queue`/默认、`--expires`、`--cancel`、msgId 幂等），不另建队列。
 - **目标会话无人持有**（进程退出、归档后释放）时，`send` 返回 `no_holder`，不会本地接管或启动模型。
   先用 `zbot resume <id>` 在 TUI 打开会话；归档态用 `zbot session unarchive <id>` 解档后再恢复。
+- **不能发给自己**：会话内的 shell 由工具注入 `ZBOT_SESSION_ID`（所属会话），`send` 解析到同一个会话时
+  直接返回 `self_target`，不投递也不排队（末几位短 id、大小写变体同样算自己）。
 - 归档态会话只接受只读/生命周期命令（白名单见下表 `归档` 列），且**不写目标时间线**：
   往 `session_archived` 之后追加任何事件都会把它悄悄解除归档。其余命令回明确错误
   「先 `/unarchive`」。
@@ -223,7 +225,7 @@ zbot session show <id> --all --full --json      # 完整历史（原有能力）
   `content` / `stopReason` / `error` / `source`（`events` | `peer`）/ `waitedMs`。退出码见上文。
 - `rename --json`：`sessionId` / `action:"rename"` / `title`（生效标题，持有者可能按上限截断）；`archive`/`unarchive`：`action` + `archived`；`delete`：`action:"delete"` / `deleted` / `turns`。
 
-失败时 `--json` 会在 stdout 输出 `{"error":{"code","message",…}}`，`code` 取值：`not_found`（不存在）、`ambiguous`（id 有歧义）、`usage`（参数/用法错误）、`held`（被实例持有或取锁失败）、`no_holder`（无人持有，仅 send）、`busy`（对方执行中）、`rename_failed`（持有者拒绝改名，`message` 是原因）、`unreachable`、`bad_reply`（协议异常）、`peer_failed`（对方回合失败，`partialText` 带部分输出）、`peer_cancelled`（对方回合已取消）、
+失败时 `--json` 会在 stdout 输出 `{"error":{"code","message",…}}`，`code` 取值：`not_found`（不存在）、`ambiguous`（id 有歧义）、`usage`（参数/用法错误）、`held`（被实例持有或取锁失败）、`no_holder`（无人持有，仅 send）、`self_target`（目标就是自己所在的会话）、`busy`（对方执行中）、`rename_failed`（持有者拒绝改名，`message` 是原因）、`unreachable`、`bad_reply`（协议异常）、`peer_failed`（对方回合失败，`partialText` 带部分输出）、`peer_cancelled`（对方回合已取消）、
 `wait_timeout`（显式超时）、`wait_lost`（目标消失且没有终态）、`no_turn`（会话还没有回合可等）、
 `interrupted`（Ctrl-C 停止等待）、`failed`（其余）。
 
