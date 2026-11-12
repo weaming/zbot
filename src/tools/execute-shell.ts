@@ -10,6 +10,7 @@ import { backgroundTaskManager, type BackgroundTaskSummary } from "./background-
 import { buildExecutionEnv } from "../utils/skill-env.js";
 import { getNetworkProxy } from "../utils/proxy.js";
 import { getToolCwd } from "../utils/runtime-paths.js";
+import { rewriteShellCommand } from "./shell-rtk.js";
 
 const DEFAULT_COMMAND_TIMEOUT_SECONDS = 120;
 const MIN_TIMEOUT_SECONDS = 1;
@@ -103,8 +104,10 @@ async function executeLocal(options: ShellRunOptions): Promise<string> {
     Object.assign(env, extraEnvs);
   }
 
+  const executionCommand = await rewriteShellCommand(command, cwd, env, signal);
   const handle = backgroundTaskManager.startShell({
     command,
+    executionCommand,
     cwd,
     env,
     shellPath: SHELL_PATH,
@@ -133,7 +136,7 @@ async function executeLocal(options: ShellRunOptions): Promise<string> {
 
   if (result.exitCode !== 0) {
     const exitDesc = result.exitCode !== null ? `exit code ${result.exitCode}` : `signal ${result.signalName}`;
-    const detail = stderr.trim() || stdout.trim();
+    const detail = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n\n");
     throw new Error(detail ? `Command failed with ${exitDesc}: ${detail}` : `Command failed with ${exitDesc}`);
   }
 
@@ -163,7 +166,7 @@ function formatDetachedTask(task: BackgroundTaskSummary): string {
 
 export const executeShellTool: ExecutableTool = {
   name: "bash",
-  description: "Execute a shell command inside the container (where zbot runs). Uses /bin/bash when available, otherwise /bin/sh. `cwd` is required: it accepts ~ for HOME, a path relative to the current session cwd (see the cwd tool), or an absolute path, and must be an existing directory. The default 120-second timeout moves long-running commands to the background; use background_task to inspect or stop them.",
+  description: "Execute a shell command inside the container (where zbot runs). Uses /bin/bash when available, otherwise /bin/sh. Simple git and plain bun test commands are automatically optimized with RTK when available; bun test supports paths, -t/--test-name-pattern and --timeout, while other options keep raw execution. Set envs.RTK_DISABLED=1 to keep raw output. `cwd` is required: it accepts ~ for HOME, a path relative to the current session cwd (see the cwd tool), or an absolute path, and must be an existing directory. The default 120-second timeout moves long-running commands to the background; use background_task to inspect or stop them.",
   tags: ["core", "code"],
   inputSchema: {
     type: "object",

@@ -15,6 +15,7 @@ type BackgroundTaskStatus = "running" | "completed" | "failed" | "stopped" | "ti
 
 interface ShellProcessOptions {
     command: string;
+    executionCommand?: string;
     cwd: string;
     env: NodeJS.ProcessEnv;
     shellPath: string;
@@ -131,7 +132,7 @@ class BackgroundTaskManager {
     }
 
     startShell(options: ShellProcessOptions): ShellProcessHandle {
-        const child = spawn(options.shellPath, ["-c", options.command], {
+        const child = spawn(options.shellPath, ["-c", options.executionCommand ?? options.command], {
             cwd: options.cwd,
             env: options.env,
             detached: true,

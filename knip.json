@@ -17,7 +17,8 @@
     "!src/web/.ui-dist/**"
   ],
   "ignoreBinaries": [
-    "pbpaste"
+    "pbpaste",
+    "rtk"
   ],
   "ignoreDependencies": [
     "@effect/language-service"
