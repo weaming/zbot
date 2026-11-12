@@ -171,9 +171,9 @@ zbot session wait                                       # 当前会话的最近�
 
 ## 无 TUI 的执行边界
 
-`session run` 保留为兼容入口，但会返回 `tui_or_backend_required`，不会创建一次性宿主。
-`zbot -p` 与 `zbot resume <id> -p` 同样拒绝直接执行。要从 CLI 发起回合，目标 session
-必须由 TUI（或独立的长驻宿主）持有，然后用 `session send` 投递。
+CLI 进程不执行模型回合：`session run`、`zbot -p`、`zbot resume <id> -p` 一律返回
+`tui_or_backend_required`；无人持有时 `send` 返回 `no_holder`，也不会临时接管。
+要从 CLI 发起回合，目标 session 必须由 TUI（或独立的长驻宿主）持有，再用 `session send` 投递。
 
 ## 增量读取（show）
 
@@ -196,7 +196,7 @@ zbot session show <id> --all --full --json      # 完整历史（原有能力）
 `zbot resume <id>` 用于「进入」已有会话，而不是新建：
 
 - 不带 `-p`：载入该会话并打开 TUI。
-- `zbot resume <id> -p`：已禁用，CLI 不会创建一次性宿主执行模型回合；请去掉 `-p` 打开 TUI。
+- `zbot resume <id> -p`：已禁用，返回 `tui_or_backend_required`；请去掉 `-p` 打开 TUI。
 - `--unarchive`：目标会话已归档时先恢复；缺省拒绝，避免误改归档历史。
 - 恢复前会**不协商地**认领会话。被其他实例（TUI）持有时直接失败，提示改用
   `zbot session send`；不会抢锁造成双写。
