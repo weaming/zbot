@@ -6,6 +6,7 @@ import {
     buildConversationHistory,
     buildSystemPrompt,
     formatChatProviderError,
+    getChatApiSettings,
     buildSystemPrompt,
     validateChatApiSettings,
 } from "../../src/services/chat-runtime.js";
@@ -13,7 +14,7 @@ import { setEmbeddedIdentity } from "../../src/skills/base-skill.js";
 import { skillRegistry } from "../../src/skills/skill-registry.js";
 import { appendCompletedTurn, getSessionContextHistory } from "../../src/utils/conversation-history.js";
 import type { Session } from "../../src/types/session.js";
-import { useTmpStateDir, type TmpStateDir } from "./test-env.js";
+import { isolateModelEnv, useTmpStateDir, type TmpStateDir } from "./test-env.js";
 import { toolCatalog } from "../../src/tools/tool-catalog.js";
 
 let tmpDir: string;
@@ -359,6 +360,34 @@ describe("chat provider settings", () => {
             model: "model",
         })).toContain("OPENAI_BASE_URL");
 
+    });
+
+    test("密钥写成 $NAME 时取被引用的环境变量", () => {
+        const restore = isolateModelEnv();
+        process.env.ZBOT_TEST_KEY_TARGET = "sk-referenced";
+        process.env.OPENAI_CHAT_API_KEY = "$ZBOT_TEST_KEY_TARGET";
+        process.env.OPENAI_CHAT_MODEL = "gpt-5";
+        try {
+            const settings = getChatApiSettings();
+
+            expect(settings.apiKey).toBe("sk-referenced");
+            expect(validateChatApiSettings(settings)).toBeUndefined();
+        } finally {
+            delete process.env.ZBOT_TEST_KEY_TARGET;
+            restore();
+        }
+    });
+
+    test("引用落空时报错点明指向的变量", () => {
+        const restore = isolateModelEnv();
+        process.env.OPENAI_CHAT_API_KEY = "${ZBOT_TEST_KEY_MISSING}";
+        process.env.OPENAI_CHAT_MODEL = "gpt-5";
+        try {
+            expect(validateChatApiSettings(getChatApiSettings()))
+                .toContain("OPENAI_CHAT_API_KEY=$ZBOT_TEST_KEY_MISSING 引用的环境变量 ZBOT_TEST_KEY_MISSING 未设置");
+        } finally {
+            restore();
+        }
     });
 
     test("将限流错误转换为可操作提示", () => {

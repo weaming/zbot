@@ -6,6 +6,7 @@
  */
 
 import { DecisionProvider, type ProviderOptions } from "./provider.js";
+import { readEnvValue } from "../utils/env-ref.js";
 
 /** 指定 Liquid 决策模型的环境变量，覆盖其默认模型。 */
 export const LIQUID_MODEL_ENV = "LIQUID_MODEL";
@@ -37,8 +38,8 @@ function resolveModel(
 
 /** 从环境变量取密钥，缺失时给出明确错误而不是发出匿名请求。 */
 function requireKey(envName: string, explicit?: string): string {
-    const value = explicit ?? process.env[envName];
-    if (!value) {
+    const value = explicit ?? readEnvValue(envName);
+    if (!value?.trim()) {
         throw new Error(`缺少 API 密钥：请设置 ${envName} 或显式传入 apiKey`);
     }
     return value;

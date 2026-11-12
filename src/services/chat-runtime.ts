@@ -31,6 +31,7 @@ import { getModelPreferencesFile } from "../utils/state-paths.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { countTextTokens } from "../utils/tokenizer.js";
 import { createHash } from "node:crypto";
+import { describeBrokenEnvReference, readEnvValue } from "../utils/env-ref.js";
 export { closeResponsesSession as closeChatSessionTransport } from "../tools/orchestrator/responses-session.js";
 export { deleteResponsesBaseline } from "../tools/orchestrator/responses-baseline.js";
 export { steerResponsesSession as steerChatSession } from "../tools/orchestrator/responses-session.js";
@@ -201,6 +202,8 @@ export function validateChatApiSettings(settings: ChatApiSettings): string | und
         const keyName = settings.protocol === "responses"
             ? "OPENAI_RESPONSES_API_KEY"
             : "OPENAI_CHAT_API_KEY";
+        const brokenRef = describeBrokenEnvReference(keyName) ?? describeBrokenEnvReference("OPENAI_API_KEY");
+        if (brokenRef) return `API 密钥不可用：${brokenRef}`;
         return `缺少 ${keyName} 或 OPENAI_API_KEY（本地或局域网服务可省略）`;
     }
 
@@ -318,9 +321,9 @@ export function getChatApiSettings(sessionSelection?: ChatModelSelection): ChatA
         option.protocol === requestedOption.protocol && option.model === requestedOption.model,
     ) ? requestedOption : undefined;
     const activeProtocol = activeOption?.protocol ?? protocol;
-    const activeProfileApiKey = activeProtocol === "responses"
-        ? process.env.OPENAI_RESPONSES_API_KEY
-        : process.env.OPENAI_CHAT_API_KEY;
+    const activeProfileApiKey = readEnvValue(activeProtocol === "responses"
+        ? "OPENAI_RESPONSES_API_KEY"
+        : "OPENAI_CHAT_API_KEY");
     const activeProfileApiBase = activeProtocol === "responses"
         ? process.env.OPENAI_RESPONSES_BASE_URL
         : process.env.OPENAI_CHAT_BASE_URL;
@@ -329,7 +332,7 @@ export function getChatApiSettings(sessionSelection?: ChatModelSelection): ChatA
         : process.env.OPENAI_CHAT_EFFORTS);
 
     return {
-        apiKey: activeProfileApiKey || process.env.OPENAI_API_KEY || "",
+        apiKey: activeProfileApiKey || readEnvValue("OPENAI_API_KEY") || "",
         apiBase: activeProfileApiBase || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
         model: activeOption?.model || profileModel || legacyModel,
         protocol: activeProtocol,
@@ -348,7 +351,7 @@ function parseCommaList(value?: string): string[] {
 function profileHasSettings(protocol: ChatApiProtocol): boolean {
     const prefix = protocol === "responses" ? "OPENAI_RESPONSES" : "OPENAI_CHAT";
     return [
-        process.env[`${prefix}_API_KEY`],
+        readEnvValue(`${prefix}_API_KEY`),
         process.env[`${prefix}_BASE_URL`],
         process.env[`${prefix}_MODEL`],
         process.env[`${prefix}_MODELS`],

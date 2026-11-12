@@ -28,6 +28,8 @@ OPENAI_CHAT_EFFORTS=
 
 云端服务需要填写 `OPENAI_API_KEY`。如果 `OPENAI_BASE_URL` 指向本机或局域网地址，可以留空或省略密钥。
 
+密钥可以只写引用，真值留在进程环境：`OPENAI_CHAT_API_KEY=$MY_DEEPSEEK_KEY` 或 `${MY_DEEPSEEK_KEY}` 会取同名环境变量的值（可链式引用），env 文件里就不必出现明文。被引用的变量未设置时按未配置处理，报错会点明断在哪一环。
+
 旧的共享 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` 配置始终按 Chat Completions 使用。Responses API 请配置 `OPENAI_RESPONSES_*`；Chat Completions 可使用 `OPENAI_CHAT_*`。独立协议配置中的 API Key 和 Base URL 未填写时会回退到共享的 `OPENAI_*` 值。`*_MODEL` 设置默认模型，`*_MODELS` 可用逗号配置多个可切换模型；默认模型也会出现在候选列表中。上例展示 DeepSeek 配置；若两种协议共用密钥，也可只填写共享的 `OPENAI_API_KEY`。
 
 只配置一套专属协议时会自动使用该配置；两套都配置且未设置全局默认时，初始使用 Chat Completions。通过 TUI 的 `/model` 可以选择协议和模型，并设置全局默认。DeepSeek 支持两种协议，两者 Base URL 均为 `https://api.deepseek.com`（不带 `/v1`）；兼容服务需实现所选协议。
