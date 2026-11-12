@@ -40,3 +40,18 @@ export function restoreEnv(name: string, value: string | undefined): void {
         process.env[name] = value;
     }
 }
+
+/**
+ * 清空与模型/会话相关的进程环境，返回还原函数。
+ *
+ * 配置已全面迁到 config.yaml（见 env-isolation.ts 的删除清单），这里只需处理
+ * 用例自己会设置的运行期变量；preload 已删过一次，本函数保证单文件直跑也一致。
+ */
+export function isolateModelEnv(): () => void {
+    const names = ["ZBOT_STATE_DIR", "ZBOT_CONFIG_FILE", "ZBOT_SESSION_ID", "TUI_CWD"];
+    const saved = new Map(names.map(name => [name, process.env[name]]));
+    for (const name of names) delete process.env[name];
+    return () => {
+        for (const [name, value] of saved) restoreEnv(name, value);
+    };
+}

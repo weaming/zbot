@@ -59,10 +59,15 @@ delete process.env.HERDR_ENV;
 delete process.env.HERDR_BIN_PATH;
 delete process.env.HERDR_PANE_ID;
 
+/** 兜底配置的句柄：必须留着，用例结束 restore 时才能删掉临时目录而不留悬空路径。 */
+let defaultTestConfigHandle: { dir: string; file: string; restore: () => void };
+
 // 兜底配置：任何用例都不该读到宿主机 ~/.zbot/config.yaml。
 // 单测默认关掉真实分词器（runtime.tokenizer: false），真实分词的精度与回退由
 // tests/unit/tokenizer.test.ts 单独覆盖。
-process.env.ZBOT_CONFIG_FILE = useConfig(defaultTestConfig()).file;
+// 用过的用例必须 restore：临时目录一删，后续 reloadConfig() 就会读到不存在的文件
+defaultTestConfigHandle = useConfig(defaultTestConfig());
+process.env.ZBOT_CONFIG_FILE = defaultTestConfigHandle.file;
 reloadConfig();
 
 // 宿主 shell 常导出 ZBOT_STATE_DIR（如 ~/.zbot），直接用会写到真实状态目录；
@@ -76,7 +81,8 @@ process.env.ZBOT_STATE_DIR = testStateDir;
 beforeEach(() => {
     if (process.env.ZBOT_STATE_DIR === undefined) process.env.ZBOT_STATE_DIR = testStateDir;
     if (process.env.ZBOT_CONFIG_FILE === undefined) {
-        process.env.ZBOT_CONFIG_FILE = useConfig(defaultTestConfig()).file;
+        defaultTestConfigHandle = useConfig(defaultTestConfig());
+        process.env.ZBOT_CONFIG_FILE = defaultTestConfigHandle.file;
     }
     reloadConfig();
     if (process.env.ZBOT_SESSION_ID !== undefined) delete process.env.ZBOT_SESSION_ID;
@@ -85,6 +91,7 @@ beforeEach(() => {
 process.on("exit", () => {
     try {
         fs.rmSync(testStateDir, { recursive: true, force: true });
+        fs.rmSync(defaultTestConfigHandle.dir, { recursive: true, force: true });
     } catch {
         // 清理失败不影响测试结果
     }

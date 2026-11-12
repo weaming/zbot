@@ -4,26 +4,34 @@ import os from "os";
 import path from "path";
 import { EventLog } from "./event-log.js";
 import {
-    ARCHIVE_RETENTION_ENV,
     cleanupArchivedSessions,
     DEFAULT_ARCHIVE_RETENTION_DAYS,
     resolveRetentionDays,
     sessionArtifactPaths,
 } from "./session-cleanup.js";
 import { getSessionsDir } from "../utils/runtime-paths.js";
+import { defaultTestConfig, useConfig } from "../../tests/unit/test-config.js";
 
 let tmpDir: string;
 let savedEnv: Record<string, string | undefined> = {};
+let restoreConfig: () => void;
+
+/** 重写一份只改保留期的配置并生效，用于校验配置驱动的分支。 */
+function useRetentionConfig(days: number): void {
+    restoreConfig();
+    restoreConfig = useConfig(defaultTestConfig({ runtime: { tokenizer: false, memoryUserId: 0, archiveRetentionDays: days } }))
+        .restore;
+}
 
 beforeAll(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zbot-cleanup-"));
     savedEnv = {
         ZBOT_STATE_DIR: process.env.ZBOT_STATE_DIR,
         TUI_CWD: process.env.TUI_CWD,
-        [ARCHIVE_RETENTION_ENV]: process.env[ARCHIVE_RETENTION_ENV],
     };
     process.env.ZBOT_STATE_DIR = tmpDir;
     delete process.env.TUI_CWD;
+    restoreConfig = useConfig(defaultTestConfig()).restore;
 });
 
 afterAll(() => {
@@ -32,11 +40,11 @@ afterAll(() => {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
     }
+    restoreConfig();
 });
 
 beforeEach(() => {
     fs.rmSync(path.join(tmpDir, "sessions"), { recursive: true, force: true });
-    delete process.env[ARCHIVE_RETENTION_ENV];
 });
 
 /** 造一个会话，按给定事件序列落盘，并把全部落点的 mtime 调到指定时间。 */
@@ -94,20 +102,27 @@ function daysAgo(days: number): Date {
 
 describe("resolveRetentionDays", () => {
     it("默认 14 天", () => {
-        expect(resolveRetentionDays({})).toBe(DEFAULT_ARCHIVE_RETENTION_DAYS);
+        expect(resolveRetentionDays()).toBe(DEFAULT_ARCHIVE_RETENTION_DAYS);
         expect(DEFAULT_ARCHIVE_RETENTION_DAYS).toBe(14);
     });
 
-    it("环境变量覆盖，0 与负数表示不清理", () => {
-        expect(resolveRetentionDays({ [ARCHIVE_RETENTION_ENV]: "3" })).toBe(3);
-        expect(resolveRetentionDays({ [ARCHIVE_RETENTION_ENV]: "1.9" })).toBe(1);
-        expect(resolveRetentionDays({ [ARCHIVE_RETENTION_ENV]: "0" })).toBe(0);
-        expect(resolveRetentionDays({ [ARCHIVE_RETENTION_ENV]: "-5" })).toBe(-5);
+    it("显式天数取整，0 与负数表示不清理", () => {
+        expect(resolveRetentionDays(3)).toBe(3);
+        expect(resolveRetentionDays(1.9)).toBe(1);
+        expect(resolveRetentionDays(0)).toBe(0);
+        expect(resolveRetentionDays(-5)).toBe(-5);
     });
 
     it("非法值回退默认", () => {
-        expect(resolveRetentionDays({ [ARCHIVE_RETENTION_ENV]: "abc" })).toBe(DEFAULT_ARCHIVE_RETENTION_DAYS);
-        expect(resolveRetentionDays({ [ARCHIVE_RETENTION_ENV]: "  " })).toBe(DEFAULT_ARCHIVE_RETENTION_DAYS);
+        expect(resolveRetentionDays(Number.NaN)).toBe(DEFAULT_ARCHIVE_RETENTION_DAYS);
+        expect(resolveRetentionDays(Number.POSITIVE_INFINITY)).toBe(DEFAULT_ARCHIVE_RETENTION_DAYS);
+    });
+
+    it("缺省取配置里的 runtime.archiveRetentionDays", () => {
+        useRetentionConfig(3);
+        expect(resolveRetentionDays()).toBe(3);
+        useRetentionConfig(0);
+        expect(resolveRetentionDays()).toBe(0);
     });
 });
 
@@ -207,10 +222,10 @@ describe("cleanupArchivedSessions", () => {
         expect(result.removed).toEqual([]);
     });
 
-    it("环境变量控制保留期", async () => {
+    it("保留期取自配置", async () => {
         await makeSession("five-days", [{ type: "session_archived", ts: daysAgo(5).toISOString() }], daysAgo(5));
 
-        process.env[ARCHIVE_RETENTION_ENV] = "3";
+        useRetentionConfig(3);
         const expired = await cleanupArchivedSessions();
         expect(expired.retentionDays).toBe(3);
         expect(expired.removed).toEqual(["five-days"]);
