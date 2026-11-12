@@ -16,7 +16,7 @@ zbot herdr spawn "只读复审这次改动" --title "复审" --cwd ~/src/neta-ap
 - `--title` 与 `--cwd` **必填**：标题同时是新标签页的默认标签（要分开写就用 `--label`），
   目录决定标签页与会话的 cwd（相对路径按调用方 cwd 解析）。不给就报 `usage`，不猜。
 - 位置参数是首条用户输入；不给就只建标签页与会话。
-- `ZBOT_STATE_DIR` / `ZBOT_ENV_FILE` 会通过 `herdr tab create --env` 转发给新 pane：
+- `ZBOT_STATE_DIR` / `ZBOT_CONFIG_FILE` 会通过 `herdr tab create --env` 转发给新 pane：
   新 pane 继承的是 herdr server 的环境，不转发会读到另一个状态目录。
 - 默认 `--no-focus`：不抢调用方焦点；要切过去加 `--focus`。
 - 等新 TUI 认领会话（`--ready-timeout=秒`，默认 30）后才投递首条输入，**投递成功即返回**，不等回合结果。

@@ -28,7 +28,7 @@ export const WEB_CLI_USAGE = [
     "  --port <端口>    监听端口，默认 8787",
     "  --bind <地址>    监听地址，默认 127.0.0.1",
     "  --cwd <目录>     任务与会话的默认工作目录，默认当前目录",
-    "  --token <令牌>   访问令牌；缺省取 ZBOT_WEB_TOKEN，再取 ~/.zbot/web/token",
+    "  --token <令牌>   访问令牌；缺省取配置里的 web.token，再取 ~/.zbot/web/token",
     "",
     "首次启动生成令牌并落盘（0600）。启动后用浏览器打开 http://127.0.0.1:<端口>/，",
     "页面壳不需要令牌；数据接口（含 SSE 与图片）一律带 Authorization: Bearer <令牌>。",

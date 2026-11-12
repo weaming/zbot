@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseWebArgs, resolveWebToken } from "./web.js";
+import { defaultTestConfig, useConfig } from "../../tests/unit/test-config.js";
 
 describe("parseWebArgs", () => {
     test("缺省监听回环与默认端口", () => {
@@ -32,36 +33,34 @@ describe("parseWebArgs", () => {
 describe("resolveWebToken 优先级", () => {
     let stateDir: string;
     let savedEnv: string | undefined;
-    let savedToken: string | undefined;
+    let restoreConfig: (() => void) | undefined;
 
     beforeEach(() => {
         stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "zbot-web-token-"));
         savedEnv = process.env.ZBOT_STATE_DIR;
-        savedToken = process.env.ZBOT_WEB_TOKEN;
         process.env.ZBOT_STATE_DIR = stateDir;
-        delete process.env.ZBOT_WEB_TOKEN;
     });
 
     afterEach(() => {
         fs.rmSync(stateDir, { recursive: true, force: true });
         if (savedEnv === undefined) delete process.env.ZBOT_STATE_DIR;
         else process.env.ZBOT_STATE_DIR = savedEnv;
-        if (savedToken === undefined) delete process.env.ZBOT_WEB_TOKEN;
-        else process.env.ZBOT_WEB_TOKEN = savedToken;
+        restoreConfig?.();
+        restoreConfig = undefined;
     });
 
-    test("参数优先于环境变量", () => {
-        process.env.ZBOT_WEB_TOKEN = "from-env";
+    test("参数优先于配置", () => {
+        restoreConfig = useConfig(defaultTestConfig({ web: { token: "from-config" } })).restore;
 
         expect(resolveWebToken("from-arg")).toBe("from-arg");
     });
 
-    test("环境变量优先于文件", () => {
+    test("配置里的 token 优先于文件", () => {
         fs.mkdirSync(path.join(stateDir, "web"), { recursive: true });
         fs.writeFileSync(path.join(stateDir, "web", "token"), "from-file\n");
-        process.env.ZBOT_WEB_TOKEN = "from-env";
+        restoreConfig = useConfig(defaultTestConfig({ web: { token: "from-config" } })).restore;
 
-        expect(resolveWebToken()).toBe("from-env");
+        expect(resolveWebToken()).toBe("from-config");
     });
 
     test("无配置时生成并落盘，二次调用复用同一令牌", () => {

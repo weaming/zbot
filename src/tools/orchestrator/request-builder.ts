@@ -164,13 +164,7 @@ export function buildRequestBody(options: BuildRequestBodyOptions): Record<strin
     return body;
 }
 
-/** 会话级设置 → 环境变量默认值的读取顺序（目前散在 app 与 orchestrator 两处）。 */
-export function resolveEffort(
-    sessionEffort: string | undefined,
-    env: Record<string, string | undefined> = process.env,
-): string | undefined {
-    return sessionEffort
-        ?? env.REASONING_EFFORT
-        ?? env.OPENAI_REASONING_EFFORT
-        ?? env.DEEPSEEK_REASONING_EFFORT;
+/** 会话级设置优先；没设就交给上游默认（配置里的 defaults.reasoningEffort 由调用方先并进来）。 */
+export function resolveEffort(sessionEffort: string | undefined): string | undefined {
+    return sessionEffort;
 }

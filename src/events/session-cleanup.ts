@@ -2,7 +2,7 @@
  * 归档会话的磁盘回收：已归档、且超过保留期的会话，整份目录一起删除。
  *
  * 只删已归档的会话 —— 未归档的会话用户随时可能继续，不参与清理。
- * 保留期默认 14 天，`ZBOT_ARCHIVE_RETENTION_DAYS` 可覆盖；<= 0 表示不清理。
+ * 保留期默认 14 天，config.yaml 的 runtime.archiveRetentionDays 可覆盖；<= 0 表示不清理。
  */
 
 import fs from "fs";
@@ -12,12 +12,10 @@ import { getResponsesBaselineFile } from "../utils/state-paths.js";
 import { clearCurrentSessionPointerIf } from "../utils/session-pointer.js";
 import { sanitizeSessionId } from "../utils/session-id.js";
 import { isInjectedContext, type AgentEvent } from "./agent-events.js";
+import { getRuntimeConfig } from "../config/index.js";
 
 /** 保留期默认值：归档后超过这么多天即删除。 */
 export const DEFAULT_ARCHIVE_RETENTION_DAYS = 14;
-
-/** 环境变量：覆盖保留天数。 */
-export const ARCHIVE_RETENTION_ENV = "ZBOT_ARCHIVE_RETENTION_DAYS";
 
 /**
  * 单个会话在 sessions/ 下占用的全部落点（子目录 + 文件），与 deleteSession 的清理
@@ -60,16 +58,9 @@ export async function removeSessionArtifacts(
     await clearCurrentSessionPointerIf(sessionId);
 }
 
-/** 从环境变量解析保留天数；未设置用默认值，非法值告警后回退默认值。 */
-export function resolveRetentionDays(env: NodeJS.ProcessEnv = process.env): number {
-    const raw = env[ARCHIVE_RETENTION_ENV];
-    if (raw === undefined || raw.trim() === "") return DEFAULT_ARCHIVE_RETENTION_DAYS;
-    const days = Number(raw);
-    if (!Number.isFinite(days)) {
-        console.warn(`⚠️ [cleanup] ${ARCHIVE_RETENTION_ENV}=${raw} 不是数字，按默认 ${DEFAULT_ARCHIVE_RETENTION_DAYS} 天处理`);
-        return DEFAULT_ARCHIVE_RETENTION_DAYS;
-    }
-    return Math.floor(days);
+/** 保留天数：取自配置（runtime.archiveRetentionDays），非法值回退默认值。 */
+export function resolveRetentionDays(days = getRuntimeConfig().archiveRetentionDays): number {
+    return Number.isFinite(days) ? Math.floor(days) : DEFAULT_ARCHIVE_RETENTION_DAYS;
 }
 
 /** 会话在事件流里的归档态与计时起点。 */

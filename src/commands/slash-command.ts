@@ -8,7 +8,6 @@
  * - 已识别的命令按 `usage` 逐项校验参数，非法参数返回明确错误，绝不静默吞掉。
  */
 
-import { CHAT_API_PROTOCOLS, type ChatApiProtocol } from "../types/chat-model.js";
 
 /**
  * 会话间消息（peer）里各命令的执行方式。
@@ -58,8 +57,9 @@ export const REVIEW_PROMPT =  [
 const TASK_ACTIONS = ["list", "status", "wait", "stop"] as const;
 
 /**
- * /model 两种写法：`<协议> <模型> [强度|auto]` 与 `effort [档位|auto]`。
- * 协议只能是固定两项，所以 `effort` 这个子命令与"模型名"不会互相误判。
+ * /model 两种写法：`<provider> <模型> [强度|auto]` 与 `effort [档位|auto]`。
+ * provider 名到这里只做「非空 + 不是 effort」的检查：名单由配置决定，
+ * 未知 provider 的报错留到 `resolveModelUse`（那里能列出当前可选项）。
  */
 function validateModelArgs(args: string[]): string | undefined {
     const [first, second, third] = args;
@@ -71,11 +71,9 @@ function validateModelArgs(args: string[]): string | undefined {
         return undefined;
     }
 
-    if (!CHAT_API_PROTOCOLS.includes(first as ChatApiProtocol)) {
-        return `协议需要是 ${CHAT_API_PROTOCOLS.join(" | ")}：${first}。用法：/model <协议> <模型> [强度|auto]`;
-    }
+    if (!first.trim()) return `缺少 provider。用法：/model <provider> <模型> [强度|auto]`;
     if (!second) return `/model ${first} 需要模型名。用法：/model ${first} <模型> [强度|auto]`;
-    if (third !== undefined && !third.trim()) return "思考强度不能为空。用法：/model <协议> <模型> [强度|auto]";
+    if (third !== undefined && !third.trim()) return "思考强度不能为空。用法：/model <provider> <模型> [强度|auto]";
     return undefined;
 }
 
@@ -191,7 +189,7 @@ export const SLASH_COMMAND_SPECS: SlashCommandSpec[] = [
     {
         name: "model",
         description: "查看/设置模型与思考强度（唯一的模型与强度入口）",
-        usage: "/model [--json] | /model <协议> <模型> [强度|auto] | /model effort [档位|auto]",
+        usage: "/model [--json] | /model <provider> <模型> [强度|auto] | /model effort [档位|auto]",
         peer: "host",
         json: true,
         maxArgs: 3,

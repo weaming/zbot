@@ -10,7 +10,7 @@ zbot web [--port 8787] [--bind 127.0.0.1] [--cwd <目录>] [--token <令牌>]
 
 - 默认只绑 `127.0.0.1`。
 - `--cwd` 是新建会话与工具的默认基准。
-- 令牌优先级：`--token` > `ZBOT_WEB_TOKEN` > `~/.zbot/web/token`（首次启动自动生成，权限 0600）。
+- 令牌优先级：`--token` > `config.yaml` 的 `web.token` > `~/.zbot/web/token`（首次启动自动生成，权限 0600）。
 - 任务库位于 `~/.zbot/web/db/jobs.sqlite`。
 - 所有 `/api` 请求带 `Authorization: Bearer <token>`；不再接受 `?token=`（URL 会被缓存、写进历史与反代日志）。
   页面首次进入在输入框里粘贴令牌，存在 localStorage；SSE 与图片都由前端 fetch 带 header 取回。
@@ -127,7 +127,7 @@ queued ──► leased ──► running ──► succeeded / failed / cancell
 ### 幂等与调度
 
 - `idempotencyKey` 的作用域是 `(source, key)`（`source` 默认 `http`），由唯一索引保证并发下也只建一条；重复提交返回既有任务（200 而非 201）。
-- 并发上限由 `ZBOT_JOBS_MAX_CONCURRENT` 控制（默认 2，上限 16）；**同一 `workspace` 强制串行**，避免两次任务同时改同一个仓库。
+- 并发上限由 `config.yaml` 的 `web.jobsMaxConcurrent` 控制（默认 2，上限 16）；**同一 `workspace` 强制串行**，避免两次任务同时改同一个仓库。
 - 排队中的任务直接出队取消；在跑的任务会中止对应回合。
 - 任务绑定的会话是复用的：重试保留失败上下文，想让重试从干净上下文开始就传 `freshSession: true`。
 - 服务端每 1/3 租约周期续租；进程崩溃后租约过期，下次启动会把遗留任务标 `lost`。

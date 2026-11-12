@@ -39,7 +39,7 @@ describe("normalizeDeepSeekModel", () => {
         expect(normalizeDeepSeekModel("deepseek-v4-pro-0813")).toBe("pro");
         // vision 与 flash 同价，归入 flash 档
         expect(normalizeDeepSeekModel("deepseek-v4-flash-vision-exp")).toBe("flash");
-        expect(normalizeDeepSeekModel("deepseek-v4.1-flash-expires-on-0910")).toBe("flash");
+        expect(normalizeDeepSeekModel("deepseek-v4.1-flash")).toBeUndefined();
         expect(normalizeDeepSeekModel("deepseek-flash")).toBe("flash");
         expect(normalizeDeepSeekModel("DEEPSEEK-V4-FLASH")).toBe("flash");
     });
@@ -53,14 +53,15 @@ describe("normalizeDeepSeekModel", () => {
         expect(normalizeDeepSeekModel("gpt-5.6-luna")).toBeUndefined();
     });
 
-    test("宽松模式按 flash / pro 关键词归类（含厂商前缀与地域后缀）", () => {
+    test("宽松模式要同时含 deepseek 与 flash / pro（前缀后缀随意）", () => {
         expect(normalizeDeepSeekModel("workbuddy-ai/deepseek-v4.1-flash-sg", true)).toBe("flash");
         expect(normalizeDeepSeekModel("deepseek-v4.1-flash", true)).toBe("flash");
         expect(normalizeDeepSeekModel("vllm/deepseek-pro-0813", true)).toBe("pro");
-        expect(normalizeDeepSeekModel("any-flash", true)).toBe("flash");
     });
 
-    test("宽松模式仍拒绝不含关键词的模型名", () => {
+    test("宽松模式拒绝不含 deepseek 的别名与缺关键词的名字", () => {
+        expect(normalizeDeepSeekModel("any-flash", true)).toBeUndefined();
+        expect(normalizeDeepSeekModel("pro-coder", true)).toBeUndefined();
         expect(normalizeDeepSeekModel("gpt-5.6-luna", true)).toBeUndefined();
         expect(normalizeDeepSeekModel("deepseek-chat", true)).toBeUndefined();
         expect(normalizeDeepSeekModel("", true)).toBeUndefined();
@@ -92,17 +93,13 @@ describe("isOfficialDeepSeekEndpoint", () => {
 });
 
 describe("isDeepSeekCostStatEnabled", () => {
-    test("真值命中即开启，大小写与空白不敏感", () => {
-        for (const value of ["1", "true", "TRUE", " yes ", "On"]) {
-            expect(isDeepSeekCostStatEnabled({ ENABLE_DS_COST_STAT: value })).toBe(true);
-        }
+    test("配置为真时开启", () => {
+        expect(isDeepSeekCostStatEnabled(true)).toBe(true);
     });
 
-    test("缺省或假值不开启", () => {
-        expect(isDeepSeekCostStatEnabled({})).toBe(false);
-        expect(isDeepSeekCostStatEnabled({ ENABLE_DS_COST_STAT: "" })).toBe(false);
-        expect(isDeepSeekCostStatEnabled({ ENABLE_DS_COST_STAT: "0" })).toBe(false);
-        expect(isDeepSeekCostStatEnabled({ ENABLE_DS_COST_STAT: "false" })).toBe(false);
+    test("默认关闭", () => {
+        expect(isDeepSeekCostStatEnabled(false)).toBe(false);
+        expect(isDeepSeekCostStatEnabled()).toBe(false);
     });
 });
 
@@ -222,9 +219,10 @@ describe("deepSeekCostYuan", () => {
         expect(deepSeekCostYuan(flashUsage(1_000_000, 1_000_000, 1_000_000), NEW_PEAK_BJT)).toBeCloseTo(0.04 + 2.0 + 8.0, 6);
     });
 
-    test("0910 内测 exp 模型按 flash 同价计", () => {
-        const usage = { ...flashUsage(1_000_000, 1_000_000, 1_000_000), model: "deepseek-v4.1-flash-expires-on-0910" };
-        expect(deepSeekCostYuan(usage, CUT_1200_BJT)).toBeCloseTo(0.02 + 1.0 + 4.0, 6);
+    test("严格模式不认 v4.1 别名：官方端点按 0 计（有开关才走宽松匹配）", () => {
+        const usage = { ...flashUsage(1_000_000, 1_000_000, 1_000_000), model: "deepseek-v4.1-flash" };
+        expect(deepSeekCostYuan(usage, CUT_1200_BJT)).toBe(0);
+        expect(deepSeekCostYuan(usage, CUT_1200_BJT, true)).toBeCloseTo(0.02 + 1.0 + 4.0, 6);
     });
 
     test("输出（含 reasoning）按输出单价计，Pro 两段同价", () => {
@@ -271,7 +269,7 @@ describe("officialDeepSeekCostYuan", () => {
         expect(officialDeepSeekCostYuan({ ...usage, apiHost: "gateway.example.com" }, MON_09_BJT, settings)).toBe(0);
     });
 
-    test("开启 ENABLE_DS_COST_STAT 后局域网网关也按官方价计费（仍需模型命中价格表）", () => {
+    test("开启 deepseekCostStat 后局域网网关也按官方价计费（仍需模型命中价格表）", () => {
         const lanSettings = { model: "deepseek-v4-flash", apiBase: "http://127.0.0.1:3030/v1", enableCostStat: true };
         expect(officialDeepSeekCostYuan({ ...usage, apiHost: "127.0.0.1" }, MON_09_BJT, lanSettings)).toBeCloseTo(3.1, 6);
         expect(officialDeepSeekCostYuan({ ...usage, apiHost: "192.168.1.10", model: "gpt-5.6-luna" }, MON_09_BJT, lanSettings)).toBe(0);

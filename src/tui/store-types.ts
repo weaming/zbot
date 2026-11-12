@@ -133,7 +133,7 @@ export interface SessionUiState {
     contextTokens: number;
     /** contextTokens 的来源：provider = 上游 usage 实测；local = 本地估算（展示更淡）。 */
     contextSource?: "provider" | "local";
-    /** DeepSeek 会话费用累计（元），由 costFor 注入计算：官方端点或开启 ENABLE_DS_COST_STAT 后按官方价格表估算。 */
+    /** DeepSeek 会话费用累计（元），由 costFor 注入计算：官方端点或开启 runtime.deepseekCostStat 后按官方价格表估算。 */
     costYuan: number;
     /** 会话累计平均速率；请求进行中仍显示已完成请求的累计值（状态栏置灰）。 */
     lastRate?: RequestRate;

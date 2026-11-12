@@ -44,11 +44,10 @@ describe("retainToolsMissingFromOneSync", () => {
         expect(missingAgain.deferredNames).toEqual(["quote"]);
     });
 
-    test("initMcpClients 在 mode=tui 且无配置文件时不注册任何远程工具", async () => {
+    test("无配置文件时不注册任何远程工具", async () => {
         await closeAllMcpClients();
         await initMcpClients({
             configPath: "/tmp/non_existent_mcp_test_file.yaml",
-            mode: "tui",
         });
 
         expect(toolCatalog.listRemoteTools()).toEqual([]);

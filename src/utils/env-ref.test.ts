@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { describeBrokenEnvReference, readEnvValue, resolveEnvReference } from "./env-ref.js";
+import { readEnvValue, resolveEnvReference } from "./env-ref.js";
 
 const TOUCHED = ["ZBOT_REF_KEY", "ZBOT_REF_ALIAS", "ZBOT_REF_LOOP_A", "ZBOT_REF_LOOP_B"];
 
@@ -45,13 +45,5 @@ describe("配置值里的环境变量引用", () => {
 
         expect(readEnvValue("ZBOT_REF_NOT_DEFINED_AT_ALL")).toBeUndefined();
         expect(readEnvValue("ZBOT_REF_ALIAS")).toBe("");
-    });
-
-    test("引用落空的说明只在确实写了引用时给出", () => {
-        writeEnv({ ZBOT_REF_KEY: "$ZBOT_REF_MISSING", ZBOT_REF_ALIAS: "sk-real" });
-
-        expect(describeBrokenEnvReference("ZBOT_REF_KEY")).toBe("ZBOT_REF_KEY=$ZBOT_REF_MISSING 引用的环境变量 ZBOT_REF_MISSING 未设置");
-        expect(describeBrokenEnvReference("ZBOT_REF_ALIAS")).toBeUndefined();
-        expect(describeBrokenEnvReference("ZBOT_REF_NOT_DEFINED_AT_ALL")).toBeUndefined();
     });
 });

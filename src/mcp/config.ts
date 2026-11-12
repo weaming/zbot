@@ -10,6 +10,7 @@ import path from "path";
 import * as yaml from "js-yaml";
 
 import type { ToolFilterConfig } from "./filter.js";
+import { getMcpConfig } from "../config/index.js";
 
 type McpProtocolVersion = "2026-07-28" | "2025-11-25";
 
@@ -206,73 +207,45 @@ export function normalizeParsedConfig(parsed: any): McpServerConfig[] {
 }
 
 export interface LoadMcpConfigOptions {
-    /** 显式指定的配置文件路径，不传时依据 mode 自动判定 */
+    /** 显式指定的配置文件路径；不传则用 config.yaml 的 mcp.serversFile，再退默认路径 */
     configPath?: string;
-    /** 模式：tui（只读 ~/.zbot/mcp-servers.yaml，无则不连），hub（无配置则默认连 mcp-hub），auto */
-    mode?: "tui" | "hub" | "auto";
 }
 
 /**
- * 加载并解析 MCP 配置文件
- * - mode === "tui": 若 ~/.zbot/mcp-servers.yaml 不存在，返回空列表（没有则不连）
- * - mode === "hub" / 默认: 若无配置文件，返回连接 mcp-hub 的单服务默认配置
+ * 加载并解析 MCP 配置文件：只认服务文件，文件不存在就返回空列表（没有配置就不连）。
+ * 早期容器部署靠 mcp-hub 聚合服务的兜底路径已删除。
  */
 export function loadMcpServersConfig(options: LoadMcpConfigOptions = {}): McpServerConfig[] {
-    const explicitFile = options.configPath || process.env.ZBOT_MCP_SERVERS_FILE;
-    const targetPath = explicitFile
-        ? resolvePathWithTilde(explicitFile)
-        : (options.mode === "tui" ? DEFAULT_TUI_MCP_CONFIG_FILE : undefined);
-
-    if (targetPath) {
-        if (!fs.existsSync(targetPath)) {
-            if (options.mode === "tui") {
-                console.log(`ℹ️ [MCP] TUI config file not found: ${targetPath}, skipping MCP connections.`);
-                return [];
-            }
-            console.warn(`⚠️ [MCP] Config file not found: ${targetPath}`);
-            return [];
-        }
-
-        try {
-            const content = fs.readFileSync(targetPath, "utf-8");
-            const parsed = yaml.load(content);
-            const rawConfigs = normalizeParsedConfig(parsed);
-
-            const configs: McpServerConfig[] = [];
-            for (const raw of rawConfigs) {
-                if (raw.disabled) {
-                    console.log(`ℹ️ [MCP] Server ${raw.name} is disabled, skipping.`);
-                    continue;
-                }
-
-                const check = validateRequiredEnv(raw);
-                if (!check.valid) {
-                    console.warn(`⚠️ [MCP] Server ${raw.name} skipped: required env ${check.missingEnv} is missing`);
-                    continue;
-                }
-
-                configs.push(interpolateConfig(raw));
-            }
-
-            return configs;
-        } catch (error: any) {
-            console.error(`❌ [MCP] Failed to parse config file ${targetPath}: ${error.message}`);
-            return [];
-        }
+    const targetPath = resolvePathWithTilde(options.configPath ?? getMcpConfig().serversFile ?? DEFAULT_TUI_MCP_CONFIG_FILE);
+    if (!fs.existsSync(targetPath)) {
+        console.log(`ℹ️ [MCP] Config file not found: ${targetPath}, skipping MCP connections.`);
+        return [];
     }
 
-    // mode 为 hub 或默认且未显式指定配置文件时的行为（针对容器实例保持连接 mcp-hub）
-    if (options.mode === "hub" || !options.mode) {
-        const mcpHubUrl = process.env.MCP_HUB_URL || "http://localhost:3010/mcp";
-        return [
-            {
-                name: "mcp-hub",
-                type: "http",
-                url: mcpHubUrl,
-                protocolVersion: "2026-07-28",
-            },
-        ];
-    }
+    try {
+        const content = fs.readFileSync(targetPath, "utf-8");
+        const parsed = yaml.load(content);
+        const rawConfigs = normalizeParsedConfig(parsed);
 
-    return [];
+        const configs: McpServerConfig[] = [];
+        for (const raw of rawConfigs) {
+            if (raw.disabled) {
+                console.log(`ℹ️ [MCP] Server ${raw.name} is disabled, skipping.`);
+                continue;
+            }
+
+            const check = validateRequiredEnv(raw);
+            if (!check.valid) {
+                console.warn(`⚠️ [MCP] Server ${raw.name} skipped: required env ${check.missingEnv} is missing`);
+                continue;
+            }
+
+            configs.push(interpolateConfig(raw));
+        }
+
+        return configs;
+    } catch (error: any) {
+        console.error(`❌ [MCP] Failed to parse config file ${targetPath}: ${error.message}`);
+        return [];
+    }
 }

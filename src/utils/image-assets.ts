@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
+import { getRuntimeConfig } from "../config/index.js";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -259,9 +260,9 @@ async function readImageUrl(image: ImageUrlRef): Promise<ImageDataRef> {
     };
 }
 
-/** 返回 DeepSeek Files API 地址；自定义部署可通过环境变量覆盖。 */
+/** 返回 DeepSeek Files API 地址；自定义部署可在 config.yaml 里覆盖。 */
 export function resolveDeepSeekFilesAPI(_apiBase?: string): string {
-    const configured = process.env.DEEPSEEK_FILES_API?.trim();
+    const configured = getRuntimeConfig().deepseekFilesApi?.trim();
     return configured || DEFAULT_DEEPSEEK_FILES_API;
 }
 
@@ -288,7 +289,7 @@ export async function uploadDeepSeekFileData(
 ): Promise<string> {
     const filesAPI = options?.filesAPI?.trim() || resolveDeepSeekFilesAPI();
     if (!filesAPI) {
-        throw new Error("无法确定 DeepSeek Files API，请设置 DEEPSEEK_FILES_API");
+        throw new Error("无法确定 DeepSeek Files API，请在 config.yaml 里设置 runtime.deepseekFilesApi");
     }
 
     const fileData = typeof data === "string" ? Buffer.from(data, "base64") : data;

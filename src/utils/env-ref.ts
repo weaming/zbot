@@ -7,7 +7,7 @@
 const REFERENCE_PATTERN = /^\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})$/;
 
 /** 整个值就是一个环境变量引用时返回其名字，否则返回 undefined。 */
-function referencedEnvName(value: string): string | undefined {
+export function envReferenceTarget(value: string): string | undefined {
     const matched = REFERENCE_PATTERN.exec(value.trim());
     return matched ? matched[1] ?? matched[2] : undefined;
 }
@@ -19,7 +19,7 @@ function followEnvReference(name: string): string {
     while (!visited.has(current)) {
         visited.add(current);
         const resolved = process.env[current]?.trim() ?? "";
-        const next = referencedEnvName(resolved);
+        const next = envReferenceTarget(resolved);
         if (next === undefined) return resolved;
         current = next;
     }
@@ -28,7 +28,7 @@ function followEnvReference(name: string): string {
 
 /** 展开单个配置值：是引用则取目标环境变量，其余值原样返回；引用落空时返回空串。 */
 export function resolveEnvReference(value: string): string {
-    const name = referencedEnvName(value);
+    const name = envReferenceTarget(value);
     return name === undefined ? value : followEnvReference(name);
 }
 
@@ -39,12 +39,4 @@ export function resolveEnvReference(value: string): string {
 export function readEnvValue(name: string): string | undefined {
     const raw = process.env[name];
     return raw === undefined ? undefined : resolveEnvReference(raw);
-}
-
-/** 该变量只写了引用、目标却没有值时的说明，用于报错点明配置断在哪一环。 */
-export function describeBrokenEnvReference(name: string): string | undefined {
-    const raw = process.env[name];
-    const target = raw === undefined ? undefined : referencedEnvName(raw);
-    if (target === undefined || followEnvReference(target)) return undefined;
-    return `${name}=$${target} 引用的环境变量 ${target} 未设置`;
 }

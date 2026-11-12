@@ -95,7 +95,7 @@ export class ModelMcpPanels {
             this.deps.notify([
                 "没有配置可切换的模型。",
                 "请在配置文件中为 Responses API 或 Chat Completions 配置模型：",
-                "模型列表使用 OPENAI_RESPONSES_MODELS 或 OPENAI_CHAT_MODELS，以逗号分隔。",
+                "模型列表来自 config.yaml 的 providers.<name>.models；面板里也能临时手输模型。",
             ].join("\n"), sessionId);
             return;
         }

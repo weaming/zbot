@@ -7,7 +7,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import type { ExecutableTool, ToolExecutionResult } from "./tool-interface.js";
 import { buildExecutionEnv } from "../utils/skill-env.js";
-import { PROXY_URL } from "../utils/proxy.js";
+import { getNetworkProxy } from "../utils/proxy.js";
 import { getToolCwd } from "../utils/runtime-paths.js";
 
 const execFileAsync = promisify(execFile);
@@ -23,11 +23,12 @@ async function executeGh(
 ): Promise<{ stdout: string; stderr: string }> {
     const env = buildExecutionEnv();
 
-    if (enableProxy && PROXY_URL) {
-        env.HTTP_PROXY = PROXY_URL;
-        env.HTTPS_PROXY = PROXY_URL;
-        env.http_proxy = PROXY_URL;
-        env.https_proxy = PROXY_URL;
+    const proxyUrl = getNetworkProxy();
+    if (enableProxy && proxyUrl) {
+        env.HTTP_PROXY = proxyUrl;
+        env.HTTPS_PROXY = proxyUrl;
+        env.http_proxy = proxyUrl;
+        env.https_proxy = proxyUrl;
     }
 
     const { stdout, stderr } = await execFileAsync("gh", commandArgs, {

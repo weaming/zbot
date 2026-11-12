@@ -6,6 +6,7 @@
  */
 
 import fs from "node:fs";
+import { getWebConfig } from "../config/index.js";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { initializeSessionHostRuntime, LocalSessionHost } from "../host/session-host.js";
@@ -107,15 +108,15 @@ function webTokenFile(): string {
 }
 
 /**
- * 令牌优先级：命令行 > 环境变量 > 本地文件 > 新生成。
+ * 令牌优先级：命令行 > config.yaml（web.token）> 本地文件 > 新生成。
  * 自动生成后落盘（0600），避免每次重启都要求客户端换令牌。
  */
 export function resolveWebToken(explicit?: string): string {
     const fromArg = explicit?.trim();
     if (fromArg) return fromArg;
 
-    const fromEnv = process.env.ZBOT_WEB_TOKEN?.trim();
-    if (fromEnv) return fromEnv;
+    const fromConfig = getWebConfig().token?.trim();
+    if (fromConfig) return fromConfig;
 
     const file = webTokenFile();
     try {
@@ -182,11 +183,9 @@ async function shutdown(
 /** SSE 心跳间隔：与 http-server 默认值保持一致。 */
 const SSE_HEARTBEAT_MS = 15_000;
 
-/** 并发上限：环境变量可调，但夹在 1..16，避免把 provider 速率打爆。 */
+/** 并发上限：配置可调，已由 schema 夹在 1..16，避免把 provider 速率打爆。 */
 function resolveMaxConcurrent(): number {
-    const parsed = Number.parseInt(process.env.ZBOT_JOBS_MAX_CONCURRENT ?? "", 10);
-    if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_CONCURRENT;
-    return Math.min(parsed, 16);
+    return getWebConfig().jobsMaxConcurrent;
 }
 
 export async function runWeb(argv: string[]): Promise<void> {

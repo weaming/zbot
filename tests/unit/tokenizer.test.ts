@@ -1,13 +1,15 @@
 /**
  * 真实分词器（DeepSeek V4 tokenizer.json）计数：精度对齐、缓存与回退。
  *
- * preload（tests/unit/env-isolation.ts）默认把 `ZBOT_TOKENIZER` 设为 off，
- * 本文件在用例前清掉该开关，走真实分词路径。
+ * preload（tests/unit/env-isolation.ts）默认 `runtime.tokenizer: false`，
+ * 本文件用带 tokenizer 开关的临时配置走真实分词路径。
  */
 
-import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { defaultTestConfig, useConfig } from "./test-config.js";
 
-const previousTokenizerMode = process.env.ZBOT_TOKENIZER;
+/** 每个用例前装上「真分词开启」的配置，用例内可再改装。 */
+let restoreConfig: (() => void) | undefined;
 
 const {
     countTextTokens,
@@ -21,12 +23,13 @@ const { createEmptySession } = await import("../../src/events/session-replay.js"
 const { appendCompletedTurn } = await import("../../src/utils/conversation-history.js");
 
 beforeEach(() => {
-    // preload 只在变量缺失时补 off，这里用显式值覆盖（空串在 Bun 里等于删除变量，会把它放回来）
-    process.env.ZBOT_TOKENIZER = "on";
+    restoreConfig?.();
+    restoreConfig = useConfig(defaultTestConfig({ runtime: { tokenizer: true, memoryUserId: 0 } })).restore;
 });
 
-afterAll(() => {
-    process.env.ZBOT_TOKENIZER = previousTokenizerMode ?? "off";
+afterEach(() => {
+    restoreConfig?.();
+    restoreConfig = undefined;
 });
 
 describe("真实分词器计数", () => {
@@ -69,8 +72,11 @@ describe("真实分词器计数", () => {
         expect(await countTextTokens(text, "gemini-2.5-pro")).toBe(estimateTextTokens(text));
     });
 
-    test("ZBOT_TOKENIZER=off 时整体回退启发式", async () => {
-        process.env.ZBOT_TOKENIZER = "off";
+    test("runtime.tokenizer=false 时整体回退启发式", async () => {
+        restoreConfig?.();
+        restoreConfig = useConfig(defaultTestConfig({
+            runtime: { tokenizer: false, memoryUserId: 0 },
+        })).restore;
         const text = "上下文压缩的触发判定";
         expect(await countTextTokens(text)).toBe(estimateTextTokens(text));
     });

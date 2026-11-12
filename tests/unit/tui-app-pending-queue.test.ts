@@ -16,7 +16,8 @@ import type { SessionReleaseCause } from "../../src/host/session-host-types.js";
  */
 
 import { tuiStub } from "./tui-stub.js";
-import { isolateModelEnv } from "./test-env.js";
+import { defaultTestConfig, useConfig } from "./test-config.js";
+import { setRuntimeReasoningEffort, getRuntimeReasoningEffort } from "../../src/config/index.js";
 
 mock.module("@earendil-works/pi-tui", () => tuiStub);
 
@@ -66,7 +67,7 @@ function pushFakePanel(
 let tmpDir: string;
 let originalStateDir: string | undefined;
 let originalTuiCwd: string | undefined;
-let restoreModelEnv: () => void;
+let restoreConfig: () => void;
 
 interface FakeAgent {
     sendMessageCalls: { sessionId: string; text: string; resolve: (v: { aborted?: boolean }) => void }[];
@@ -162,8 +163,9 @@ function makeFakeAgent(): FakeAgent {
 }
 
 beforeEach(async () => {
-    // 宿主 shell 导出的模型配置会让 getChatApiSettings 返回真实模型，隔离后再断言默认值。
-    restoreModelEnv = isolateModelEnv();
+    // 宿主 shell 的配置不该影响断言：每个用例装一份临时 config.yaml
+    restoreConfig = useConfig().restore;
+    setRuntimeReasoningEffort(undefined);
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zbot-tui-pending-"));
     originalStateDir = process.env.ZBOT_STATE_DIR;
     process.env.ZBOT_STATE_DIR = tmpDir;
@@ -171,7 +173,8 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
-    restoreModelEnv();
+    restoreConfig();
+    setRuntimeReasoningEffort(undefined);
     if (originalStateDir === undefined) delete process.env.ZBOT_STATE_DIR;
     else process.env.ZBOT_STATE_DIR = originalStateDir;
     // ChatApp 会把进程级 TUI_CWD 切到会话目录；不还原会让后续文件拿到已删除的临时目录。
@@ -617,8 +620,18 @@ describe("ChatApp pending queue", () => {
         const app = new ChatApp(agent as any, store);
         store.currentSessionId = "session-status-test";
 
-        process.env.OPENAI_MODEL = "deepseek-reasoner";
-        process.env.REASONING_EFFORT = "high";
+        useConfig(defaultTestConfig({
+            providers: {
+                deepseek: {
+                    protocol: "chat_completions",
+                    baseUrl: "https://api.deepseek.com/v1",
+                    apiKey: "k",
+                    models: ["deepseek-reasoner"],
+                },
+            },
+            defaults: { provider: "deepseek", model: "deepseek-reasoner" },
+        }));
+        setRuntimeReasoningEffort("high");
 
         // 1. 模拟未产生 reasoning 与 cache 的 usage（不渲染 🤔 与 🎯）
         store.applyEvent(1, "session-status-test", {
@@ -692,7 +705,7 @@ describe("ChatApp pending queue", () => {
         expect(rendered[0]).not.toContain("思考中");
         expect(rendered[0]).not.toContain("执行工具");
 
-        delete process.env.REASONING_EFFORT;
+        setRuntimeReasoningEffort(undefined);
     });
 
     test("renderStatusBar 在工具调用超过 3 秒时在右下角同时显示当前工具计时", () => {
@@ -745,7 +758,7 @@ describe("ChatApp pending queue", () => {
         // 会话内设置：写会话级选择，不污染进程环境
         expect(selections.at(-1)?.sessionId).toBe("session-cmd-test");
         expect(selections.at(-1)?.selection.reasoningEffort).toBe("high");
-        expect(process.env.REASONING_EFFORT).toBeUndefined();
+        expect(getRuntimeReasoningEffort()).toBeUndefined();
         expect(store.messages.some(m => m.role === "system" && m.text.includes("思考强度已设置为: high"))).toBe(true);
 
         // 3. 重置为 auto
@@ -767,10 +780,18 @@ describe("ChatApp pending queue", () => {
     });
 
     test("/model effort 立即落盘；切模型时环境变量档位不会被静默改成 auto", async () => {
-        const savedEffort = process.env.REASONING_EFFORT;
-        const savedModel = process.env.OPENAI_CHAT_MODEL;
-        process.env.REASONING_EFFORT = "high";
-        process.env.OPENAI_CHAT_MODEL = "stub-model";
+        setRuntimeReasoningEffort("high");
+        useConfig(defaultTestConfig({
+            providers: {
+                stub: {
+                    protocol: "chat_completions",
+                    baseUrl: "https://api.deepseek.com/v1",
+                    apiKey: "k",
+                    models: ["stub-model"],
+                },
+            },
+            defaults: { provider: "stub", model: "stub-model" },
+        }));
         try {
             const agent = makeFakeAgent();
             const store = new ChatStore();
@@ -787,35 +808,40 @@ describe("ChatApp pending queue", () => {
 
             // 切模型：env 里的 high 在目标模型上可用 → 保留，而不是回落 auto
             (app as any).currentModelSelection = undefined;
-            await (app as any).handleCommand("/model chat_completions stub-model");
+            await (app as any).handleCommand("/model stub stub-model");
             expect(immediate.at(-1)).toMatchObject({ model: "stub-model", reasoningEffort: "high" });
         } finally {
-            if (savedEffort === undefined) delete process.env.REASONING_EFFORT;
-            else process.env.REASONING_EFFORT = savedEffort;
-            if (savedModel === undefined) delete process.env.OPENAI_CHAT_MODEL;
-            else process.env.OPENAI_CHAT_MODEL = savedModel;
+            setRuntimeReasoningEffort(undefined);
         }
     });
 
     test("/model 按目标模型的档位校验并归一化（与 session send 同口径）", async () => {
         // 当前模型是 deepseek 系（档位 none/low/high/max），目标模型是 responses 系
         // （档位含 minimal/medium/xhigh、没有 max）：两套档位不同，正是历史 bug 的场景
-        const saved = {
-            chatModel: process.env.OPENAI_CHAT_MODEL,
-            responsesModel: process.env.OPENAI_RESPONSES_MODEL,
-            chatBase: process.env.OPENAI_CHAT_BASE_URL,
-            responsesBase: process.env.OPENAI_RESPONSES_BASE_URL,
-        };
-        process.env.OPENAI_CHAT_MODEL = "deepseek-chat";
-        process.env.OPENAI_RESPONSES_MODEL = "gpt-5";
-        process.env.OPENAI_CHAT_BASE_URL = "https://api.deepseek.com/v1";
-        process.env.OPENAI_RESPONSES_BASE_URL = "https://api.openai.com/v1";
+        useConfig(defaultTestConfig({
+            providers: {
+                deepseek: {
+                    protocol: "chat_completions",
+                    baseUrl: "https://api.deepseek.com/v1",
+                    apiKey: "k",
+                    models: ["deepseek-chat"],
+                },
+                openai: {
+                    protocol: "responses",
+                    baseUrl: "https://api.openai.com/v1",
+                    apiKey: "k",
+                    models: ["gpt-5"],
+                },
+            },
+            defaults: { provider: "deepseek", model: "deepseek-chat" },
+        }));
         try {
             const agent = makeFakeAgent();
             const store = new ChatStore();
             const app = new ChatApp(agent as any, store);
             store.currentSessionId = "session-model-use-test";
             (app as any).currentModelSelection = {
+                provider: "deepseek",
                 protocol: "chat_completions",
                 model: "deepseek-chat",
                 reasoningEffort: "max",
@@ -826,8 +852,9 @@ describe("ChatApp pending queue", () => {
             };
 
             // 目标模型支持的 medium：必须成功（旧实现用当前模型档位会被误判为未知）
-            await (app as any).handleCommand("/model responses gpt-5 medium");
+            await (app as any).handleCommand("/model openai gpt-5 medium");
             expect(selections.at(-1)).toEqual({
+                provider: "openai",
                 protocol: "responses",
                 model: "gpt-5",
                 reasoningEffort: "medium",
@@ -835,37 +862,30 @@ describe("ChatApp pending queue", () => {
             expect(store.messages.some(m => m.role === "system" && m.text.includes("未知思考强度"))).toBe(false);
 
             // 归一化：大写 HIGH 落盘为小写 high
-            await (app as any).handleCommand("/model responses gpt-5 HIGH");
+            await (app as any).handleCommand("/model openai gpt-5 HIGH");
             expect(selections.at(-1)?.reasoningEffort).toBe("high");
 
             // 目标模型不支持的 max：必须报错并且不落盘（旧实现用当前模型档位会放过）
             const before = selections.length;
-            await (app as any).handleCommand("/model responses gpt-5 max");
+            await (app as any).handleCommand("/model openai gpt-5 max");
             expect(selections.length).toBe(before);
             expect(store.messages.some(m => m.role === "system" && m.text.includes("未知思考强度"))).toBe(true);
 
             // 省略强度：沿用当前档位（目标模型支持 high）
-            await (app as any).handleCommand("/model responses gpt-5");
+            await (app as any).handleCommand("/model openai gpt-5");
             expect(selections.at(-1)?.reasoningEffort).toBe("high");
 
             // 省略强度且原档位在目标模型不支持：回落 auto
             (app as any).currentModelSelection = {
+                provider: "deepseek",
                 protocol: "chat_completions",
                 model: "deepseek-chat",
                 reasoningEffort: "max",
             };
-            await (app as any).handleCommand("/model responses gpt-5");
+            await (app as any).handleCommand("/model openai gpt-5");
             expect(selections.at(-1)?.reasoningEffort).toBe("auto");
         } finally {
-            for (const [key, value] of Object.entries({
-                OPENAI_CHAT_MODEL: saved.chatModel,
-                OPENAI_RESPONSES_MODEL: saved.responsesModel,
-                OPENAI_CHAT_BASE_URL: saved.chatBase,
-                OPENAI_RESPONSES_BASE_URL: saved.responsesBase,
-            })) {
-                if (value === undefined) delete process.env[key];
-                else process.env[key] = value;
-            }
+            setRuntimeReasoningEffort(undefined);
         }
     });
 
@@ -885,9 +905,9 @@ describe("ChatApp pending queue", () => {
         await (app as any).handleCommand("/model effort auto");
         expect(selections.at(-1)?.reasoningEffort).toBe("auto");
 
-        // /model 用非法模型组合时明确拒绝
-        await (app as any).handleCommand("/model chat_completions not-configured");
-        expect(store.messages.some(m => m.role === "system" && m.text.includes("不可用的模型组合"))).toBe(true);
+        // /model 用不存在的 provider 时明确拒绝
+        await (app as any).handleCommand("/model no-such-provider whatever-model");
+        expect(store.messages.some(m => m.role === "system" && m.text.includes("没有这个 provider"))).toBe(true);
 
         // 已删除的命令不再被识别：/effort /thinking /reasoning 按普通文本提交给模型
         const sent: string[] = [];
@@ -1092,7 +1112,7 @@ describe("ChatApp pending queue", () => {
         expect(tui.scrollByCalls).toEqual([-19, 19]);
     });
 
-    test("滚轮诊断写入独立文件（仅 ZBOT_TUI_DEBUG_WHEEL=1 时）", async () => {
+    test("滚轮诊断写入独立文件（仅 tui.debugWheel 打开时）", async () => {
         const agent = makeFakeAgent();
         const store = new ChatStore();
         const app = new ChatApp(agent as any, store);
@@ -1101,14 +1121,14 @@ describe("ChatApp pending queue", () => {
         pushFakePanel(app, { bounds: { row: 4, col: 4, width: 72, height: 16 } });
 
         // 默认关闭：不写文件
+        useConfig(defaultTestConfig({ tui: { disableNotifications: false, debugWheel: false } }));
         const logFile = getWheelLogFile();
-        delete process.env.ZBOT_TUI_DEBUG_WHEEL;
         fs.rmSync(logFile, { force: true });
         expect((app as any).isWheelOutsidePanel("\x1b[<65;1;1M")).toBe(true);
         expect(fs.existsSync(logFile)).toBe(false);
 
         // 开启后：面板外/面板内都落盘
-        process.env.ZBOT_TUI_DEBUG_WHEEL = "1";
+        useConfig(defaultTestConfig({ tui: { disableNotifications: false, debugWheel: true } }));
         try {
             expect((app as any).isWheelOutsidePanel("\x1b[<65;1;1M")).toBe(true);
             expect((app as any).isWheelOutsidePanel("\x1b[<65;40;12M")).toBe(false);

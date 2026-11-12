@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { createHash } from 'node:crypto';
 import { createUlid } from './ulid.js';
+import { getRuntimeConfig } from "../config/index.js";
 
 function nowISO() {
     return new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Hong_Kong' }).replace('T', ' ');
@@ -339,9 +340,8 @@ function isIncrementalDelta(type: LLMExchangeType, content: any): boolean {
     if (type !== "HTTP_SSE_EVENT" && type !== "WS_RECV") return false;
     const name = content?.type;
     if (typeof name !== "string" || !name.endsWith(".delta")) return false;
-    // 需要还原逐帧流式过程时用 ZBOT_LLM_LOG_DELTAS=1 打开
-    const keep = process.env.ZBOT_LLM_LOG_DELTAS;
-    return keep !== "1" && keep !== "true";
+    // 需要还原逐帧流式过程时用 config.yaml 的 runtime.llmLogDeltas 打开
+    return !getRuntimeConfig().llmLogDeltas;
 }
 
 /**
@@ -351,7 +351,7 @@ function isIncrementalDelta(type: LLMExchangeType, content: any): boolean {
  *  - tools 仅在内容变化时写全量，否则只写 toolsHash。
  * 响应里回显的 tools 与请求一致时只写 toolsRef（指向写入全量 tools 的请求）；
  * 旧式 RESPONSE 丢弃上游回显的 tools/instructions；HTTP_RESPONSE、HTTP_SSE_EVENT 和 WS 消息其余字段保留原始内容。
- * 增量态事件（*.delta）默认丢弃，只保留终态与控制事件；ZBOT_LLM_LOG_DELTAS=1 时全量记录。
+ * 增量态事件（*.delta）默认丢弃，只保留终态与控制事件；`runtime.llmLogDeltas` 打开时全量记录。
  * 主路径写失败时兜底到 fallback 文件，避免数据丢失。
  */
 export function recordLLMExchange(

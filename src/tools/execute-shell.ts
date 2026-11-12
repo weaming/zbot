@@ -8,7 +8,7 @@ import { err } from "./tool-interface.js";
 import { resolveExistingDir, type ResolvedDir } from "./cwd-tool.js";
 import { backgroundTaskManager, type BackgroundTaskSummary } from "./background-tasks.js";
 import { buildExecutionEnv } from "../utils/skill-env.js";
-import { PROXY_URL } from "../utils/proxy.js";
+import { getNetworkProxy } from "../utils/proxy.js";
 import { getToolCwd } from "../utils/runtime-paths.js";
 
 const DEFAULT_COMMAND_TIMEOUT_SECONDS = 120;
@@ -91,11 +91,12 @@ async function executeLocal(options: ShellRunOptions): Promise<string> {
   if (sessionId) env.ZBOT_SESSION_ID = sessionId;
   else delete env.ZBOT_SESSION_ID;
 
-  if (shouldEnableProxy(command, enableProxy) && PROXY_URL) {
-    env.HTTP_PROXY = PROXY_URL;
-    env.HTTPS_PROXY = PROXY_URL;
-    env.http_proxy = PROXY_URL;
-    env.https_proxy = PROXY_URL;
+  const proxyUrl = getNetworkProxy();
+  if (shouldEnableProxy(command, enableProxy) && proxyUrl) {
+    env.HTTP_PROXY = proxyUrl;
+    env.HTTPS_PROXY = proxyUrl;
+    env.http_proxy = proxyUrl;
+    env.https_proxy = proxyUrl;
   }
 
   if (extraEnvs) {

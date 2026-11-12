@@ -9,8 +9,6 @@ import { getResponsesBaselineFile } from "../../src/utils/state-paths.js";
 import { prepareRequest } from "../../src/tools/orchestrator/turn-request.js";
 
 const previousStateDir = process.env.ZBOT_STATE_DIR;
-const previousWebSocket = process.env.OPENAI_RESPONSES_WEBSOCKET;
-const previousStore = process.env.OPENAI_RESPONSES_STORE;
 
 async function readSessionLog(sessionId: string): Promise<any[]> {
   const file = path.join(process.env.ZBOT_STATE_DIR!, "sessions", "http", `${sessionId}.jsonl`);
@@ -20,17 +18,11 @@ async function readSessionLog(sessionId: string): Promise<any[]> {
 afterEach(() => {
   if (previousStateDir === undefined) delete process.env.ZBOT_STATE_DIR;
   else process.env.ZBOT_STATE_DIR = previousStateDir;
-  if (previousWebSocket === undefined) delete process.env.OPENAI_RESPONSES_WEBSOCKET;
-  else process.env.OPENAI_RESPONSES_WEBSOCKET = previousWebSocket;
-  if (previousStore === undefined) delete process.env.OPENAI_RESPONSES_STORE;
-  else process.env.OPENAI_RESPONSES_STORE = previousStore;
 });
 
 test("GPT Responses 默认通过 WebSocket 发送且不请求上游存储", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "zbot-responses-default-"));
   process.env.ZBOT_STATE_DIR = stateDir;
-  delete process.env.OPENAI_RESPONSES_WEBSOCKET;
-  delete process.env.OPENAI_RESPONSES_STORE;
   const sessionId = crypto.randomUUID();
   const requests: any[] = [];
   const server = Bun.serve({
@@ -48,7 +40,7 @@ test("GPT Responses 默认通过 WebSocket 发送且不请求上游存储", asyn
       },
     },
   });
-  const client = createChatClient("key", `http://127.0.0.1:${server.port}/v1`, "responses", sessionId, "gpt-5");
+  const client = createChatClient("key", `http://127.0.0.1:${server.port}/v1`, "responses", sessionId, "gpt-5", { store: false });
   try {
     const prepared = await prepareRequest({
       client,
@@ -87,7 +79,6 @@ test("GPT Responses 默认通过 WebSocket 发送且不请求上游存储", asyn
 test("store=true 跨连接及 HTTP/WS 切换续接，失效时重发完整输入", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "zbot-responses-"));
   process.env.ZBOT_STATE_DIR = stateDir;
-  process.env.OPENAI_RESPONSES_WEBSOCKET = "true";
   const sessionId = crypto.randomUUID();
   const requests: Array<{ transport: string; body: any }> = [];
   const input = { role: "user", content: "hello" };
@@ -133,13 +124,13 @@ test("store=true 跨连接及 HTTP/WS 切换续接，失效时重发完整输入
   });
   const baseURL = `http://127.0.0.1:${server.port}/v1`;
   try {
-    const first = createChatClient("key", baseURL, "responses", sessionId);
+    const first = createChatClient("key", baseURL, "responses", sessionId, undefined, { websocket: true, store: true });
     await first.createResponse!({ model: "test", store: true, input: [input], stream: false });
     first.close?.();
     closeResponsesSession(sessionId);
 
-    process.env.OPENAI_RESPONSES_WEBSOCKET = "false";
-    const second = createChatClient("key", baseURL, "responses", sessionId);
+    
+    const second = createChatClient("key", baseURL, "responses", sessionId, undefined, { websocket: false, store: true });
     await second.createResponse!({ model: "test", store: true, input: [input, output, next], stream: false });
     second.close?.();
     closeResponsesSession(sessionId);
@@ -159,8 +150,7 @@ test("store=true 跨连接及 HTTP/WS 切换续接，失效时重发完整输入
     expect(httpLog.some(entry => entry.type === "HTTP_RESPONSE" && entry.content.id === "resp_2")).toBe(true);
     expect(httpLog.find(entry => entry.type === "HTTP_RESPONSE").content.requestId).toBeUndefined();
 
-    process.env.OPENAI_RESPONSES_WEBSOCKET = "true";
-    const last = createChatClient("key", baseURL, "responses", sessionId);
+    const last = createChatClient("key", baseURL, "responses", sessionId, undefined, { websocket: true, store: true });
     await last.createResponse!({ model: "test", store: true, input: [input, output, next, output, third], stream: false });
     last.close?.();
     closeResponsesSession(sessionId);
@@ -170,7 +160,7 @@ test("store=true 跨连接及 HTTP/WS 切换续接，失效时重发完整输入
     expect(lastRequest.generate).toBeUndefined();
 
     rejectWsPrevious = true;
-    const resumed = createChatClient("key", baseURL, "responses", sessionId);
+    const resumed = createChatClient("key", baseURL, "responses", sessionId, undefined, { websocket: true, store: true });
     const fullInput = [input, output, next, output, third, output, fourth];
     await resumed.createResponse!({ model: "test", store: true, input: fullInput, stream: false });
     resumed.close?.();
@@ -181,15 +171,15 @@ test("store=true 跨连接及 HTTP/WS 切换续接，失效时重发完整输入
     expect(replay.previous_response_id).toBeUndefined();
     expect(replay.input).toEqual(fullInput);
 
-    const otherAccount = createChatClient("other-key", baseURL, "responses", sessionId);
+    const otherAccount = createChatClient("other-key", baseURL, "responses", sessionId, undefined, { websocket: true, store: true });
     await otherAccount.createResponse!({ model: "test", store: true, input: fullInput, stream: false });
     otherAccount.close?.();
     closeResponsesSession(sessionId);
     expect(requests.at(-2)!.body.generate).toBe(false);
     expect(requests.at(-1)!.body.previous_response_id).toBe("warmup");
 
-    process.env.OPENAI_RESPONSES_WEBSOCKET = "false";
-    const unstored = createChatClient("key", baseURL, "responses", sessionId);
+    
+    const unstored = createChatClient("key", baseURL, "responses", sessionId, undefined, { websocket: false, store: false });
     await unstored.createResponse!({ model: "test", store: false, input: fullInput, stream: false });
     unstored.close?.();
     closeResponsesSession(sessionId);
@@ -206,7 +196,7 @@ test("store=true 跨连接及 HTTP/WS 切换续接，失效时重发完整输入
 test("HTTP SSE 保存输出项并在旧响应不存在时回退", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "zbot-responses-sse-"));
   process.env.ZBOT_STATE_DIR = stateDir;
-  process.env.OPENAI_RESPONSES_WEBSOCKET = "false";
+  
   const sessionId = crypto.randomUUID();
   const input = { role: "user", content: "hello" };
   const output = { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text", text: "hi", annotations: [] }] };
@@ -233,13 +223,13 @@ test("HTTP SSE 保存输出项并在旧响应不存在时回退", async () => {
   });
   const baseURL = `http://127.0.0.1:${server.port}/v1`;
   try {
-    const first = createChatClient("key", baseURL, "responses", sessionId);
+    const first = createChatClient("key", baseURL, "responses", sessionId, undefined, { websocket: false, store: true });
     const firstStream = await first.createResponse!({ model: "test", store: true, input: [input], stream: true });
     for await (const _event of firstStream) { /* 消费流以完成基准保存。 */ }
     first.close?.();
     closeResponsesSession(sessionId);
 
-    const second = createChatClient("key", baseURL, "responses", sessionId);
+    const second = createChatClient("key", baseURL, "responses", sessionId, undefined, { websocket: false, store: true });
     const secondStream = await second.createResponse!({ model: "test", store: true, input: [input, output, next], stream: true });
     const events: any[] = [];
     for await (const event of secondStream) events.push(event);
@@ -268,7 +258,6 @@ test("HTTP SSE 保存输出项并在旧响应不存在时回退", async () => {
 test("WebSocket 达到连接时限后重连并使用已存储响应续接", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "zbot-responses-reconnect-"));
   process.env.ZBOT_STATE_DIR = stateDir;
-  process.env.OPENAI_RESPONSES_WEBSOCKET = "true";
   const sessionId = crypto.randomUUID();
   const input = { role: "user", content: "hello" };
   const output = { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text", text: "hi", annotations: [] }] };
@@ -298,7 +287,7 @@ test("WebSocket 达到连接时限后重连并使用已存储响应续接", asyn
       },
     },
   });
-  const client = createChatClient("key", `http://127.0.0.1:${server.port}/v1`, "responses", sessionId);
+  const client = createChatClient("key", `http://127.0.0.1:${server.port}/v1`, "responses", sessionId, undefined, { websocket: true });
   try {
     await client.createResponse!({ model: "test", store: true, input: [input], stream: false });
     await client.createResponse!({ model: "test", store: true, input: [input, output, next], stream: false });
@@ -319,7 +308,6 @@ test("WebSocket 达到连接时限后重连并使用已存储响应续接", asyn
 test("WebSocket 已输出内容时连接错误不会自动重放请求", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "zbot-responses-partial-"));
   process.env.ZBOT_STATE_DIR = stateDir;
-  process.env.OPENAI_RESPONSES_WEBSOCKET = "true";
   const sessionId = crypto.randomUUID();
   let generations = 0;
   const server = Bun.serve({
@@ -341,7 +329,7 @@ test("WebSocket 已输出内容时连接错误不会自动重放请求", async (
       },
     },
   });
-  const client = createChatClient("key", `http://127.0.0.1:${server.port}/v1`, "responses", sessionId);
+  const client = createChatClient("key", `http://127.0.0.1:${server.port}/v1`, "responses", sessionId, undefined, { websocket: true });
   try {
     const stream = await client.createResponse!({ model: "test", store: true, input: [{ role: "user", content: "hi" }], stream: true });
     const events: any[] = [];

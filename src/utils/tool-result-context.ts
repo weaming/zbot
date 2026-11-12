@@ -1,8 +1,4 @@
-import {
-    TOOL_RESULT_SUMMARY_HEAD_TOKENS,
-    TOOL_RESULT_SUMMARY_TAIL_TOKENS,
-    TOOL_RESULT_SUMMARY_THRESHOLD_TOKENS,
-} from '../config.js';
+import { getRuntimeConfig } from '../config/index.js';
 import type { ChatMessage } from '../types/session.js';
 import { estimateTextTokens } from './token-estimator.js';
 
@@ -121,13 +117,14 @@ export function projectToolMessageForPrompt(
 function projectToolContent(message: ChatMessage & { role: 'tool' }, options: ToolResultProjectionOptions): string {
     const content = message.content;
     const originalTokens = estimateTextTokens(message.content);
-    const thresholdTokens = getPositiveLimit(options.thresholdTokens, TOOL_RESULT_SUMMARY_THRESHOLD_TOKENS);
+    const summary = getRuntimeConfig().toolResultSummary;
+    const thresholdTokens = getPositiveLimit(options.thresholdTokens, summary.thresholdTokens);
     if (originalTokens <= thresholdTokens) {
         return content;
     }
 
-    const headTokens = getPositiveLimit(options.headTokens, TOOL_RESULT_SUMMARY_HEAD_TOKENS);
-    const tailTokens = getPositiveLimit(options.tailTokens, TOOL_RESULT_SUMMARY_TAIL_TOKENS);
+    const headTokens = getPositiveLimit(options.headTokens, summary.headTokens);
+    const tailTokens = getPositiveLimit(options.tailTokens, summary.tailTokens);
     const characters = Array.from(message.content);
     const headLength = getMaxCharacterCount(characters, headTokens);
     const tailLength = getMaxCharacterCount([...characters].reverse(), tailTokens);

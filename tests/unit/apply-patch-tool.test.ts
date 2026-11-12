@@ -39,43 +39,29 @@ describe("resolveApplyPatchToolMode", () => {
     test("gpt 模型走 custom 自由文本工具", () => {
         expect(resolveApplyPatchToolMode(
             { model: "gpt-6-luna", baseURL: "https://api.openai.com/v1" },
-            {},
+            undefined,
         )).toBe("custom");
     });
 
     test("DeepSeek 端点原样下发（只有 function 工具可用）", () => {
-        expect(resolveApplyPatchToolMode({ model: "deepseek-chat", baseURL: "https://api.deepseek.com/v1" }, {}))
+        expect(resolveApplyPatchToolMode({ model: "deepseek-chat", baseURL: "https://api.deepseek.com/v1" }, undefined))
             .toBe("off");
     });
 
     test("其他模型不做处理", () => {
-        expect(resolveApplyPatchToolMode({ model: "claude-4-sonnet", baseURL: "https://api.anthropic.com/v1" }, {}))
+        expect(resolveApplyPatchToolMode({ model: "claude-4-sonnet", baseURL: "https://api.anthropic.com/v1" }, undefined))
             .toBe("off");
     });
 
-    test("env 覆盖优先于模型判定", () => {
+    test("配置覆盖优先于模型判定", () => {
         expect(resolveApplyPatchToolMode(
             { model: "gpt-6-luna", baseURL: "https://api.openai.com/v1" },
-            { APPLY_PATCH_MODE: "off" },
+            "off",
         )).toBe("off");
         expect(resolveApplyPatchToolMode(
             { model: "deepseek-chat", baseURL: "https://api.deepseek.com" },
-            { APPLY_PATCH_MODE: "custom" },
+            "custom",
         )).toBe("custom");
-    });
-
-    test("env 非法值不生效，回落到模型判定", () => {
-        expect(resolveApplyPatchToolMode(
-            { model: "gpt-6-luna", baseURL: "https://api.openai.com/v1" },
-            { APPLY_PATCH_MODE: "grammar" },
-        )).toBe("custom");
-    });
-
-    test("历史取值 function 等价于 off", () => {
-        expect(resolveApplyPatchToolMode(
-            { model: "gpt-6-luna", baseURL: "https://api.openai.com/v1" },
-            { APPLY_PATCH_MODE: "function" },
-        )).toBe("off");
     });
 });
 

@@ -106,6 +106,7 @@ import {
     setDefaultChatModelOption,
     validateChatApiSettings,
 } from "../services/chat-runtime.js";
+import { getTuiConfig, setRuntimeReasoningEffort } from "../config/index.js";
 import type { ChatModelSelection } from "../types/chat-model.js";
 import { readSessionTodos, type TodoItem } from "../tools/todo-tool.js";
 import { deepSeekPhaseInfo, endpointHost, normalizeDeepSeekModel, resolvePricingMode } from "../pricing/deepseek.js";
@@ -448,6 +449,7 @@ export class ChatApp {
                     options,
                     // 强度也交给面板做默认高亮：目标模型支持就沿用，否则 auto
                     current: {
+                        provider: settings.provider,
                         protocol: settings.protocol!,
                         model: settings.model,
                         reasoningEffort: effectiveReasoningEffort(current),
@@ -947,6 +949,7 @@ export class ChatApp {
         const normalized = resolved.effort;
         if (sessionId) {
             const selection: ChatModelSelection = {
+                provider: view.current.provider,
                 protocol: view.current.protocol as ChatModelSelection["protocol"],
                 model: view.current.model,
                 reasoningEffort: normalized,
@@ -964,12 +967,10 @@ export class ChatApp {
                 this.store.pushSystemMessage(`思考强度设置保存失败：${error?.message ?? String(error)}`, sessionId);
             }
         } else if (normalized === "auto") {
-            delete process.env.REASONING_EFFORT;
-            delete process.env.OPENAI_REASONING_EFFORT;
-            delete process.env.DEEPSEEK_REASONING_EFFORT;
+            setRuntimeReasoningEffort(undefined);
             this.store.pushSystemMessage("🧠 思考强度已重置为 auto（不传思考强度参数，走服务端默认）", sessionId);
         } else {
-            process.env.REASONING_EFFORT = normalized;
+            setRuntimeReasoningEffort(normalized);
             this.store.pushSystemMessage(`🧠 思考强度已设置为: ${normalized}`, sessionId);
         }
 
@@ -991,11 +992,11 @@ export class ChatApp {
         makeDefault: boolean,
     ): Promise<void> {
         const previousEffort = effectiveReasoningEffort(this.currentModelSelection);
-        // 与命令行同一条保留规则：新模型支持原档位才保留，否则回落 auto（含环境变量里的档位）
+        // 与命令行同一条保留规则：新模型支持原档位才保留，否则回落 auto（含配置里的档位）
         const selected: ChatModelSelection = {
             ...selection,
             reasoningEffort: selection.reasoningEffort
-                ?? preserveEffort(previousEffort, selection.protocol, selection.model),
+                ?? preserveEffort(previousEffort, selection.provider, selection.model),
         };
         try {
             await this.persistModelSelection(sessionId, selected);
@@ -1038,12 +1039,12 @@ export class ChatApp {
             this.tui.flash("没有打开的会话");
             return;
         }
-        const [protocol, model, effort] = args;
+        const [provider, model, effort] = args;
         // 与 session send 同一条解析：按**目标模型**的档位校验并归一化强度；
-        // "当前档位"要含环境变量（否则切模型会把 REASONING_EFFORT 静默变成 auto）
+        // "当前档位"要含配置与进程内覆盖（否则切模型会把已设档位静默变成 auto）
         const resolved = resolveModelUse(
             getChatModelOptions(),
-            protocol,
+            provider,
             model,
             effort,
             effectiveReasoningEffort(this.currentModelSelection),
@@ -1565,9 +1566,9 @@ export class ChatApp {
         this.writeWheelLog(`面板滚轮 ${detail}`);
     }
 
-    /** 滚轮诊断写独立文件（ZBOT_TUI_DEBUG_WHEEL=1 时开启），便于 cat 复制、不混进会话日志。 */
+    /** 滚轮诊断写独立文件（`tui.debugWheel` 打开时），便于 cat 复制、不混进会话日志。 */
     private writeWheelLog(line: string): void {
-        if (process.env.ZBOT_TUI_DEBUG_WHEEL !== "1") return;
+        if (!getTuiConfig().debugWheel) return;
         try {
             const file = getWheelLogFile();
             fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -2852,7 +2853,7 @@ export class ChatApp {
      */
     private renderStatusBar(): void {
         const modelSettings = getChatApiSettings(this.currentModelSelection);
-        const protocolName = protocolStatusLabel(modelSettings.protocol, modelSettings.model);
+        const protocolName = protocolStatusLabel(modelSettings.protocol, modelSettings.model, modelSettings.websocket);
         const modelName = `${modelSettings.model || "default"} (${protocolName})`;
         const sessionId = this.store.currentSessionId;
         const pricing = resolvePricingMode(endpointHost(modelSettings.apiBase), modelSettings);
@@ -2871,11 +2872,7 @@ export class ChatApp {
         const model = buildStatusBarModel({
             modelName,
             effort: modelSettings.reasoningEffort
-                ?? this.currentModelSelection?.reasoningEffort
-                ?? process.env.REASONING_EFFORT
-                ?? process.env.OPENAI_REASONING_EFFORT
-                ?? process.env.DEEPSEEK_REASONING_EFFORT
-                ?? "auto",
+                ?? effectiveReasoningEffort(this.currentModelSelection),
             sessionId,
             phase: this.turnState.phase(sessionId),
             spinnerIndex: this.spinnerIndex,

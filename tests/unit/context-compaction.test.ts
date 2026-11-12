@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { defaultTestConfig, useConfig } from "./test-config.js";
 
 /**
  * 上下文压缩回归用例（对应真实事故：状态栏 69.1k/500k，请求却被 provider 判 1096619 tokens 超窗）：
@@ -33,7 +34,15 @@ const { shouldAutoCompact, getAutoCompactThreshold } = await import(
 );
 const { emptyUsage } = await import("../../src/events/ui-events.js");
 
-const originalContextWindow = process.env.CONTEXT_WINDOW_TOKENS;
+/** 窗口按用例改装：写临时 config.yaml 后重新加载。 */
+let restoreConfig: (() => void) | undefined;
+
+function useContextWindow(tokens: number): void {
+    restoreConfig?.();
+    restoreConfig = useConfig(defaultTestConfig({
+        runtime: { tokenizer: false, memoryUserId: 0, contextWindowTokens: tokens },
+    })).restore;
+}
 
 /** 造一段超过测试窗口的长文本。 */
 function longText(tokens: number): string {
@@ -42,12 +51,12 @@ function longText(tokens: number): string {
 
 beforeEach(() => {
     // 收紧窗口，用例不必造百万 token 的假历史。
-    process.env.CONTEXT_WINDOW_TOKENS = "40000";
+    useContextWindow(40_000);
 });
 
 afterEach(() => {
-    if (originalContextWindow === undefined) delete process.env.CONTEXT_WINDOW_TOKENS;
-    else process.env.CONTEXT_WINDOW_TOKENS = originalContextWindow;
+    restoreConfig?.();
+    restoreConfig = undefined;
 });
 
 afterAll(() => {
@@ -109,7 +118,7 @@ describe("provider 超窗后的本轮原子压缩", () => {
     });
 
     test("摘要请求自身超窗时不重试且不返回部分摘要", async () => {
-        process.env.CONTEXT_WINDOW_TOKENS = "8000";
+        useContextWindow(8000);
         let requests = 0;
         runChatQueryImpl = async options => {
             requests++;
@@ -152,7 +161,7 @@ describe("provider 超窗后的本轮原子压缩", () => {
 describe("autoCompactIfNeeded 单次原子压缩", () => {
     test("正常阈值触发的压缩只发一次请求（前缀缓存可命中）", async () => {
         // 收紧窗口使阈值变小，用例无需构造百万 token 历史。
-        process.env.CONTEXT_WINDOW_TOKENS = "20000";
+        useContextWindow(20000);
         const session = createEmptySession("sess-single-request-compact");
         appendCompletedTurn(session, ["开头问题"], [{ role: "assistant", content: longText(4_800) }], true);
         appendCompletedTurn(session, ["尾部问题"], [{ role: "assistant", content: "短回复" }], true);
@@ -194,7 +203,7 @@ describe("autoCompactIfNeeded 单次原子压缩", () => {
     });
 
     test("优先按完整 turn 保留：预算够时切点落在 turn 边界", async () => {
-        process.env.CONTEXT_WINDOW_TOKENS = "20000";
+        useContextWindow(20000);
         const session = createEmptySession("sess-keep-turns");
         for (let index = 1; index <= 4; index++) {
             appendCompletedTurn(session, [`问题 ${index}`], [{ role: "assistant", content: longText(5_000) }], true);
@@ -231,7 +240,7 @@ describe("autoCompactIfNeeded 单次原子压缩", () => {
     });
 
     test("连续压缩：上次保留段会被下次压缩一起吸收", async () => {
-        process.env.CONTEXT_WINDOW_TOKENS = "20000";
+        useContextWindow(20000);
         const session = createEmptySession("sess-absorb-tail");
         for (let index = 1; index <= 4; index++) {
             appendCompletedTurn(session, [`问题 ${index}`], [{ role: "assistant", content: longText(5_000) }], true);

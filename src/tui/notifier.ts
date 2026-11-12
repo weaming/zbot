@@ -3,6 +3,7 @@
  * 优先采用标准 OSC 777 / OSC 9 转义序列，由终端模拟器（如 Ghostty、WezTerm、iTerm2 等）代理呈现原生系统通知。
  */
 
+import { getTuiConfig } from "../config/index.js";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 
 export interface TerminalNotificationOptions {
@@ -29,7 +30,7 @@ export function sanitizeNotificationText(text: string): string {
  */
 export function sendTerminalNotification(options: TerminalNotificationOptions): void {
     if (!options.force && !process.stdout.isTTY) return;
-    if (process.env.ZBOT_DISABLE_NOTIFICATIONS === "true" || process.env.ZBOT_DISABLE_NOTIFICATIONS === "1") return;
+    if (getTuiConfig().disableNotifications) return;
 
     const rawTitle = options.title ?? "zbot";
     const title = sanitizeNotificationText(rawTitle);

@@ -357,18 +357,19 @@ async function peerModel(
 
     if (action === undefined) {
         const selected = modelView.options.find(option =>
-            option.protocol === modelView.current.protocol && option.model === modelView.current.model);
+            option.provider === modelView.current.provider && option.model === modelView.current.model);
         const text = [
-            `当前模型：${modelView.current.model}（${modelView.current.protocol}）`,
+            `当前模型：${modelView.current.provider} · ${modelView.current.model}（${modelView.current.protocol}）`,
+            ...(modelView.isTemporary ? ["（临时模型：不在配置的 models 里，仅本会话生效）"] : []),
             `思考强度：${modelView.current.reasoningEffort}`,
             modelView.options.length > 0
                 ? "可切换模型："
-                : "没有配置可切换模型（OPENAI_CHAT_MODELS / OPENAI_RESPONSES_MODELS）",
+                : "配置里没有列出可切换模型（config.yaml 的 providers.<name>.models）",
             ...modelView.options.map(option =>
-                `  ${option === selected ? "*" : " "} ${option.protocol}/${option.model}`),
+                `  ${option === selected ? "*" : " "} ${option.provider}/${option.model}`),
             "",
             `可选思考强度：${modelView.efforts.join(" | ")}`,
-            "用法：/model <协议> <模型> [强度|auto] · /model effort [档位|auto]",
+            "用法：/model <provider> <模型> [强度|auto] · /model effort [档位|auto]",
         ];
         return view(json, text.join("\n"), () => ({
             current: modelView.current,
@@ -392,7 +393,7 @@ async function peerModel(
         await host.setSessionModelSelection(sessionId, next, { alreadyReserved: true });
         return view(
             json,
-            `当前会话模型已设为：${next.model}（${next.protocol}），思考强度 ${next.reasoningEffort}，下一回合生效`,
+            `当前会话模型已设为：${next.provider} · ${next.model}（${next.protocol}），思考强度 ${next.reasoningEffort}，下一回合生效`,
             () => ({ ...next, effective: "next_turn" }),
         );
     }
@@ -409,6 +410,7 @@ async function peerModel(
     const resolved = resolveEffort(first, choices);
     if (!resolved.ok) throw new Error(resolved.error);
     const next: ChatModelSelection = {
+        provider: modelView.current.provider,
         protocol: modelView.current.protocol as ChatModelSelection["protocol"],
         model: modelView.current.model,
         reasoningEffort: resolved.effort,

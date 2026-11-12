@@ -22,7 +22,7 @@ import {
     prepareCompactionHistory,
 } from "../services/auto-compact.js";
 import { acquireSessionLock, type SessionLockHandle } from "../utils/session-lock.js";
-import { DEFAULT_MEMORY_USER_ID } from "../utils/runtime-paths.js";
+import { getDefaultMemoryUserId } from "../utils/runtime-paths.js";
 import { emptyUsage, mergeUsage, type UIEvent } from "../events/ui-events.js";
 import type { EventLog } from "../events/event-log.js";
 import type { SessionReplay } from "../events/session-replay.js";
@@ -100,7 +100,7 @@ export async function runSessionTurn(
             buildHistory: () =>
                 buildConversationHistory(activeSession, userMessages, { skipToolCallIds: spec.skipToolCallIds }),
             signal: abortController.signal,
-            userId: DEFAULT_MEMORY_USER_ID,
+            userId: getDefaultMemoryUserId(),
             cwd: activeSession.cwd,
             // 回合内 cwd 工具改过目录后，后续工具调用立即用新基准
             resolveCwd: () => host.activeSessions.get(sessionId)?.session.cwd,
@@ -194,7 +194,7 @@ export async function runSessionTurn(
                         model: getChatApiSettings(activeSession.modelSelection).model,
                         ...(activeSession.modelSelection ? { modelSelection: activeSession.modelSelection } : {}),
                     }),
-                    userId: DEFAULT_MEMORY_USER_ID,
+                    userId: getDefaultMemoryUserId(),
                     sessionId,
                     signal: abortController.signal,
                     onProgress: message => host.notify(requestId, sessionId, { type: "progress", message }),
@@ -313,7 +313,7 @@ export async function compactSessionContext(
             cwd: session.cwd,
             resolveCwd: () => host.activeSessions.get(sessionId)?.session.cwd,
             contextEpochId: session.contextEpochId,
-            userId: DEFAULT_MEMORY_USER_ID,
+            userId: getDefaultMemoryUserId(),
             initialRequestKind: "context_compaction",
             // 纯生成请求：不下发工具定义（十几万 token 的 schema 会白占窗口）
             disableToolCalls: true,

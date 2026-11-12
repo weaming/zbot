@@ -89,7 +89,7 @@ export async function initializeSessionHostRuntime(
     await skillRegistry.init({ watch: options.watchSkills !== false });
 
     const { initMcpClients } = await import("../mcp/client-manager.js");
-    await initMcpClients({ mode: "tui" });
+    await initMcpClients();
 }
 
 interface RuntimeReloadResult {
@@ -1460,7 +1460,7 @@ export class LocalSessionHost implements SessionHost {
 
         await Promise.all([
             skillRegistry.reload(),
-            mcp.reloadMcpClients({ mode: "tui" }),
+            mcp.reloadMcpClients(),
         ]);
 
         const statuses = mcp.getMcpServersStatus();

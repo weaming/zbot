@@ -1,0 +1,75 @@
+# zbot 的唯一配置入口：复制到 ~/.zbot/config.yaml 后按需修改。
+# 密钥可以直接写，也可以写 `$ENV_NAME` 引用进程环境里的变量（真值不落盘）。
+# 路径支持 `~`；ZBOT_CONFIG_FILE 可指向别的文件（多实例/测试用）。
+
+# 一个 provider 固定一个协议：responses 或 chat_completions。
+providers:
+  deepseek:
+    protocol: responses
+    baseUrl: https://api.deepseek.com
+    apiKey: $DEEPSEEK_API_KEY
+    models:
+      - deepseek-flash
+      - deepseek-v4-pro
+    # 可选思考强度候选（省略时用内置清单）
+    efforts: [low, high, max]
+    # Responses 专用：托管工具由上游执行，本地没有实现
+    hostedTools: [web_search]
+    # Responses 是否走 WebSocket；省略时 gpt-* 默认开、其余默认关
+    websocket: true
+    # Responses 是否请求上游保存会话；默认 false
+    store: false
+
+  local:
+    protocol: chat_completions
+    baseUrl: http://127.0.0.1:3030/v1
+    # 本地/局域网服务可省略 apiKey 与 models（模型由服务端决定）
+    models: []
+
+# 默认模型：省略时取第一个 provider 的第一项
+defaults:
+  provider: deepseek
+  model: deepseek-flash
+  # auto 表示不显式下发思考强度
+  reasoningEffort: auto
+
+# 上下文预算与自动压缩
+runtime:
+  # 显式指定时压过内置模型窗口表；省略按模型名查表
+  # contextWindowTokens: 128000
+  reservedOutputTokens: 8192
+  autocompactBufferTokens: 15000
+  retainTailTokens: 12000
+  autocompactRatio: 0.8
+  toolResultSummary:
+    thresholdTokens: 8192
+    headTokens: 1024
+    tailTokens: 2048
+  # 关闭真分词（诊断用）
+  tokenizer: true
+  memoryUserId: 0
+  # 身份文件：留空时用内置 AGENTS.md + 会话目录里的身份文件
+  # identityFile: ~/.zbot/IDENTITY.md
+  # extraIdentityFile: ~/.zbot/AGENTS.md
+  # DeepSeek Files API（图片上传）地址
+  # deepseekFilesApi: https://api.deepseek.com/v1/files
+  archiveRetentionDays: 14
+  # 协议日志里保留流式增量事件（体积大，排障时再开）
+  llmLogDeltas: false
+  # 非官方端点（局域网网关）也按 DeepSeek 官方价格表估算费用（模型名需含 deepseek + flash/pro）
+  deepseekCostStat: false
+  # apply_patch 下发形态：custom 自由文本 / off 原样下发；省略按模型名启发式
+  # applyPatchMode: off
+
+network:
+  # 命令行工具与网络请求的代理；注释掉即直连
+  proxy: http://localhost:7890
+  # 模型 API 单独使用的代理
+  # openaiProxy: http://localhost:7890
+
+mcp:
+  serversFile: ~/.zbot/mcp-servers.yaml
+
+tui:
+  disableNotifications: false
+  debugWheel: false

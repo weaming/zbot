@@ -1,3 +1,4 @@
+import { getNetworkConfig } from "../../config/index.js";
 import type OpenAI from "openai";
 import { ResponsesWS } from "openai/resources/responses/ws";
 import { HttpsProxyAgent } from "https-proxy-agent";
@@ -70,7 +71,7 @@ export function acquireResponsesSession(
   sessionId?: string,
 ): { session: ResponsesSession; release(): void } {
   const identity = createHash("sha256")
-    .update(JSON.stringify([client.baseURL, client.apiKey, client.organization, client.project, process.env.OPENAI_PROXY ?? ""]))
+    .update(JSON.stringify([client.baseURL, client.apiKey, client.organization, client.project, getNetworkConfig().openaiProxy ?? ""]))
     .digest("hex");
   let entry = sessionId ? sessions.get(sessionId) : undefined;
   if (entry?.isLeased) entry = undefined;
@@ -257,7 +258,7 @@ export class ResponsesSession {
 
   private connect(): ResponsesWS {
     if (this.socket) return this.socket;
-    const proxyUrl = process.env.OPENAI_PROXY;
+    const proxyUrl = getNetworkConfig().openaiProxy;
     const hostname = new URL(this.client.baseURL).hostname;
     const agent = proxyUrl && !isInternalHostname(hostname) ? new HttpsProxyAgent(proxyUrl) : undefined;
     const socket = new ResponsesWS(this.client, {

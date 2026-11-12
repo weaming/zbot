@@ -543,7 +543,7 @@ export const initMcpClients = async (options: LoadMcpConfigOptions | unknown = {
 };
 
 /** 重新读取配置并重建所有 MCP 连接与远程工具目录。 */
-export async function reloadMcpClients(options: LoadMcpConfigOptions = { mode: "tui" }): Promise<void> {
+export async function reloadMcpClients(options: LoadMcpConfigOptions = {}): Promise<void> {
     await closeAllMcpClients();
     await initMcpClients(options);
 }

@@ -212,11 +212,11 @@ describe("runSpawn", () => {
 
     test("把状态目录转发给新 pane（新 pane 继承的是 herdr server 的环境）", async () => {
         const { deps, herdr } = baseDeps({
-            env: { ...HERDR_ENV, ZBOT_STATE_DIR: "/tmp/state-x", ZBOT_ENV_FILE: "/tmp/env-x" },
+            env: { ...HERDR_ENV, ZBOT_STATE_DIR: "/tmp/state-x", ZBOT_CONFIG_FILE: "/tmp/config-x.yaml" },
         });
         await runJson(spawnCommand(), deps);
 
-        expect(herdr.created?.env).toEqual({ ZBOT_STATE_DIR: "/tmp/state-x", ZBOT_ENV_FILE: "/tmp/env-x" });
+        expect(herdr.created?.env).toEqual({ ZBOT_STATE_DIR: "/tmp/state-x", ZBOT_CONFIG_FILE: "/tmp/config-x.yaml" });
     });
 
     test("没有首条输入：不投递，命令里没有死掉的 wait", async () => {

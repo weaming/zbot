@@ -4,6 +4,7 @@ import {
     sendTerminalNotification,
     notifyTurnResult,
 } from "../../src/tui/notifier.js";
+import { defaultTestConfig, useConfig } from "./test-config.js";
 
 describe("TUI 终端通知 (Ghostty / OSC 777 & OSC 9)", () => {
     it("sanitizeNotificationText 清洗控制字符、分号与反斜杠，合并换行与空格", () => {
@@ -129,9 +130,10 @@ describe("TUI 终端通知 (Ghostty / OSC 777 & OSC 9)", () => {
         }
     });
 
-    it("设置 ZBOT_DISABLE_NOTIFICATIONS 环境变量时静默", () => {
-        const originalEnv = process.env.ZBOT_DISABLE_NOTIFICATIONS;
-        process.env.ZBOT_DISABLE_NOTIFICATIONS = "true";
+    it("配置里关掉通知时静默", () => {
+        const restoreConfig = useConfig(defaultTestConfig({
+            tui: { disableNotifications: true, debugWheel: false },
+        })).restore;
 
         let called = false;
         const writeSpy = spyOn(process.stdout, "write").mockImplementation(() => {
@@ -147,7 +149,7 @@ describe("TUI 终端通知 (Ghostty / OSC 777 & OSC 9)", () => {
             });
             expect(called).toBe(false);
         } finally {
-            process.env.ZBOT_DISABLE_NOTIFICATIONS = originalEnv;
+            restoreConfig();
             writeSpy.mockRestore();
         }
     });

@@ -1,10 +1,4 @@
-import {
-    AUTOCOMPACT_BUFFER_TOKENS,
-    AUTOCOMPACT_PERCENTAGE,
-    CONTEXT_WINDOW_TOKENS,
-    RESERVED_OUTPUT_TOKENS,
-    RETAINED_TAIL_TOKENS,
-} from "../config.js";
+import { getRuntimeConfig } from "../config/index.js";
 import type { ChatMessage, ConversationTurn, Session, StoredChatMessage } from "../types/session.js";
 import { getSessionContextHistoryWithIds } from "./conversation-history.js";
 import { estimateMessageTokens } from "./token-estimator.js";
@@ -116,10 +110,8 @@ export function estimateTurnsTokens(turns: ConversationTurn[]): number {
 
 /** 根据模型名获取模型的上下文窗口上限（Tokens） */
 export function getContextWindowForModel(model?: string): number {
-    if (process.env.CONTEXT_WINDOW_TOKENS) {
-        const envParsed = parseInt(process.env.CONTEXT_WINDOW_TOKENS, 10);
-        if (!isNaN(envParsed) && envParsed > 0) return envParsed;
-    }
+    const configured = getRuntimeConfig().contextWindowTokens;
+    if (configured) return configured;
 
     if (model) {
         const normalized = model.toLowerCase();
@@ -130,13 +122,13 @@ export function getContextWindowForModel(model?: string): number {
         }
     }
 
-    return CONTEXT_WINDOW_TOKENS;
+    return DEFAULT_CONTEXT_WINDOW_TOKENS;
 }
 
 /** 获取有效上下文窗口大小（扣除预留的生成输出 Buffer） */
 export function getEffectiveContextWindowSize(model?: string): number {
     const total = getContextWindowForModel(model);
-    return Math.max(1_000, total - RESERVED_OUTPUT_TOKENS);
+    return Math.max(1_000, total - getRuntimeConfig().reservedOutputTokens);
 }
 
 /**
@@ -146,11 +138,13 @@ export function getEffectiveContextWindowSize(model?: string): number {
  */
 export function getAutoCompactThreshold(model?: string): number {
     const effectiveWindow = getEffectiveContextWindowSize(model);
-    const pct = Number.isFinite(AUTOCOMPACT_PERCENTAGE) && AUTOCOMPACT_PERCENTAGE > 0 && AUTOCOMPACT_PERCENTAGE <= 1
-        ? AUTOCOMPACT_PERCENTAGE
+    const runtime = getRuntimeConfig();
+    const configured = runtime.autocompactRatio;
+    const pct = Number.isFinite(configured) && configured > 0 && configured <= 1
+        ? configured
         : 0.80;
     const percentageThreshold = Math.floor(effectiveWindow * pct);
-    const bufferThreshold = effectiveWindow - AUTOCOMPACT_BUFFER_TOKENS;
+    const bufferThreshold = effectiveWindow - runtime.autocompactBufferTokens;
     return Math.max(1_000, Math.min(percentageThreshold, bufferThreshold));
 }
 
@@ -217,7 +211,7 @@ export async function splitTurnsForCompaction(
     const candidates = turns;
     if (candidates.length === 0) return { turnsToCompact: [] };
 
-    const tailLimit = options.retainedTailTokens ?? RETAINED_TAIL_TOKENS;
+    const tailLimit = options.retainedTailTokens ?? getRuntimeConfig().retainTailTokens;
     const last = candidates.length - 1;
 
     // 显式传入 0 表示不保留尾部：整段候选历史都折叠进摘要。
@@ -321,3 +315,5 @@ export async function fitMessagesToBudget(
         ...messages.slice(cut),
     ];
 }
+/** 没有任何配置与模型信息时的兜底窗口。 */
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000;

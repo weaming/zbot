@@ -24,13 +24,13 @@ make build-pack
 
 ```sh
 mkdir -p ~/.zbot
-cp env.example ~/.zbot/env
-vi ~/.zbot/env
+cp config.example.yaml ~/.zbot/config.yaml
+vi ~/.zbot/config.yaml
 ```
 
-填写 `OPENAI_MODEL`。旧的 `OPENAI_*` 配置按 Chat Completions 使用；云端服务填写 `OPENAI_API_KEY`，本地或局域网服务可省略密钥。兼容接口可按需调整 `OPENAI_BASE_URL`。
+在 `providers` 里配置模型服务（一个 provider 固定一个协议：`responses` 或 `chat_completions`），`apiKey` 可写 `$ENV_NAME` 引用进程环境里的密钥。云端服务需要密钥，本地或局域网服务可省略；兼容接口按需改 `baseUrl`。
 
-Responses API 和 Chat Completions 可使用各自的 `OPENAI_RESPONSES_*` 与 `OPENAI_CHAT_*` 配置。DeepSeek 两种协议的 Base URL 都是 `https://api.deepseek.com`。配置多个协议或模型后，在 TUI 输入 `/model` 可为当前会话选择模型。
+`defaults` 决定默认 provider 与模型；配置多个 provider/模型后，在 TUI 输入 `/model` 可为当前会话切换，并可手输配置里没有的临时模型。完整键表见 [配置文档](docs/configuration.md)。
 
 ## 使用
 

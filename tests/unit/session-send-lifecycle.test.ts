@@ -10,6 +10,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "b
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { defaultTestConfig, useConfig } from "./test-config.js";
 
 const queries: Array<{ sessionId?: string; query: string }> = [];
 const realChatRuntime = await import("../../src/services/chat-runtime.js");
@@ -160,28 +161,31 @@ describe("一次性宿主的模型设置", () => {
         await owner.renameSession(target, "model-set-test");
         await owner.close();
 
-        const savedModels = {
-            chat: process.env.OPENAI_CHAT_MODEL,
-            base: process.env.OPENAI_CHAT_BASE_URL,
-        };
-        process.env.OPENAI_CHAT_MODEL = "stub-model";
-        process.env.OPENAI_CHAT_BASE_URL = "https://api.openai.com/v1";
+        const restoreConfig = useConfig(defaultTestConfig({
+            providers: {
+                stub: {
+                    protocol: "chat_completions",
+                    baseUrl: "https://api.openai.com/v1",
+                    apiKey: "k",
+                    models: ["stub-model"],
+                },
+            },
+            defaults: { provider: "stub", model: "stub-model" },
+        })).restore;
         try {
-            expect(await cli(["send", target, "/model chat_completions stub-model HIGH", "--wait=5"]))
+            expect(await cli(["send", target, "/model stub stub-model HIGH", "--wait=5"]))
                 .toContain("思考强度 high");
 
             // 全新进程只读：pending 若还留在内存里，这里会退回 auto
             const view = JSON.parse(await cli(["send", target, "/model --json", "--wait=5"]));
             expect(view.current).toMatchObject({
+                provider: "stub",
                 protocol: "chat_completions",
                 model: "stub-model",
                 reasoningEffort: "high",
             });
         } finally {
-            if (savedModels.chat === undefined) delete process.env.OPENAI_CHAT_MODEL;
-            else process.env.OPENAI_CHAT_MODEL = savedModels.chat;
-            if (savedModels.base === undefined) delete process.env.OPENAI_CHAT_BASE_URL;
-            else process.env.OPENAI_CHAT_BASE_URL = savedModels.base;
+            restoreConfig();
         }
     }, 20_000);
 });

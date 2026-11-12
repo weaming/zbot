@@ -18,6 +18,12 @@ import type { UIEvent } from "../../events/ui-events.js";
 interface RequestClient {
     baseURL: string;
     protocol?: "responses" | "chat_completions";
+    /** 协议传输开关（来自 provider 配置）；省略时按模型名启发式。 */
+    transport?: {
+        websocket?: boolean;
+        store?: boolean;
+        audioInput?: boolean;
+    };
     createResponse?: unknown;
     uploadFile?: (imagePath: string) => Promise<{ id: string }>;
     uploadFileData?: (data: string, filename: string, mimeType: string) => Promise<{ id: string }>;
@@ -65,16 +71,12 @@ export { isDeepSeekEndpoint };
  * 收到 audio 内容块会返回 400。默认关闭，宁可退化成文本占位符。
  *
  * 名字启发式会误判「名字含 audio 但端点不接受 input_audio」的网关别名
- * （如自建 LiteLLM 的 my-audio-model），可用 TOOL_AUDIO_INPUT=on|off 强制覆盖。
+ * （如自建 LiteLLM 的 my-audio-model），可用 provider 的 `audioInput` 强制开关。
  */
-export function supportsAudioInput(model: string, baseURL: string): boolean {
-    // 硬性不支持，任何覆盖都不能让它发 input_audio：该 env 是全局的，
-    // 为网关别名开的开关不该顺带打死同一实例里的 DeepSeek 会话。
+export function supportsAudioInput(model: string, baseURL: string, configured?: boolean): boolean {
+    // 硬性不支持：DeepSeek 端点只有视觉能力，provider 开关也不能让它发 input_audio
     if (isDeepSeekEndpoint(model, baseURL)) return false;
-
-    const override = (process.env.TOOL_AUDIO_INPUT ?? "").trim().toLowerCase();
-    if (override === "off" || override === "0" || override === "false") return false;
-    if (override === "on" || override === "1" || override === "true") return true;
+    if (configured !== undefined) return configured;
 
     return /audio/i.test(model);
 }
@@ -166,7 +168,7 @@ export async function prepareRequest(options: PrepareRequestOptions): Promise<Pr
     const requestMessages = useResponses
         ? shapedMessages
         : expandToolMediaMessages(stripResponsesMetadata(shapedMessages), {
-            allowAudio: supportsAudioInput(model, client.baseURL),
+            allowAudio: client.transport?.audioInput ?? supportsAudioInput(model, client.baseURL),
         });
 
     const materializedMessages = useResponses
@@ -203,7 +205,7 @@ export async function prepareRequest(options: PrepareRequestOptions): Promise<Pr
         tools: requestTools,
         ...(options.toolChoice ? { toolChoice: options.toolChoice } : {}),
         stream: options.stream,
-        store: isResponsesStoreEnabled(),
+        store: isResponsesStoreEnabled(client.transport?.store),
         isMiniMax,
         reasoning: {
             protocol,

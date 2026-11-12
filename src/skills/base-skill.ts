@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
 import { formatDisplayPath, getToolCwd } from "../utils/runtime-paths.js";
+import { getExtraIdentityFile, getRuntimeConfig } from "../config/index.js";
 
 const IDENTITY_FILES = ['AGENTS.md', 'SOUL.md', 'IDENTITY.md', 'USER.md'];
 let embeddedIdentity: string | undefined;
@@ -24,8 +25,8 @@ function interpolateEnvVars(content: string, overrides?: Record<string, string>)
  * 文件不存在时跳过，全部不存在则返回空字符串。
  */
 export function loadIdentityContext(envOverrides?: Record<string, string>): string {
-    const identityOverride = process.env.ZBOT_IDENTITY_FILE;
-    const extraIdentityFile = process.env.ZBOT_EXTRA_IDENTITY_FILE;
+    const identityOverride = getRuntimeConfig().identityFile;
+    const extraIdentityFile = getExtraIdentityFile();
 
     if (embeddedIdentity) {
         const parts = [formatIdentityContent(embeddedIdentity, "AGENTS.md", envOverrides)];

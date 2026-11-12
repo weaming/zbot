@@ -10,6 +10,7 @@ import {
     type McpServerConfig,
 } from "./config.js";
 import { MCP_CLI_USAGE } from "./help.js";
+import { getMcpConfig } from "../config/index.js";
 
 interface McpCliOptions {
     configPath?: string;
@@ -29,7 +30,7 @@ function writeOutput(text: string): void {
 }
 
 function getConfigPath(): string {
-    const configuredPath = process.env.ZBOT_MCP_SERVERS_FILE;
+    const configuredPath = getMcpConfig().serversFile;
     return configuredPath ? resolvePathWithTilde(configuredPath) : DEFAULT_TUI_MCP_CONFIG_FILE;
 }
 

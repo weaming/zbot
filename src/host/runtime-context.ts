@@ -5,37 +5,14 @@ import embeddedIdentity from "./AGENTS.md" with { type: "text" };
 import { setEmbeddedIdentity } from "../skills/base-skill.js";
 import { getSessionLogFile, getStartupLogFile } from "../utils/state-paths.js";
 import { CONSOLE_TIMESTAMP_MARK } from "../utils/logger.js";
-import { expandHomePath, setStartupToolCwd } from "../utils/runtime-paths.js";
+import { setExtraIdentityFileDefault } from "../config/index.js";
+import { setStartupToolCwd } from "../utils/runtime-paths.js";
 
 const DEFAULT_HOST_STATE_DIR = path.join(os.homedir(), ".zbot");
-const DEFAULT_HOST_SRC_ROOT = "src";
-const CONTAINER_PATH_PREFIX = "/app/";
 const STARTUP_LOG_MAX_BYTES = 2 * 1024 * 1024;
 const STARTUP_LOG_KEEP_LINES = 100;
 const STARTUP_LOG_TRIM_INTERVAL_MS = 60_000;
 const LOG_TAIL_CHUNK_BYTES = 64 * 1024;
-
-function isContainerPath(value: string | undefined): boolean {
-    return !value || value.startsWith(CONTAINER_PATH_PREFIX);
-}
-
-function resolveHostSrcRoot(): string {
-    const configuredSrcRoot = process.env.TUI_SRC_ROOT || process.env.SRC_ROOT;
-    if (configuredSrcRoot && !isContainerPath(configuredSrcRoot)) {
-        return path.resolve(expandHomePath(configuredSrcRoot));
-    }
-
-    return path.join(os.homedir(), DEFAULT_HOST_SRC_ROOT);
-}
-
-function rewriteContainerServicesForHost(): void {
-    if (!process.env.MCP_HUB_URL || process.env.MCP_HUB_URL.includes("://mcp-hub:")) {
-        process.env.MCP_HUB_URL = "http://127.0.0.1:3010/mcp";
-    }
-    if (!process.env.NETWORK_PROXY || process.env.NETWORK_PROXY.includes("host.docker.internal")) {
-        process.env.NETWORK_PROXY = "http://localhost:7890";
-    }
-}
 
 function formatLogArgument(argument: unknown): string {
     if (argument instanceof Error) return argument.stack || argument.message;
@@ -186,19 +163,15 @@ export function configureHostEnvironment(
     options: { stateDir?: string; startupCwd?: string } = {},
 ): void {
     const { stateDir, startupCwd: startup } = resolveHostEnvironment(options);
-    const srcRoot = resolveHostSrcRoot();
     fs.mkdirSync(stateDir, { recursive: true });
 
-    process.env.SRC_ROOT = srcRoot;
     process.env.ZBOT_STATE_DIR = stateDir;
     setEmbeddedIdentity(embeddedIdentity);
-    process.env.ZBOT_EXTRA_IDENTITY_FILE = path.join(os.homedir(), ".zbot", "AGENTS.md");
+    setExtraIdentityFileDefault(path.join(os.homedir(), ".zbot", "AGENTS.md"));
     process.env.TUI_PLATFORM = `${process.platform} ${process.arch}`;
     process.env.TUI_CWD = startup;
     // 固化启动目录：TUI_CWD 之后会随会话切换被改写，新建会话仍须以启动目录为初始值。
     startupCwd = startup;
     // 同一份固化值也交给工具层：旧会话缺 cwd 时不能继承当前选中会话的目录。
     setStartupToolCwd(startup);
-    process.env.TUI_SRC_ROOT = srcRoot;
-    rewriteContainerServicesForHost();
 }

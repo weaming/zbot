@@ -122,7 +122,7 @@ describe("ModelMcpPanels 模型面板", () => {
         panels.openModel("sess-a");
 
         expect(stack.isEmpty).toBe(true);
-        expect(state.notices.at(-1)).toContain("OPENAI_RESPONSES_MODELS");
+        expect(state.notices.at(-1)).toContain("providers.<name>.models");
     });
 
     test("打开模型面板：进栈、记录浮层与日志；complete 交给宿主动作", () => {

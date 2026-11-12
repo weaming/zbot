@@ -8,7 +8,7 @@ describe("buildCreateTabArgs", () => {
             cwd: "/tmp/x y",
             label: "复审",
             focus: false,
-            env: { ZBOT_STATE_DIR: "/s", ZBOT_ENV_FILE: "/e" },
+            env: { ZBOT_STATE_DIR: "/s", ZBOT_CONFIG_FILE: "/e" },
         })).toEqual([
             "tab", "create",
             "--workspace", "w24",
@@ -16,7 +16,7 @@ describe("buildCreateTabArgs", () => {
             "--label", "复审",
             "--no-focus",
             "--env", "ZBOT_STATE_DIR=/s",
-            "--env", "ZBOT_ENV_FILE=/e",
+            "--env", "ZBOT_CONFIG_FILE=/e",
         ]);
     });
 

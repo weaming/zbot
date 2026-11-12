@@ -409,7 +409,7 @@ describe("ChatApp 提问接线", () => {
 
         editor.onSubmitWithImages?.("/review 请重点检查并发竞态", []);
         await waitFor(() => sentTexts.length === 1);
-        expect(sentTexts[0]).toContain("Do dev-review-fix loop");
+        expect(sentTexts[0]).toContain("Run a dev → review → fix loop");
         expect(sentTexts[0]).toContain("请重点检查并发竞态");
     });
 

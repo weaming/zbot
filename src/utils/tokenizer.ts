@@ -11,6 +11,7 @@
  */
 
 import fs from "node:fs";
+import { getRuntimeConfig } from "../config/index.js";
 import path from "node:path";
 import tokenizerFile from "../../assets/deepseek-v4-tokenizer.tokjson" with { type: "file" };
 import { DeepSeekTokenizer, type TokenizerJSON } from "./deepseek-tokenizer.js";
@@ -54,10 +55,9 @@ function rememberMessageTokens(key: string, tokens: number): void {
     messageCache.set(key, tokens);
 }
 
-/** 关闭真分词（诊断/测试用）：`ZBOT_TOKENIZER=off`。 */
+/** 关闭真分词（诊断/测试用）：`runtime.tokenizer: false`。 */
 function tokenizerDisabled(): boolean {
-    const mode = (process.env.ZBOT_TOKENIZER ?? "").trim().toLowerCase();
-    return mode === "off" || mode === "0" || mode === "false";
+    return !getRuntimeConfig().tokenizer;
 }
 
 /** 真分词只对 DeepSeek 系精确：其它 provider 应该带自己的 tokenizer 或退回估算。 */

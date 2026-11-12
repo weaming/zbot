@@ -31,7 +31,13 @@ import { getModelPreferencesFile } from "../utils/state-paths.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { countTextTokens } from "../utils/tokenizer.js";
 import { createHash } from "node:crypto";
-import { describeBrokenEnvReference, readEnvValue } from "../utils/env-ref.js";
+import {
+    getDefaultModelTarget,
+    getProvider,
+    getProviders,
+    type DefaultModelTarget,
+    type ProviderConfig,
+} from "../config/index.js";
 export { closeResponsesSession as closeChatSessionTransport } from "../tools/orchestrator/responses-session.js";
 export { deleteResponsesBaseline } from "../tools/orchestrator/responses-baseline.js";
 export { steerResponsesSession as steerChatSession } from "../tools/orchestrator/responses-session.js";
@@ -71,15 +77,25 @@ export async function getToolDefinitionsTokens(
 }
 
 export interface ChatApiSettings {
+    /** config.yaml 里的 provider 名。 */
+    provider: string;
     apiKey: string;
     apiBase: string;
     model: string;
     protocol?: ChatApiProtocol;
     reasoningEffort?: string;
     reasoningEfforts?: string[];
-    /** 托管工具类型（OPENAI_RESPONSES_HOSTED_TOOLS）：由上游执行，本地不执行。 */
+    /** 托管工具类型：由上游执行，本地不执行。 */
     hostedTools: string[];
-    /** ENABLE_DS_COST_STAT：开启后非官方端点（局域网网关）也按官方价格表估算费用。 */
+    /** Responses 是否走 WebSocket；省略时按模型名启发式。 */
+    websocket?: boolean;
+    /** Responses 是否请求上游保存。 */
+    store: boolean;
+    /** Chat Completions 是否允许 `input_audio`；省略时按模型名启发式。 */
+    audioInput?: boolean;
+    /** 该 provider 的上下文窗口覆盖值。 */
+    contextWindowTokens?: number;
+    /** runtime.deepseekCostStat：开启后非官方端点（局域网网关）也按官方价格表估算费用。 */
     enableCostStat: boolean;
 }
 
@@ -107,34 +123,50 @@ function toolDefinitionOptions(options: {
 
 let defaultModelOption: ChatModelOption | null | undefined;
 
+/**
+ * 偏好文件里的选择：新格式带 provider；旧格式只有 protocol + model，
+ * 按协议映射到第一个匹配的 provider（模型已不存在时仍映射，退化为临时模型）。
+ */
+function normalizePreference(value: Partial<ChatModelOption> & { protocol?: string }): ChatModelOption | undefined {
+    if (typeof value.model !== "string" || !value.model.trim()) return undefined;
+    const model = value.model.trim();
+    const effort = typeof value.reasoningEffort === "string" ? { reasoningEffort: value.reasoningEffort } : {};
+
+    if (typeof value.provider === "string" && value.provider.trim()) {
+        const provider = getProvider(value.provider.trim());
+        if (!provider) return undefined;
+        return { provider: provider.name, protocol: provider.protocol, model, ...effort };
+    }
+
+    const protocol = value.protocol;
+    if (protocol !== "responses" && protocol !== "chat_completions") return undefined;
+    const provider = getProviders().find(candidate => candidate.protocol === protocol
+        && candidate.models.includes(model))
+        ?? getProviders().find(candidate => candidate.protocol === protocol);
+    if (!provider) return undefined;
+    return { provider: provider.name, protocol: provider.protocol, model, ...effort };
+}
+
 function getDefaultChatModelOption(): ChatModelOption | undefined {
     if (defaultModelOption !== undefined) return defaultModelOption ?? undefined;
     try {
         const value = JSON.parse(fs.readFileSync(getModelPreferencesFile(), "utf8")) as Partial<ChatModelOption>;
-        if (
-            (value.protocol === "responses" || value.protocol === "chat_completions")
-            && typeof value.model === "string"
-            && value.model.trim()
-        ) {
-            defaultModelOption = {
-                protocol: value.protocol,
-                model: value.model.trim(),
-                ...(typeof value.reasoningEffort === "string" ? { reasoningEffort: value.reasoningEffort } : {}),
-            };
-            return defaultModelOption;
-        }
+        defaultModelOption = normalizePreference(value) ?? null;
+        return defaultModelOption ?? undefined;
     } catch {
-        // 缺失或损坏的偏好文件使用环境变量默认值。
+        // 缺失或损坏的偏好文件使用配置里的 defaults。
     }
     defaultModelOption = null;
     return undefined;
 }
 
 export async function setDefaultChatModelOption(option: ChatModelOption): Promise<void> {
-    if (!getChatModelOptions().some(candidate =>
-        candidate.protocol === option.protocol && candidate.model === option.model,
-    )) {
-        throw new Error(`模型配置不存在：${option.protocol} · ${option.model}`);
+    const provider = getProvider(option.provider);
+    if (!provider) {
+        throw new Error(`provider 不存在：${option.provider}`);
+    }
+    if (!provider.models.includes(option.model)) {
+        throw new Error(`临时模型不能设为默认：${provider.name} · ${option.model}（先加进配置的 models）`);
     }
 
     const file = getModelPreferencesFile();
@@ -181,11 +213,7 @@ function isLocalApiHostname(hostname: string): boolean {
 }
 
 export function validateChatApiSettings(settings: ChatApiSettings): string | undefined {
-    const baseName = settings.protocol === "responses"
-        ? "OPENAI_RESPONSES_BASE_URL"
-        : settings.protocol === "chat_completions"
-            ? "OPENAI_CHAT_BASE_URL"
-            : "OPENAI_BASE_URL";
+    const baseName = `providers.${settings.provider}.baseUrl`;
 
     let apiUrl: URL;
     try {
@@ -199,12 +227,16 @@ export function validateChatApiSettings(settings: ChatApiSettings): string | und
     }
 
     if (!settings.apiKey.trim() && !isLocalApiHostname(apiUrl.hostname)) {
-        const keyName = settings.protocol === "responses"
-            ? "OPENAI_RESPONSES_API_KEY"
-            : "OPENAI_CHAT_API_KEY";
-        const brokenRef = describeBrokenEnvReference(keyName) ?? describeBrokenEnvReference("OPENAI_API_KEY");
-        if (brokenRef) return `API 密钥不可用：${brokenRef}`;
-        return `缺少 ${keyName} 或 OPENAI_API_KEY（本地或局域网服务可省略）`;
+        const ref = getProvider(settings.provider)?.apiKeyRef;
+        if (ref) {
+            return `API 密钥不可用：providers.${settings.provider}.apiKey=$${ref} 引用的环境变量 ${ref} 未设置`;
+        }
+        return `缺少 API 密钥：请在 config.yaml 的 providers.${settings.provider}.apiKey 填写（本地或局域网服务可省略）`;
+    }
+
+    // 本地/局域网服务可以不带模型名，由服务端选默认；远端必须说清用哪个模型
+    if (!settings.model.trim() && !isLocalApiHostname(apiUrl.hostname)) {
+        return `缺少模型：请在 config.yaml 的 providers.${settings.provider}.models 里列出，或用 /model ${settings.provider} <模型> 临时指定`;
     }
 
     return undefined;
@@ -220,10 +252,7 @@ export function formatChatProviderError(error: unknown, currentSettings = getCha
     const status = Number.isFinite(explicitStatus) ? explicitStatus : messageStatus;
 
     if (status === 401 || status === 403) {
-        const keyName = currentSettings.protocol === "responses"
-            ? "OPENAI_RESPONSES_API_KEY"
-            : "OPENAI_CHAT_API_KEY";
-        return `LLM provider 请求失败（HTTP ${status}）：认证失败，请检查 ${keyName} 或 OPENAI_API_KEY。`;
+        return `LLM provider 请求失败（HTTP ${status}）：认证失败，请检查 config.yaml 的 providers.${currentSettings.provider}.apiKey。`;
     }
 
     if (status === 429) {
@@ -235,10 +264,8 @@ export function formatChatProviderError(error: unknown, currentSettings = getCha
     }
 
     if (message.includes("fetch failed") || message.includes("ECONNREFUSED")) {
-        const baseName = currentSettings.protocol === "responses"
-            ? "OPENAI_RESPONSES_BASE_URL"
-            : "OPENAI_CHAT_BASE_URL";
-        return `LLM provider 请求失败：无法连接 ${currentSettings.apiBase}，请检查 ${baseName} 或 OPENAI_BASE_URL 和网络代理。`;
+        const baseName = `providers.${currentSettings.provider}.baseUrl`;
+        return `LLM provider 请求失败：无法连接 ${currentSettings.apiBase}，请检查 ${baseName} 和网络代理。`;
     }
 
     return `LLM provider 请求失败：${message}`;
@@ -289,95 +316,61 @@ export interface ChatRunOptions {
     pendingToolCalls?: ToolCall[];
 }
 
-export function getChatApiSettings(sessionSelection?: ChatModelSelection): ChatApiSettings {
-    const legacyModel = process.env.OPENAI_MODEL || "";
-    const responsesModel = process.env.OPENAI_RESPONSES_MODEL || "";
-    const chatModel = process.env.OPENAI_CHAT_MODEL || "";
-    const hasResponsesSettings = [
-        process.env.OPENAI_RESPONSES_API_KEY,
-        process.env.OPENAI_RESPONSES_BASE_URL,
-        responsesModel,
-        process.env.OPENAI_RESPONSES_MODELS,
-    ].some(value => value?.trim());
-    const hasChatSettings = [
-        process.env.OPENAI_CHAT_API_KEY,
-        process.env.OPENAI_CHAT_BASE_URL,
-        chatModel,
-        process.env.OPENAI_CHAT_MODELS,
-    ].some(value => value?.trim());
-    let protocol: ChatApiProtocol;
-    if (hasResponsesSettings && !hasChatSettings) {
-        protocol = "responses";
-    } else if (hasChatSettings && !hasResponsesSettings) {
-        protocol = "chat_completions";
-    } else {
-        protocol = "chat_completions";
+/** 选择 → 实际生效的 provider 与模型；临时模型（不在 models 里）照样生效。 */
+function resolveActiveTarget(sessionSelection?: ChatModelSelection): {
+    provider: ProviderConfig;
+    model: string;
+    reasoningEffort?: string;
+} {
+    const requested = sessionSelection ?? getDefaultChatModelOption();
+    // 旧会话落盘的 model_selected 没有 provider：按协议映射到第一个匹配的 provider
+    const requestedProvider = requested
+        ? getProvider(requested.provider)
+            ?? getProviders().find(candidate => candidate.protocol === requested.protocol)
+        : undefined;
+    if (requested && requestedProvider && requested.model.trim()) {
+        return {
+            provider: requestedProvider,
+            model: requested.model.trim(),
+            ...(requested.reasoningEffort ? { reasoningEffort: requested.reasoningEffort } : {}),
+        };
     }
-    const profileModel = protocol === "responses"
-        ? responsesModel || parseCommaList(process.env.OPENAI_RESPONSES_MODELS)[0] || ""
-        : chatModel || parseCommaList(process.env.OPENAI_CHAT_MODELS)[0] || "";
-    const requestedOption = sessionSelection ?? getDefaultChatModelOption();
-    const activeOption = requestedOption && getChatModelOptions().some(option =>
-        option.protocol === requestedOption.protocol && option.model === requestedOption.model,
-    ) ? requestedOption : undefined;
-    const activeProtocol = activeOption?.protocol ?? protocol;
-    const activeProfileApiKey = readEnvValue(activeProtocol === "responses"
-        ? "OPENAI_RESPONSES_API_KEY"
-        : "OPENAI_CHAT_API_KEY");
-    const activeProfileApiBase = activeProtocol === "responses"
-        ? process.env.OPENAI_RESPONSES_BASE_URL
-        : process.env.OPENAI_CHAT_BASE_URL;
-    const configuredEfforts = parseCommaList(activeProtocol === "responses"
-        ? process.env.OPENAI_RESPONSES_EFFORTS
-        : process.env.OPENAI_CHAT_EFFORTS);
 
+    const fallback: DefaultModelTarget = getDefaultModelTarget();
     return {
-        apiKey: activeProfileApiKey || readEnvValue("OPENAI_API_KEY") || "",
-        apiBase: activeProfileApiBase || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
-        model: activeOption?.model || profileModel || legacyModel,
-        protocol: activeProtocol,
-        reasoningEffort: activeOption?.reasoningEffort,
-        reasoningEfforts: configuredEfforts.length > 0 ? configuredEfforts : undefined,
-        hostedTools: parseCommaList(process.env.OPENAI_RESPONSES_HOSTED_TOOLS),
+        provider: getProvider(fallback.provider)!,
+        model: fallback.model,
+        ...(fallback.reasoningEffort ? { reasoningEffort: fallback.reasoningEffort } : {}),
+    };
+}
+
+export function getChatApiSettings(sessionSelection?: ChatModelSelection): ChatApiSettings {
+    const target = resolveActiveTarget(sessionSelection);
+    const provider = target.provider;
+    return {
+        provider: provider.name,
+        apiKey: provider.apiKey,
+        apiBase: provider.baseUrl,
+        model: target.model,
+        protocol: provider.protocol,
+        reasoningEffort: target.reasoningEffort,
+        ...(provider.efforts ? { reasoningEfforts: provider.efforts } : {}),
+        hostedTools: provider.hostedTools,
+        ...(provider.websocket === undefined ? {} : { websocket: provider.websocket }),
+        store: provider.store,
+        ...(provider.audioInput === undefined ? {} : { audioInput: provider.audioInput }),
+        ...(provider.contextWindowTokens === undefined ? {} : { contextWindowTokens: provider.contextWindowTokens }),
         enableCostStat: isDeepSeekCostStatEnabled(),
     };
 }
 
-/** 逗号分隔配置值 → 去重后的列表（模型名、托管工具类型共用）。 */
-function parseCommaList(value?: string): string[] {
-    return [...new Set((value || "").split(",").map(item => item.trim()).filter(Boolean))];
-}
-
-function profileHasSettings(protocol: ChatApiProtocol): boolean {
-    const prefix = protocol === "responses" ? "OPENAI_RESPONSES" : "OPENAI_CHAT";
-    return [
-        readEnvValue(`${prefix}_API_KEY`),
-        process.env[`${prefix}_BASE_URL`],
-        process.env[`${prefix}_MODEL`],
-        process.env[`${prefix}_MODELS`],
-    ].some(value => value?.trim());
-}
-
+/** 可切换的模型清单：按 providers 顺序展开各自 models。 */
 export function getChatModelOptions(): ChatModelOption[] {
-    const legacyModel = process.env.OPENAI_MODEL?.trim() || "";
-    const configuredProtocols = (['responses', 'chat_completions'] as const)
-        .filter(protocol => profileHasSettings(protocol));
-    const legacyProtocol: ChatApiProtocol = "chat_completions";
-    const protocols = new Set<ChatApiProtocol>(configuredProtocols);
-    if (legacyModel && !configuredProtocols.includes(legacyProtocol)) protocols.add(legacyProtocol);
-
-    const options: ChatModelOption[] = [];
-    for (const protocol of protocols) {
-        const prefix = protocol === "responses" ? "OPENAI_RESPONSES" : "OPENAI_CHAT";
-        const models = [
-            process.env[`${prefix}_MODEL`],
-            ...parseCommaList(process.env[`${prefix}_MODELS`]),
-            ...(protocol === legacyProtocol ? [legacyModel] : []),
-        ].map(model => model?.trim()).filter((model): model is string => Boolean(model));
-        for (const model of new Set(models)) options.push({ protocol, model });
-    }
-
-    return options;
+    return getProviders().flatMap(provider => provider.models.map(model => ({
+        provider: provider.name,
+        protocol: provider.protocol,
+        model,
+    })));
 }
 
 /**
@@ -418,7 +411,18 @@ export async function runChatQuery(options: ChatRunOptions) {
         throw new Error(`LLM provider 配置无效：${settingsError}`);
     }
 
-    const client = createChatClient(settings.apiKey, settings.apiBase, settings.protocol, options.sessionId, settings.model);
+    const client = createChatClient(
+        settings.apiKey,
+        settings.apiBase,
+        settings.protocol,
+        options.sessionId,
+        settings.model,
+        {
+            ...(settings.websocket === undefined ? {} : { websocket: settings.websocket }),
+            store: settings.store,
+            ...(settings.audioInput === undefined ? {} : { audioInput: settings.audioInput }),
+        },
+    );
     let activeTurnCompactionFailed = false;
 
     try {
@@ -450,7 +454,7 @@ export async function runChatQuery(options: ChatRunOptions) {
                 // 用 resolveProtocol / client.baseURL 与实际生效路径（prepareRequest）保持同源
                 const audioDropReason = resolveProtocol(client) === "responses"
                     ? "responses"
-                    : supportsAudioInput(settings.model, client.baseURL) ? undefined : "endpoint";
+                    : (settings.audioInput ?? supportsAudioInput(settings.model, client.baseURL)) ? undefined : "endpoint";
                 const mediaNotice = describeDroppedMedia(result.content, { audioDropReason });
                 return {
                     content: mediaNotice ? `${content}${mediaNotice}` : content,

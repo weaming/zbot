@@ -131,35 +131,22 @@ describe("audioContent 落盘", () => {
     });
 });
 
-describe("supportsAudioInput 的 TOOL_AUDIO_INPUT 覆盖", () => {
-    const withEnv = (value: string | undefined, run: () => void) => {
-        const previous = process.env.TOOL_AUDIO_INPUT;
-        if (value === undefined) delete process.env.TOOL_AUDIO_INPUT;
-        else process.env.TOOL_AUDIO_INPUT = value;
-        try {
-            run();
-        } finally {
-            if (previous === undefined) delete process.env.TOOL_AUDIO_INPUT;
-            else process.env.TOOL_AUDIO_INPUT = previous;
-        }
-    };
-
-    test("on 强制开启非音频模型的音频上行", () => {
-        withEnv("on", () => {
-            expect(supportsAudioInput("gpt-4o", "https://api.openai.com/v1")).toBe(true);
-        });
+describe("supportsAudioInput 的 provider.audioInput 覆盖", () => {
+    test("audioInput: true 时非音频模型也能上行音频", () => {
+        expect(supportsAudioInput("gpt-4o", "https://api.openai.com/v1", true)).toBe(true);
     });
 
-    test("off 强制关闭音频模型的音频上行", () => {
-        withEnv("off", () => {
-            expect(supportsAudioInput("gpt-audio-1.5", "https://api.openai.com/v1")).toBe(false);
-        });
+    test("audioInput: false 时音频模型也不上行", () => {
+        expect(supportsAudioInput("gpt-audio-1.5", "https://api.openai.com/v1", false)).toBe(false);
     });
 
-    test("DeepSeek 端点不受 on 覆盖影响", () => {
-        withEnv("on", () => {
-            expect(supportsAudioInput("deepseek-chat", "https://api.deepseek.com")).toBe(false);
-        });
+    test("没配时按模型名启发式", () => {
+        expect(supportsAudioInput("gpt-audio-1.5", "https://api.openai.com/v1")).toBe(true);
+        expect(supportsAudioInput("gpt-4o", "https://api.openai.com/v1")).toBe(false);
+    });
+
+    test("DeepSeek 端点不受覆盖影响", () => {
+        expect(supportsAudioInput("deepseek-chat", "https://api.deepseek.com", true)).toBe(false);
     });
 });
 

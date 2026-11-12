@@ -9,6 +9,8 @@ import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "b
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { defaultTestConfig, useConfig } from "./test-config.js";
+import { setRuntimeReasoningEffort } from "../../src/config/index.js";
 
 const queries: Array<{ sessionId?: string; query: string }> = [];
 const realChatRuntime = await import("../../src/services/chat-runtime.js");
@@ -26,7 +28,7 @@ const { REVIEW_PROMPT, SLASH_COMMAND_SPECS } = await import("../../src/commands/
 
 let tmpDir: string;
 let originalStateDir: string | undefined;
-let originalModel: string | undefined;
+let restoreConfig: (() => void) | undefined;
 let agent: InstanceType<typeof LocalSessionHost>;
 let sessionA: string;
 let sessionB: string;
@@ -35,9 +37,24 @@ beforeEach(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zbot-peer-command-"));
     originalStateDir = process.env.ZBOT_STATE_DIR;
     process.env.ZBOT_STATE_DIR = tmpDir;
-    // 固定一个可切换模型，/model 才有可校验的目标
-    originalModel = process.env.OPENAI_CHAT_MODEL;
-    process.env.OPENAI_CHAT_MODEL = "stub-model";
+    // 固定一组可切换模型，/model 才有可校验的目标
+    restoreConfig = useConfig(defaultTestConfig({
+        providers: {
+            stub: {
+                protocol: "chat_completions",
+                baseUrl: "https://api.deepseek.com/v1",
+                apiKey: "k",
+                models: ["stub-model", "deepseek-chat"],
+            },
+            openai: {
+                protocol: "responses",
+                baseUrl: "https://api.openai.com/v1",
+                apiKey: "k",
+                models: ["gpt-5"],
+            },
+        },
+        defaults: { provider: "stub", model: "stub-model" },
+    })).restore;
 
     agent = new LocalSessionHost();
     sessionA = (await agent.createSession()).sessionId;
@@ -51,8 +68,8 @@ afterEach(async () => {
     await agent.close();
     if (originalStateDir === undefined) delete process.env.ZBOT_STATE_DIR;
     else process.env.ZBOT_STATE_DIR = originalStateDir;
-    if (originalModel === undefined) delete process.env.OPENAI_CHAT_MODEL;
-    else process.env.OPENAI_CHAT_MODEL = originalModel;
+    restoreConfig?.();
+    restoreConfig = undefined;
     fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -112,10 +129,8 @@ describe("会话间命令：解析与视图", () => {
         for (const [text, hint] of [
             ["/help extra", "参数过多"],
             ["/tasks status", "需要 task_id"],
-            // 协议只能是两项：非法协议（含已删除的 use 子命令）都按协议错误报
-            ["/model foo", "协议需要是"],
-            ["/model grpc gpt", "协议需要是"],
-            ["/model use chat_completions stub-model", "协议需要是"],
+            // provider 名由配置决定：未知 provider 在解析层放行，交给设置时点名
+            ["/model openai", "需要模型名"],
             ["/mcp enable", "需要服务名"],
         ] as const) {
             const result = await sendAndWait(text);
@@ -215,34 +230,28 @@ describe("会话间命令：解析与视图", () => {
         expect(viewed.text).toContain("当前模型");
         expect(viewed.text).toContain("思考强度");
 
-        const failed = await sendAndWait("/model responses not-configured-model");
+        const failed = await sendAndWait("/model no-such-provider any-model");
         expect(failed.ok).toBe(false);
-        expect(failed.text).toContain("不可用的模型组合");
+        expect(failed.text).toContain("没有这个 provider");
 
-        const badEffort = await sendAndWait("/model chat_completions stub-model turbo");
+        const noModel = await sendAndWait("/model openai");
+        expect(noModel.ok).toBe(false);
+        expect(noModel.text).toContain("需要模型名");
+
+        const badEffort = await sendAndWait("/model stub stub-model turbo");
         expect(badEffort.ok).toBe(false);
         expect(badEffort.text).toContain("未知思考强度");
         expect(agent.isSessionBusy(sessionB)).toBe(false);
     });
 
     test("/model 按目标模型的档位校验并归一化（与 TUI 同口径）", async () => {
-        const saved = {
-            chatModel: process.env.OPENAI_CHAT_MODEL,
-            responsesModel: process.env.OPENAI_RESPONSES_MODEL,
-            chatBase: process.env.OPENAI_CHAT_BASE_URL,
-            responsesBase: process.env.OPENAI_RESPONSES_BASE_URL,
-        };
         // 当前模型 deepseek 系（none/low/high/max），目标 responses 系（含 medium、没有 max）
-        process.env.OPENAI_CHAT_MODEL = "deepseek-chat";
-        process.env.OPENAI_CHAT_BASE_URL = "https://api.deepseek.com/v1";
-        process.env.OPENAI_RESPONSES_MODEL = "gpt-5";
-        process.env.OPENAI_RESPONSES_BASE_URL = "https://api.openai.com/v1";
         try {
             // 先把当前选择设成 deepseek/max
-            expect((await sendAndWait("/model chat_completions deepseek-chat max")).ok).toBe(true);
+            expect((await sendAndWait("/model stub deepseek-chat max")).ok).toBe(true);
 
             // 目标模型支持 medium：成功并落盘
-            const medium = await sendAndWait("/model responses gpt-5 medium");
+            const medium = await sendAndWait("/model openai gpt-5 medium");
             expect(medium.ok).toBe(true);
             const afterMedium = JSON.parse((await sendAndWait("/model --json")).text);
             expect(afterMedium.current).toMatchObject({
@@ -252,27 +261,19 @@ describe("会话间命令：解析与视图", () => {
             });
 
             // 归一化：大写 HIGH → high
-            expect((await sendAndWait("/model responses gpt-5 HIGH")).text).toContain("思考强度 high");
+            expect((await sendAndWait("/model openai gpt-5 HIGH")).text).toContain("思考强度 high");
 
             // 目标模型不支持 max：明确报错
-            const max = await sendAndWait("/model responses gpt-5 max");
+            const max = await sendAndWait("/model openai gpt-5 max");
             expect(max.ok).toBe(false);
             expect(max.text).toContain("未知思考强度");
 
             // 省略强度：原档位（deepseek/max）在目标模型不支持 → 回落 auto
-            expect((await sendAndWait("/model chat_completions deepseek-chat max")).ok).toBe(true);
-            expect((await sendAndWait("/model responses gpt-5")).text).toContain("思考强度 auto");
+            expect((await sendAndWait("/model stub deepseek-chat max")).ok).toBe(true);
+            expect((await sendAndWait("/model openai gpt-5")).text).toContain("思考强度 auto");
             expect(agent.isSessionBusy(sessionB)).toBe(false);
         } finally {
-            for (const [key, value] of Object.entries({
-                OPENAI_CHAT_MODEL: saved.chatModel,
-                OPENAI_RESPONSES_MODEL: saved.responsesModel,
-                OPENAI_CHAT_BASE_URL: saved.chatBase,
-                OPENAI_RESPONSES_BASE_URL: saved.responsesBase,
-            })) {
-                if (value === undefined) delete process.env[key];
-                else process.env[key] = value;
-            }
+            setRuntimeReasoningEffort(undefined);
         }
     });
 

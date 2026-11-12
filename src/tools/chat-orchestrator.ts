@@ -13,7 +13,7 @@ import { type ToolCall } from "../types/tool-call.js";
 import { resolveDeepSeekFilesAPI, uploadDeepSeekFile, uploadDeepSeekFileData } from "../utils/image-assets.js";
 import { type LLMRequestKind } from "../utils/logger.js";
 import { getOpenAIProxyFetch } from "../utils/proxy.js";
-import { isResponsesWebSocketEnabled } from "../utils/responses-transport.js";
+import { isGptModel } from "../utils/responses-transport.js";
 import { resolveProtocol } from "./orchestrator/request-builder.js";
 import { collectChatStream } from "./orchestrator/chat-stream.js";
 import { collectResponsesStream } from "./orchestrator/responses-stream.js";
@@ -60,10 +60,21 @@ export function isAbortError(error: any): boolean {
     error?.message?.includes("abort");
 }
 
+/** 协议传输开关：来自 provider 配置，省略时按模型名启发式。 */
+export interface ChatTransportOptions {
+  /** Responses 是否走 WebSocket。 */
+  websocket?: boolean;
+  /** Responses 是否请求上游保存。 */
+  store?: boolean;
+  /** Chat Completions 是否允许 `input_audio`。 */
+  audioInput?: boolean;
+}
+
 // Chat Completions API 客户端
 export interface ChatClient {
   baseURL: string;
   protocol?: "responses" | "chat_completions";
+  transport?: ChatTransportOptions;
   create(params: any, options?: any): Promise<any>;
   createResponse?(params: any, options?: any): Promise<any>;
   preconnect?(): void;
@@ -79,6 +90,7 @@ export function createChatClient(
   protocol?: "responses" | "chat_completions",
   sessionId?: string,
   model?: string,
+  transport: ChatTransportOptions = {},
 ): ChatClient {
   const finalURL = baseURL || "https://api.openai.com/v1";
   const normalizedApiKey = apiKey.trim();
@@ -97,6 +109,7 @@ export function createChatClient(
   return {
     baseURL: finalURL,
     protocol,
+    transport,
     async create(params, options) {
       // 对于需要完整路径的 API（如 DashScope），直接调用 chat.completions.create
       // 库会自动添加 /chat/completions
@@ -104,12 +117,12 @@ export function createChatClient(
       return response;
     },
     async createResponse(params, options) {
-      const useWebSocket = isResponsesWebSocketEnabled(undefined, params.model);
+      const useWebSocket = transport.websocket ?? isGptModel(params.model);
       return responsesSession.session.create(params, options?.signal, options?.onSteerAccepted, useWebSocket, options?.onSteerUpdate);
     },
     close() { responsesSession.release(); },
     preconnect() {
-      if (protocol === "responses" && isResponsesWebSocketEnabled(undefined, model)) responsesSession.session.preconnect();
+      if (protocol === "responses" && (transport.websocket ?? isGptModel(model))) responsesSession.session.preconnect();
     },
     async uploadFile(imagePath: string) {
       const fileID = await uploadDeepSeekFile(imagePath, {

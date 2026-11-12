@@ -3,11 +3,12 @@
  *
  * 仅当接入端点为官方（host 为 api.deepseek.com）且模型命中官方价格表时计费；
  * 第三方中转 / 网关（即使跑的也是 deepseek 模型）一律不计，避免误算。
- * 显式打开 ENABLE_DS_COST_STAT 时放宽端点限制：局域网网关（如本机 llm-server
+ * 显式打开 runtime.deepseekCostStat 时放宽端点限制：局域网网关（如本机 llm-server
  * 完整透传到官方 API）也按官方价格表估算，仍要求模型命中价格表。
  */
 
 import type { UsageInfo } from "../types/chat.js";
+import { getRuntimeConfig } from "../config/index.js";
 import {
     DEEPSEEK_PRICING,
     type DeepSeekModelKey,
@@ -18,14 +19,9 @@ import {
 /** 官方 OpenAI/Anthropic 兼容端点的 host（Anthropic 格式为 https://api.deepseek.com/anthropic，host 相同）。 */
 export const DEEPSEEK_OFFICIAL_HOST = "api.deepseek.com";
 
-/** 放开端点限制、对局域网网关也统计费用的环境开关。 */
-const DEEPSEEK_COST_STAT_ENV = "ENABLE_DS_COST_STAT";
-
-const TRUTHY_ENV_VALUES = new Set(["1", "true", "yes", "on"]);
-
-/** ENABLE_DS_COST_STAT 是否为真值（1/true/yes/on，大小写与空白不敏感）。 */
-export function isDeepSeekCostStatEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-    return TRUTHY_ENV_VALUES.has((env[DEEPSEEK_COST_STAT_ENV] ?? "").trim().toLowerCase());
+/** 放开端点限制、对局域网网关也统计费用：`runtime.deepseekCostStat`。 */
+export function isDeepSeekCostStatEnabled(enabled = getRuntimeConfig().deepseekCostStat): boolean {
+    return enabled;
 }
 
 /**
@@ -36,14 +32,12 @@ const MODEL_KEY_PATTERNS: Array<[DeepSeekModelKey, string]> = [
     ["flash", "deepseek-v4-flash"],
     // V4.1 Flash 当前唯一在服务的正式模型名
     ["flash", "deepseek-flash"],
-    // 历史内测名（0910 到期），保留以便复算旧日志
-    ["flash", "deepseek-v4.1-flash-expires-on-0910"],
     ["pro", "deepseek-v4-pro"],
 ];
 
 /**
- * 宽松匹配：任意含 flash / pro 关键词的模型名。
- * 仅用于开启 ENABLE_DS_COST_STAT 的第三方端点（网关常给模型名加厂商前缀与地域后缀，
+ * 宽松匹配：模型名同时含 `deepseek` 与 `flash` 或 `pro` 关键词。
+ * 仅用于开启 deepseekCostStat 的第三方端点（网关常给模型名加厂商前缀与地域后缀，
  * 如 workbuddy-ai/deepseek-v4.1-flash-sg）。
  */
 const LOOSE_MODEL_KEY_PATTERNS: Array<[DeepSeekModelKey, RegExp]> = [
@@ -61,6 +55,8 @@ export function normalizeDeepSeekModel(model?: string, loose = false): DeepSeekM
     const normalized = model.trim().toLowerCase();
 
     if (loose) {
+        // 网关前缀/后缀随意，但必须是 DeepSeek 模型：否则 any-flash 这类别名会被误计价
+        if (!normalized.includes("deepseek")) return undefined;
         for (const [key, pattern] of LOOSE_MODEL_KEY_PATTERNS) {
             if (pattern.test(normalized)) return key;
         }
@@ -205,14 +201,14 @@ export function deepSeekCostYuan(usage: CostUsage, atMs: number = Date.now(), lo
 export interface ChatProviderSettings {
     model?: string;
     apiBase?: string;
-    /** ENABLE_DS_COST_STAT：开启后不校验端点 host，局域网网关也按官方价格表估算。 */
+    /** runtime.deepseekCostStat：开启后不校验端点 host，局域网网关也按官方价格表估算。 */
     enableCostStat?: boolean;
 }
 
 /**
  * 仅当「可计费端点 + 价格表内模型」时按峰谷计价，否则返回 0（第三方不计）。
- * 可计费端点 = 官方 api.deepseek.com，或开启 ENABLE_DS_COST_STAT 后的任意端点。
- * 官方端点按官方模型名严格匹配；开启开关的第三方端点改用 flash/pro 关键词宽松匹配。
+ * 可计费端点 = 官方 api.deepseek.com，或开启 runtime.deepseekCostStat 后的任意端点。
+ * 官方端点按官方模型名严格匹配；开启开关的第三方端点改用「含 deepseek 且含 flash/pro」的宽松匹配。
  * 端点优先取 usage 落盘时的 host（历史记录不受日后更换 endpoint 影响），旧记录回退当前配置。
  */
 export function officialDeepSeekCostYuan(usage: CostUsage & Pick<UsageInfo, "apiHost">, atMs: number, settings: ChatProviderSettings): number {

@@ -2,9 +2,7 @@
  * TUI 入口：在当前宿主机进程内启动 agent，并连接 mcp-hub。
  */
 
-import dotenv from "dotenv";
 import os from "os";
-import path from "path";
 import { configureHostEnvironment, getStartupCwd, redirectLogsToFile } from "../host/runtime-context.js";
 import type { SessionHost } from "../host/session-host.js";
 import type { ResumeArgs } from "../cli/resume.js";
@@ -13,20 +11,12 @@ import { isPrintCliInvocation } from "../cli/print.js";
 import { isSessionCliInvocation } from "../cli/session.js";
 import { printCliHelp } from "../cli/help.js";
 import type { ChatApp } from "./app.js";
+import { getConfig, getConfigFilePath } from "../config/index.js";
 
-const DEFAULT_ENV_FILE = path.join(os.homedir(), ".zbot", "env");
-
-function resolveEnvFile(value: string): string {
-    if (value === "~") return os.homedir();
-    if (value.startsWith("~/")) return path.join(os.homedir(), value.slice(2));
-    return value;
-}
-
-const envFile = resolveEnvFile(process.env.ZBOT_ENV_FILE || DEFAULT_ENV_FILE);
 const cliArgs = process.argv.slice(2);
 const isSessionCli = isSessionCliInvocation(cliArgs);
 /**
- * 帮助分支：必须在 dotenv 与 configureHostEnvironment 之前 ——
+ * 帮助分支：必须在配置加载与 configureHostEnvironment 之前 ——
  * 打印用法不该初始化宿主环境，更不能落回 TUI 把终端交给聊天界面。
  */
 const isHelpCli = printCliHelp(cliArgs);
@@ -43,7 +33,20 @@ const isHerdrCli = cliArgs[0] === "herdr";
 const isRemovedCli = cliArgs[0] === "serve";
 
 /**
- * 会话 CRUD 分支：必须在 dotenv 与 configureHostEnvironment 之前分流 ——
+ * 启动即加载 `config.yaml`：配置缺失/非法时直接给出可操作的错误，
+ * 不要等进了 TUI 才在某个回合里炸。
+ */
+function loadConfigEarly(): void {
+    try {
+        getConfig();
+    } catch (error: any) {
+        process.stderr.write(`${error?.message ?? error}\n`);
+        process.exit(1);
+    }
+}
+
+/**
+ * 会话 CRUD 分支：必须在配置加载与 configureHostEnvironment 之前分流 ——
  * 后者会把 ZBOT_STATE_DIR 固定到 ~/.zbot、改写 TUI_CWD 并重定向日志。
  *
  * 收尾只设 exitCode、不调 process.exit：stdout 接管道时写入是异步的，
@@ -77,7 +80,7 @@ if (isHelpCli) {
     process.exitCode = 2;
 } else if (isWebCli) {
     // 长驻宿主分支：与 TUI 并列，初始化同一套宿主环境后交给 web 入口，不再进入 TUI。
-    dotenv.config({ path: envFile, quiet: true });
+    loadConfigEarly();
     configureHostEnvironment();
     try {
         const { runWeb } = await import("../cli/web.js");
@@ -87,8 +90,7 @@ if (isHelpCli) {
         process.exitCode = 1;
     }
 } else {
-    // quiet：不向终端输出 "injected env" 提示，避免启动前污染主 buffer。
-    dotenv.config({ path: envFile, quiet: true });
+    loadConfigEarly();
     configureHostEnvironment();
 }
 
@@ -217,7 +219,7 @@ async function startChatApp(prepared?: PreparedTuiResume): Promise<void> {
         if (!prepared) void runtimeReady.catch(() => undefined);
         const providerError = chatRuntime.validateChatApiSettings(chatRuntime.getChatApiSettings());
         const startupMessage = providerError
-            ? `⚠️ LLM provider 配置无效：${providerError}\n请检查配置文件：${envFile}`
+            ? `⚠️ LLM provider 配置无效：${providerError}\n请检查配置文件：${getConfigFilePath()}`
             : undefined;
         const chatStore = new ChatStore({
             costFor: (usage, atMs) => officialDeepSeekCostYuan(usage, atMs, chatRuntime.getChatApiSettings()),

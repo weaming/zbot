@@ -10,29 +10,22 @@
  * 不抵它带来的 token 与漂移成本。历史消息的形态转换不受这条限制，见 messages.ts。
  */
 
+import { getRuntimeConfig } from "../../config/index.js";
 import { isDeepSeekEndpoint } from "../../pricing/deepseek.js";
 import { isApplyPatchTool } from "../tool-kinds.js";
 
 /** 工具形态：custom 自由文本 / off 原样下发（含 DeepSeek 这类只支持 function 的上游）。 */
 export type ApplyPatchToolMode = "custom" | "off";
 
-const APPLY_PATCH_MODE_ENV = "APPLY_PATCH_MODE";
-
-/** 手动覆盖取值：custom / off；`function` 是历史取值，等价于 off（不再加固描述）。 */
-const MODE_OVERRIDES: ReadonlySet<string> = new Set(["custom", "off"]);
-
 /**
  * 解析当前上游该用哪种形态：gpt-* 走 custom，其余（含 DeepSeek）原样下发。
- * env 命中时优先于模型判定，出问题可一键关掉 custom 形态。
+ * 配置 `runtime.applyPatchMode` 命中时优先于模型判定，出问题可一键关掉 custom 形态。
  */
 export function resolveApplyPatchToolMode(
     input: { model: string; baseURL?: string },
-    env: NodeJS.ProcessEnv = process.env,
+    configured: ApplyPatchToolMode | undefined = getRuntimeConfig().applyPatchMode,
 ): ApplyPatchToolMode {
-    const override = (env[APPLY_PATCH_MODE_ENV] ?? "").trim().toLowerCase();
-    if (MODE_OVERRIDES.has(override)) return override as ApplyPatchToolMode;
-    // 早期文档里的 function 形态已并入 off：定义原样下发，只是不再追加 JSON 转义提醒
-    if (override === "function") return "off";
+    if (configured) return configured;
 
     if (isDeepSeekEndpoint(input.model, input.baseURL)) return "off";
     if (input.model.toLowerCase().includes("gpt-")) return "custom";

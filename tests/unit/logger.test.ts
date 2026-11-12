@@ -1,3 +1,5 @@
+import { defaultTestConfig, useConfig } from "./test-config.js";
+import { reloadConfig } from "../../src/config/index.js";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import fs from "fs";
 import os from "os";
@@ -18,7 +20,7 @@ beforeEach(() => {
 
 afterEach(() => {
     delete process.env.ZBOT_STATE_DIR;
-    delete process.env.ZBOT_LLM_LOG_DELTAS;
+    reloadConfig();
     fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -410,7 +412,7 @@ describe("LLM exchange 链式增量记录", () => {
         expect(readSessionEntries(sessionId).map(entry => entry.content.type))
             .toEqual(["response.output_item.done", "response.completed"]);
 
-        process.env.ZBOT_LLM_LOG_DELTAS = "1";
+        useConfig(defaultTestConfig({ runtime: { tokenizer: false, memoryUserId: 0, llmLogDeltas: true } }));
         recordLLMExchange("HTTP_SSE_EVENT", { type: "response.output_text.delta", delta: "kept" }, { sessionId });
 
         expect(readSessionEntries(sessionId).at(-1)!.content.delta).toBe("kept");

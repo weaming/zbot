@@ -341,7 +341,7 @@ function handoffCommands(sessionId: string, created: CreatedTab): Record<string,
  */
 function forwardPaneEnv(env: NodeJS.ProcessEnv): Record<string, string> | undefined {
     const forwarded: Record<string, string> = {};
-    for (const key of ["ZBOT_STATE_DIR", "ZBOT_ENV_FILE"]) {
+    for (const key of ["ZBOT_STATE_DIR", "ZBOT_CONFIG_FILE"]) {
         const value = env[key];
         if (value) forwarded[key] = value;
     }

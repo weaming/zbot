@@ -14,7 +14,8 @@ import { setEmbeddedIdentity } from "../../src/skills/base-skill.js";
 import { skillRegistry } from "../../src/skills/skill-registry.js";
 import { appendCompletedTurn, getSessionContextHistory } from "../../src/utils/conversation-history.js";
 import type { Session } from "../../src/types/session.js";
-import { isolateModelEnv, useTmpStateDir, type TmpStateDir } from "./test-env.js";
+import { useTmpStateDir, type TmpStateDir } from "./test-env.js";
+import { defaultTestConfig, useConfig } from "./test-config.js";
 import { toolCatalog } from "../../src/tools/tool-catalog.js";
 
 let tmpDir: string;
@@ -133,29 +134,26 @@ Alpha prompt body`,
         fs.writeFileSync(identityFile, "TUI 身份", "utf-8");
         fs.writeFileSync(extraIdentityFile, "用户级补充规则", "utf-8");
 
-        const previousIdentityFile = process.env.ZBOT_IDENTITY_FILE;
-        const previousExtraIdentityFile = process.env.ZBOT_EXTRA_IDENTITY_FILE;
-        process.env.ZBOT_IDENTITY_FILE = identityFile;
-        process.env.ZBOT_EXTRA_IDENTITY_FILE = extraIdentityFile;
+        const restoreConfig = useConfig(defaultTestConfig({
+            runtime: { tokenizer: false, memoryUserId: 0, identityFile, extraIdentityFile },
+        })).restore;
 
         try {
             const prompt = buildSystemPrompt();
             expect(prompt.indexOf("TUI 身份")).toBeGreaterThanOrEqual(0);
             expect(prompt.indexOf("用户级补充规则")).toBeGreaterThan(prompt.indexOf("TUI 身份"));
         } finally {
-            if (previousIdentityFile === undefined) delete process.env.ZBOT_IDENTITY_FILE;
-            else process.env.ZBOT_IDENTITY_FILE = previousIdentityFile;
-            if (previousExtraIdentityFile === undefined) delete process.env.ZBOT_EXTRA_IDENTITY_FILE;
-            else process.env.ZBOT_EXTRA_IDENTITY_FILE = previousExtraIdentityFile;
+            restoreConfig();
         }
     });
 
     test("buildSystemPrompt uses the embedded identity before the optional extra file", () => {
         const extraIdentityFile = path.join(tmpDir, "user-AGENTS.md");
         fs.writeFileSync(extraIdentityFile, "用户级补充规则", "utf-8");
-        const previousExtraIdentityFile = process.env.ZBOT_EXTRA_IDENTITY_FILE;
         const previousTuiCwd = process.env.TUI_CWD;
-        process.env.ZBOT_EXTRA_IDENTITY_FILE = extraIdentityFile;
+        const restoreConfig = useConfig(defaultTestConfig({
+            runtime: { tokenizer: false, memoryUserId: 0, extraIdentityFile },
+        })).restore;
         process.env.TUI_CWD = "/tmp/tui-working-directory";
         setEmbeddedIdentity("内置 TUI 身份\n当前目录（pwd）：{{TUI_CWD}}");
 
@@ -166,8 +164,7 @@ Alpha prompt body`,
             expect(prompt.indexOf("用户级补充规则")).toBeGreaterThan(prompt.indexOf("内置 TUI 身份"));
         } finally {
             setEmbeddedIdentity();
-            if (previousExtraIdentityFile === undefined) delete process.env.ZBOT_EXTRA_IDENTITY_FILE;
-            else process.env.ZBOT_EXTRA_IDENTITY_FILE = previousExtraIdentityFile;
+            restoreConfig();
             if (previousTuiCwd === undefined) delete process.env.TUI_CWD;
             else process.env.TUI_CWD = previousTuiCwd;
         }
@@ -177,8 +174,9 @@ Alpha prompt body`,
         const home = os.homedir();
         const extraIdentityFile = path.join(tmpDir, "user-AGENTS.md");
         fs.writeFileSync(extraIdentityFile, "用户级补充规则", "utf-8");
-        const previousExtraIdentityFile = process.env.ZBOT_EXTRA_IDENTITY_FILE;
-        process.env.ZBOT_EXTRA_IDENTITY_FILE = extraIdentityFile;
+        const restoreConfig = useConfig(defaultTestConfig({
+            runtime: { tokenizer: false, memoryUserId: 0, extraIdentityFile },
+        })).restore;
         setEmbeddedIdentity("当前目录：{{TUI_CWD}}；源码：{{TUI_SRC_ROOT}}");
 
         try {
@@ -187,8 +185,7 @@ Alpha prompt body`,
             expect(prompt).not.toContain(`${home}/src/zbot`);
         } finally {
             setEmbeddedIdentity();
-            if (previousExtraIdentityFile === undefined) delete process.env.ZBOT_EXTRA_IDENTITY_FILE;
-            else process.env.ZBOT_EXTRA_IDENTITY_FILE = previousExtraIdentityFile;
+            restoreConfig();
         }
     });
 
@@ -339,34 +336,63 @@ describe("chat provider settings", () => {
         })).toBeUndefined();
     });
 
-    test("允许省略模型，由服务端选择默认模型", () => {
+    test("本地地址允许省略模型，由服务端选择默认模型", () => {
         expect(validateChatApiSettings({
+            provider: "local",
             apiKey: "key",
             apiBase: "http://127.0.0.1:3030/v1",
             model: "",
+            hostedTools: [],
+            store: false,
+            enableCostStat: false,
         })).toBeUndefined();
     });
 
     test("拒绝缺少密钥、模型和非法地址", () => {
         expect(validateChatApiSettings({
+            provider: "openai",
             apiKey: "",
             apiBase: "https://example.com/v1",
             model: "model",
-        })).toContain("OPENAI_API_KEY");
+            hostedTools: [],
+            store: false,
+            enableCostStat: false,
+        })).toContain("providers.openai.apiKey");
 
         expect(validateChatApiSettings({
+            provider: "openai",
             apiKey: "key",
             apiBase: "not-a-url",
             model: "model",
-        })).toContain("OPENAI_BASE_URL");
+            hostedTools: [],
+            store: false,
+            enableCostStat: false,
+        })).toContain("providers.openai.baseUrl");
 
+        expect(validateChatApiSettings({
+            provider: "openai",
+            apiKey: "key",
+            apiBase: "https://example.com/v1",
+            model: "",
+            hostedTools: [],
+            store: false,
+            enableCostStat: false,
+        })).toContain("缺少模型");
     });
 
     test("密钥写成 $NAME 时取被引用的环境变量", () => {
-        const restore = isolateModelEnv();
         process.env.ZBOT_TEST_KEY_TARGET = "sk-referenced";
-        process.env.OPENAI_CHAT_API_KEY = "$ZBOT_TEST_KEY_TARGET";
-        process.env.OPENAI_CHAT_MODEL = "gpt-5";
+        const restoreConfig = useConfig(defaultTestConfig({
+            providers: {
+                deepseek: {
+                    protocol: "chat_completions",
+                    baseUrl: "https://api.deepseek.com/v1",
+                    apiKey: "$ZBOT_TEST_KEY_TARGET",
+                    models: ["deepseek-chat"],
+                },
+            },
+            defaults: { provider: "deepseek", model: "deepseek-chat" },
+        })).restore;
         try {
             const settings = getChatApiSettings();
 
@@ -374,19 +400,27 @@ describe("chat provider settings", () => {
             expect(validateChatApiSettings(settings)).toBeUndefined();
         } finally {
             delete process.env.ZBOT_TEST_KEY_TARGET;
-            restore();
+            restoreConfig();
         }
     });
 
     test("引用落空时报错点明指向的变量", () => {
-        const restore = isolateModelEnv();
-        process.env.OPENAI_CHAT_API_KEY = "${ZBOT_TEST_KEY_MISSING}";
-        process.env.OPENAI_CHAT_MODEL = "gpt-5";
+        const restoreConfig = useConfig(defaultTestConfig({
+            providers: {
+                deepseek: {
+                    protocol: "chat_completions",
+                    baseUrl: "https://api.deepseek.com/v1",
+                    apiKey: "${ZBOT_TEST_KEY_MISSING}",
+                    models: ["deepseek-chat"],
+                },
+            },
+            defaults: { provider: "deepseek", model: "deepseek-chat" },
+        })).restore;
         try {
             expect(validateChatApiSettings(getChatApiSettings()))
-                .toContain("OPENAI_CHAT_API_KEY=$ZBOT_TEST_KEY_MISSING 引用的环境变量 ZBOT_TEST_KEY_MISSING 未设置");
+                .toContain("providers.deepseek.apiKey=$ZBOT_TEST_KEY_MISSING 引用的环境变量 ZBOT_TEST_KEY_MISSING 未设置");
         } finally {
-            restore();
+            restoreConfig();
         }
     });
 

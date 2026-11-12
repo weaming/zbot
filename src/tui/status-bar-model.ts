@@ -45,7 +45,7 @@ export interface StatusBarInput {
     lastRate?: RequestRate;
     cwd: string;
     home?: string;
-    /** 是否按 DeepSeek 官方价格表计费（官方端点或开启 ENABLE_DS_COST_STAT）。 */
+    /** 是否按 DeepSeek 官方价格表计费（官方端点或开启 runtime.deepseekCostStat）。 */
     isDeepSeekPriced: boolean;
     deepSeek?: { phase: "peak" | "offpeak"; switchInMs: number };
     contextWindow: number;

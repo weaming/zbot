@@ -81,20 +81,12 @@ describe("mcp config", () => {
         expect(normalized.map(server => server.type)).toEqual(["stdio", "http"]);
     });
 
-    test("loadMcpServersConfig 在 mode=tui 下，配置文件不存在时返回空数组（没有则不连）", () => {
+    test("配置文件不存在时返回空数组（没有则不连）", () => {
         const nonExistentPath = path.join(os.tmpdir(), "non_existent_mcp_config.yaml");
         const configs = loadMcpServersConfig({
             configPath: nonExistentPath,
-            mode: "tui",
         });
         expect(configs).toEqual([]);
-    });
-
-    test("loadMcpServersConfig 在 mode=hub 下无配置文件时回退默认 mcp-hub", () => {
-        const configs = loadMcpServersConfig({ mode: "hub" });
-        expect(configs.length).toBe(1);
-        expect(configs[0].name).toBe("mcp-hub");
-        expect(configs[0].protocolVersion).toBe("2026-07-28");
     });
 
     test("loadMcpServersConfig 正确解析 yaml 文件并支持协议版本与 stdio 配置", () => {
@@ -125,7 +117,7 @@ describe("mcp config", () => {
         fs.writeFileSync(tmpFile, yamlContent, "utf-8");
 
         try {
-            const configs = loadMcpServersConfig({ configPath: tmpFile, mode: "tui" });
+            const configs = loadMcpServersConfig({ configPath: tmpFile });
             expect(configs.length).toBe(3);
             expect(configs[0].name).toBe("direct-amap");
             expect(configs[0].protocolVersion).toBe("2026-07-28");

@@ -14,24 +14,24 @@ import {
 import { toolContentToImageContent } from "../../src/tools/tool-interface.js";
 import { toUserContent } from "../../src/types/image.js";
 import { createTestImageFile, TEST_IMAGE_BYTES } from "./image-fixture.js";
+import { defaultTestConfig, useConfig } from "./test-config.js";
 
 describe("image assets", () => {
     let stateDir: string;
     let previousStateDir: string | undefined;
-    let previousFilesAPI: string | undefined;
+    let restoreConfig: (() => void) | undefined;
 
     beforeEach(() => {
         stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "zbot-image-assets-"));
         previousStateDir = process.env.ZBOT_STATE_DIR;
-        previousFilesAPI = process.env.DEEPSEEK_FILES_API;
         process.env.ZBOT_STATE_DIR = stateDir;
     });
 
     afterEach(() => {
         if (previousStateDir === undefined) delete process.env.ZBOT_STATE_DIR;
         else process.env.ZBOT_STATE_DIR = previousStateDir;
-        if (previousFilesAPI === undefined) delete process.env.DEEPSEEK_FILES_API;
-        else process.env.DEEPSEEK_FILES_API = previousFilesAPI;
+        restoreConfig?.();
+        restoreConfig = undefined;
         fs.rmSync(stateDir, { recursive: true, force: true });
     });
 
@@ -156,7 +156,9 @@ describe("image assets", () => {
         try {
             const address = server.address();
             if (!address || typeof address === "string") throw new Error("无法获取测试 Files API 地址");
-            process.env.DEEPSEEK_FILES_API = `http://127.0.0.1:${address.port}/files`;
+            restoreConfig = useConfig(defaultTestConfig({
+                runtime: { tokenizer: false, memoryUserId: 0, deepseekFilesApi: `http://127.0.0.1:${address.port}/files` },
+            })).restore;
 
             await expect(uploadDeepSeekFile(originalPath)).resolves.toBe("file-api-test");
             expect(requestHeaders.authorization).toBeUndefined();

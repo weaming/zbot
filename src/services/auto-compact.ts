@@ -9,7 +9,7 @@ import {
     shouldAutoCompact,
     splitTurnsForCompaction,
 } from "../utils/token-budget.js";
-import { RESERVED_OUTPUT_TOKENS, RETAINED_TAIL_TOKENS } from "../config.js";
+import { getRuntimeConfig } from "../config/index.js";
 import { countMessagesTokens, countTextTokens, countTurnsTokens } from "../utils/tokenizer.js";
 import { buildCompactPrompt } from "../utils/compaction-prompt.js";
 import { projectChatMessagesForPrompt } from "../utils/tool-result-context.js";
@@ -18,7 +18,7 @@ import { emptyUsage, mergeUsage } from "../events/ui-events.js";
 import type { UsageInfo } from "../types/chat.js";
 import type { ChatModelSelection } from "../types/chat-model.js";
 import { buildSystemPrompt, runChatQuery } from "./chat-runtime.js";
-import { DEFAULT_MEMORY_USER_ID, normalizeMemoryUserId } from "../utils/runtime-paths.js";
+import { getDefaultMemoryUserId, normalizeMemoryUserId } from "../utils/runtime-paths.js";
 
 /**
  * 快速跳过压缩判定的安全水位：provider 上报的真实输入低于阈值这个比例时直接放行，
@@ -103,7 +103,7 @@ export async function compactActiveTurnMessagesIfNeeded(
     const promptBudget = Math.max(
         1_000,
         (options.providerMaxTokens ?? getContextWindowForModel(options.model))
-            - RESERVED_OUTPUT_TOKENS
+            - getRuntimeConfig().reservedOutputTokens
             - (options.toolsTokens ?? 0),
     );
     const history = await fitMessagesToBudget(
@@ -265,7 +265,7 @@ export function findCompactionKeepFromPosition(
  */
 export async function autoCompactIfNeeded(
     session: Session,
-    options: AutoCompactOptions = { userId: DEFAULT_MEMORY_USER_ID },
+    options: AutoCompactOptions = { userId: getDefaultMemoryUserId() },
 ): Promise<AutoCompactResult> {
     const userId = normalizeMemoryUserId(options.userId);
     // 判定要带上系统提示的占用：只有历史估算会低估真实请求量，漏判就直接涨到 provider 400
@@ -298,9 +298,10 @@ export async function autoCompactIfNeeded(
         getEffectiveContextWindowSize(options.model) - systemPromptTokens - (options.toolsTokens ?? 0),
     );
     const candidateTokens = await countTurnsTokens(candidates, options.model);
+    const configuredTailTokens = getRuntimeConfig().retainTailTokens;
     const retainedTailTokens = candidateTokens > candidateBudget
-        ? Math.max(RETAINED_TAIL_TOKENS, candidateTokens - candidateBudget)
-        : RETAINED_TAIL_TOKENS;
+        ? Math.max(configuredTailTokens, candidateTokens - candidateBudget)
+        : configuredTailTokens;
 
     // 待压缩回合 + 保留段（优先保留完整 turn，尾部单轮超预算才消息级细切）
     const { turnsToCompact, keepFromMessageId } = await splitTurnsForCompaction(candidates, {

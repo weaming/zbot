@@ -1,5 +1,6 @@
 import path from "path";
 import os from "os";
+import { getRuntimeConfig } from "../config/index.js";
 import { getAsyncToolCwd } from "./tool-cwd-context.js";
 
 const DEFAULT_STATE_DIR = path.join(os.homedir(), ".zbot");
@@ -66,18 +67,18 @@ export function getAgentsSkillsDir(...parts: string[]): string {
     return path.join(homeDir, ".agents", "skills", ...parts);
 }
 
-const configuredMemoryUserId = Number.parseInt(process.env.ZBOT_MEMORY_USER_ID || "0", 10);
-export const DEFAULT_MEMORY_USER_ID = Number.isSafeInteger(configuredMemoryUserId) && configuredMemoryUserId >= 0
-    ? configuredMemoryUserId
-    : 0;
+/** 默认记忆用户：配置里的 runtime.memoryUserId。 */
+export function getDefaultMemoryUserId(): number {
+    return getRuntimeConfig().memoryUserId;
+}
 
 export function normalizeMemoryUserId(userId?: number | string): number {
-    if (userId === undefined || userId === "") return DEFAULT_MEMORY_USER_ID;
+    if (userId === undefined || userId === "") return getDefaultMemoryUserId();
 
     const parsedUserId = typeof userId === "number" ? userId : Number(userId);
     return Number.isSafeInteger(parsedUserId) && parsedUserId >= 0
         ? parsedUserId
-        : DEFAULT_MEMORY_USER_ID;
+        : getDefaultMemoryUserId();
 }
 
 export function getSessionsDir(...parts: string[]): string {

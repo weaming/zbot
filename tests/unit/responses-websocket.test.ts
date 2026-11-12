@@ -1,17 +1,11 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import OpenAI from "openai";
 import { createChatClient } from "../../src/tools/chat-orchestrator.js";
 import { ResponsesSession } from "../../src/tools/orchestrator/responses-session.js";
 
 describe("Responses WebSocket", () => {
-  const previous = process.env.OPENAI_RESPONSES_WEBSOCKET;
-  afterEach(() => {
-    if (previous === undefined) delete process.env.OPENAI_RESPONSES_WEBSOCKET;
-    else process.env.OPENAI_RESPONSES_WEBSOCKET = previous;
-  });
 
   test("转发请求并接收流式与非流式响应", async () => {
-    process.env.OPENAI_RESPONSES_WEBSOCKET = " TrUe ";
     const requests: any[] = [];
     let connections = 0;
     const server = Bun.serve({
@@ -37,12 +31,11 @@ describe("Responses WebSocket", () => {
       },
     });
     try {
-      const client = createChatClient("test-key", `http://127.0.0.1:${server.port}/v1`, "responses");
+      const client = createChatClient("test-key", `http://127.0.0.1:${server.port}/v1`, "responses", undefined, undefined, { websocket: true });
       const stream = await client.createResponse!({ model: "test", input: [], stream: true });
       const events = [];
       for await (const event of stream) events.push(event);
       expect(events.map(event => event.type)).toEqual(["response.output_text.delta", "response.completed"]);
-      process.env.OPENAI_RESPONSES_WEBSOCKET = "1";
       const response = await client.createResponse!({ model: "test", input: [], stream: false });
       expect(response.id).toBe("resp_test");
       expect(requests).toHaveLength(2);
@@ -56,7 +49,6 @@ describe("Responses WebSocket", () => {
   });
 
   test("复用连接，仅在前缀匹配时增量发送，并在响应不存在时恢复完整请求", async () => {
-    process.env.OPENAI_RESPONSES_WEBSOCKET = "1";
     const requests: any[] = [];
     const firstInput = { role: "user", content: "查一下" };
     const output = { type: "function_call", id: "fc_1", call_id: "call_1", name: "lookup", arguments: "{}" };
@@ -86,7 +78,7 @@ describe("Responses WebSocket", () => {
         },
       },
     });
-    const client = createChatClient("test-key", `http://127.0.0.1:${server.port}/v1`, "responses");
+    const client = createChatClient("test-key", `http://127.0.0.1:${server.port}/v1`, "responses", undefined, undefined, { websocket: true });
     try {
       await client.createResponse!({ model: "test", input: [firstInput], stream: false });
       await client.createResponse!({ model: "test", input: [firstInput, output, toolResult], stream: false });
@@ -108,7 +100,6 @@ describe("Responses WebSocket", () => {
   });
 
   test("升级失败时回退 HTTP Responses", async () => {
-    process.env.OPENAI_RESPONSES_WEBSOCKET = "true";
     const methods: string[] = [];
     const server = Bun.serve({
       port: 0,
@@ -122,7 +113,7 @@ describe("Responses WebSocket", () => {
         });
       },
     });
-    const client = createChatClient("test-key", `http://127.0.0.1:${server.port}/v1`, "responses");
+    const client = createChatClient("test-key", `http://127.0.0.1:${server.port}/v1`, "responses", undefined, undefined, { websocket: true });
     try {
       const response = await client.createResponse!({ model: "test", input: [], stream: false });
       expect(response.id).toBe("resp_http");
@@ -136,7 +127,6 @@ describe("Responses WebSocket", () => {
   });
 
   test("同一会话跨回合复用连接，认证变化时重新连接", async () => {
-    process.env.OPENAI_RESPONSES_WEBSOCKET = "true";
     const requests: any[] = [];
     let connections = 0;
     const server = Bun.serve({
@@ -161,13 +151,13 @@ describe("Responses WebSocket", () => {
     const sessionId = crypto.randomUUID();
     const url = `http://127.0.0.1:${server.port}/v1`;
     try {
-      const first = createChatClient("key-1", url, "responses", sessionId);
+      const first = createChatClient("key-1", url, "responses", sessionId, undefined, { websocket: true });
       await first.createResponse!({ model: "test", input: [], stream: false });
       first.close?.();
-      const second = createChatClient("key-1", url, "responses", sessionId);
+      const second = createChatClient("key-1", url, "responses", sessionId, undefined, { websocket: true });
       await second.createResponse!({ model: "test", input: [{ role: "user", content: "next" }], stream: false });
       second.close?.();
-      const third = createChatClient("key-2", url, "responses", sessionId);
+      const third = createChatClient("key-2", url, "responses", sessionId, undefined, { websocket: true });
       await third.createResponse!({ model: "test", input: [], stream: false });
       third.close?.();
       expect(connections).toBe(2);
@@ -180,7 +170,6 @@ describe("Responses WebSocket", () => {
   });
 
   test("取消等待中的请求会返回 AbortError", async () => {
-    process.env.OPENAI_RESPONSES_WEBSOCKET = "true";
     const controller = new AbortController();
     const server = Bun.serve({
       port: 0,
@@ -190,7 +179,7 @@ describe("Responses WebSocket", () => {
       },
       websocket: { message() { controller.abort(); } },
     });
-    const client = createChatClient("test-key", `http://127.0.0.1:${server.port}/v1`, "responses");
+    const client = createChatClient("test-key", `http://127.0.0.1:${server.port}/v1`, "responses", undefined, undefined, { websocket: true });
     try {
       await expect(client.createResponse!({ model: "test", input: [], stream: false }, { signal: controller.signal }))
         .rejects.toMatchObject({ name: "AbortError" });
