@@ -118,7 +118,9 @@ describe("用法文本与实现同步", () => {
 
     /** 从用法文本抽出被写进文档的开关。 */
     function documentedFlags(usage: string): string[] {
-        return [...new Set([...usage.matchAll(/--[a-z][a-z-]*/g)].map(match => match[0]))].sort();
+        // 去掉跨行的散文（`zbot session --help` 这类引用），只看开关声明区
+        const declared = usage.split("\n").filter(line => !line.includes("session --")).join("\n");
+        return [...new Set([...declared.matchAll(/--[a-z][a-z-]*/g)].map(match => match[0]!))].sort();
     }
 
     test("web 用法与 parseWebArgs 双向对齐", () => {
@@ -133,8 +135,6 @@ describe("用法文本与实现同步", () => {
 
         expect(implemented.length).toBeGreaterThan(0);
         expect(documentedFlags(PRINT_CLI_USAGE)).toEqual(implemented);
-        // -p 是单横线短开关，正则抽不到，单独钉住
-        expect(PRINT_CLI_USAGE).toContain("-p, --print");
     });
 
     test("总览列出全部分支入口", () => {
@@ -148,6 +148,13 @@ describe("用法文本与实现同步", () => {
 
         expect(implemented.length).toBeGreaterThan(0);
         expect(documentedFlags(RESUME_CLI_USAGE)).toEqual(implemented);
+    });
+
+    test("已禁用的入口仍标出短开关与拒绝行为", () => {
+        // -p 是单横线短开关，抽不到开关列表，只能钉文本
+        expect(PRINT_CLI_USAGE).toContain("-p, --print");
+        expect(PRINT_CLI_USAGE).toContain("tui_or_backend_required");
         expect(RESUME_CLI_USAGE).toContain("-p, --print");
+        expect(RESUME_CLI_USAGE).toContain("已禁用");
     });
 });

@@ -35,11 +35,17 @@ export const WEB_CLI_USAGE = [
 ].join("\n");
 
 export const PRINT_CLI_USAGE = [
-    "用法：zbot -p <文本> [选项]（已禁用）",
+    "用法：zbot -p <文本> [选项]（入口已禁用，参数仍接受）",
     "",
-    "CLI 不会在没有 TUI 或后台持有者时直接启动模型回合。",
+    "  -p, --print      旧的无 UI 模式开关，保留仅为兼容",
+    "  --cwd <目录>     任务与会话的默认工作目录，默认当前目录",
+    "  --model <名称>   指定模型",
+    "  --json           以 JSON 输出结果",
     "",
-    "请启动 zbot TUI 后用 `zbot session send <id> <文本> --wait` 投递任务。",
+    "投递与等待请用 `session send`（见 zbot session --help）。",
+    "",
+    "入口已禁用：CLI 不会在没有 TUI 或后台持有者时直接启动模型回合，调用后一律报",
+    "tui_or_backend_required。",
 ].join("\n");
 
 export const SESSION_CLI_USAGE = [
@@ -71,14 +77,15 @@ export const SESSION_CLI_USAGE = [
 ].join("\n");
 
 export const RESUME_CLI_USAGE = [
-    "用法：zbot resume <id> [选项]",
+    "用法：zbot resume <id> [-p, --print] [--json] [--unarchive]",
     "",
     "  <id>              会话 id：完整 id、唯一前缀或末几位",
-    "  -p, --print       已禁用：CLI 不会自行启动模型回合",
+    "  -p, --print       已禁用：CLI 不会自行启动模型回合，正文以 -- 分隔",
+    "  --json            与 -p/--print 同用输出 JSON（同样已禁用）",
     "  --unarchive       目标会话已归档时先恢复再进入",
     "",
     "载入旧会话并打开 TUI。需要从 CLI 发消息时，目标会话必须由 TUI 或后台实例持有，",
-    "使用 `zbot session send <id> <文本> --wait` 投递并等待结果。",
+    "投递与等待用 `session send`（见 zbot session --help）。",
 ].join("\n");
 
 export const HERDR_CLI_USAGE = [

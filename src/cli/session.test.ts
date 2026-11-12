@@ -208,7 +208,10 @@ describe("parseSessionArgs", () => {
             expiresSeconds: 270,
         });
         // 不带秒数 = 一直等到终态；带秒数才是显式超时
-        expect(parseSessionArgs(["send", "abc", "hi", "--wait"])).toMatchObject({ wait: true, waitSeconds: undefined });
+        const openEnded = parseSessionArgs(["send", "abc", "hi", "--wait"]);
+        expect(openEnded).toMatchObject({ wait: true });
+        // 不写上限时该键直接缺省，而不是显式 undefined
+        expect("waitSeconds" in openEnded).toBe(false);
         expect(parseSessionArgs(["send", "abc", "hi", "--wait=12"])).toMatchObject({ wait: true, waitSeconds: 12 });
     });
 
