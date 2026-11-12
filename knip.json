@@ -3,11 +3,18 @@
     "src/decision/index.ts",
     "src/scripts/decision-cli.ts",
     "src/scripts/compact-event-log.ts",
-    "tests/integration/helpers/peer-child.ts"
+    "src/tui/main.ts",
+    "tests/integration/helpers/peer-child.ts",
+    "tests/unit/**/*.test.ts",
+    "ui/src/main.tsx",
+    "ui/vite.config.ts"
   ],
   "project": [
     "**/*.{js,cjs,mjs,jsx,ts,cts,mts,tsx}!",
-    "!tmp/**"
+    "!tmp/**",
+    "!dist/**",
+    "!dist-bundle/**",
+    "!src/web/.ui-dist/**"
   ],
   "ignoreBinaries": [
     "pbpaste"

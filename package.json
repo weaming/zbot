@@ -38,6 +38,7 @@
     "@types/chokidar": "^2.1.7",
     "@types/node": "^26.1.2",
     "@types/ws": "^8.18.1",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "dotenv": "^16.4.5"
   }
 }
