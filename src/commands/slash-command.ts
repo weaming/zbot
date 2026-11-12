@@ -141,7 +141,7 @@ export const SLASH_COMMAND_SPECS: SlashCommandSpec[] = [
         peer: "host",
         maxArgs: 1,
     },
-    { name: "reload", description: "重新加载磁盘技能与 MCP 工具", usage: "/reload", peer: "host" },
+    { name: "reload", description: "重新加载配置、技能与 MCP 工具", usage: "/reload", peer: "host" },
     {
         name: "keys",
         description: "显示全部快捷键（Ctrl+/ / F1）",

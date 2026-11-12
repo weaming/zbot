@@ -1453,12 +1453,14 @@ export class LocalSessionHost implements SessionHost {
 
     /** 重读磁盘技能和 MCP 工具：system prompt 与工具定义都在每次请求现构建，无需清理缓存。 */
     async reloadRuntime(): Promise<RuntimeReloadResult> {
+        const { reloadConfig } = await import("../config/index.js");
         const [{ skillRegistry }, mcp] = await Promise.all([
             import("../skills/skill-registry.js"),
             import("../mcp/client-manager.js"),
         ]);
 
         await Promise.all([
+            Promise.resolve(reloadConfig()),
             skillRegistry.reload(),
             mcp.reloadMcpClients(),
         ]);
