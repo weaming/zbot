@@ -84,9 +84,9 @@ providers:
 | --- | --- |
 | `providers.<name>.websocket` | Responses 是否走 WebSocket；省略时 GPT 模型默认开、其他默认关。生成中追加的文本会尝试通过 steering 交给当前响应 |
 | `providers.<name>.store` | Responses 是否请求上游保存，默认 `false`。Codex Responses 代理要求 `store=false` |
-| `providers.<name>.hostedTools` | Responses 托管工具（如 `web_search`、`tool_search`），上游执行；Chat Completions 没有托管工具 |
+| `providers.<name>.hostedTools` | Responses 托管工具（如 `web_search`、`tool_search`），上游执行；第三方网关按显式声明下发，不因模型名含 `deepseek` 而过滤。官方 DeepSeek 仍按能力白名单过滤；Chat Completions 没有托管工具 |
 | `providers.<name>.efforts` | 可选思考强度清单，取代旧 `*_EFFORTS` |
-| `providers.<name>.audioInput` | Chat Completions 是否允许下发 `input_audio`；省略时按模型名启发式 |
+| `providers.<name>.audioInput` | Chat Completions 是否允许下发 `input_audio`；官方 DeepSeek 保持禁用，其他端点优先尊重显式配置。省略时 DeepSeek 风格默认关闭，其余按音频模型名启发式 |
 | `providers.<name>.imageInput` | 该服务是否接受图片内容块；省略时视为接受。显式 `false` 时整台接入端都不发图片 |
 | `providers.<name>.textOnlyModels` | 纯文本模型名关键词（小写子串匹配）；命中的模型在发请求前把图片块换成文字说明，避免整轮 404。同一张卡上的其他模型不受影响 |
 | `providers.<name>.contextWindowTokens` | 该服务的上下文窗口，压过内置模型表 |

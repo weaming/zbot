@@ -462,7 +462,7 @@ export async function runChatQuery(options: ChatRunOptions) {
                 // 用 resolveProtocol / client.baseURL 与实际生效路径（prepareRequest）保持同源
                 const audioDropReason = resolveProtocol(client) === "responses"
                     ? "responses"
-                    : (settings.audioInput ?? supportsAudioInput(settings.model, client.baseURL)) ? undefined : "endpoint";
+                    : supportsAudioInput(settings.model, client.baseURL, settings.audioInput) ? undefined : "endpoint";
                 const mediaNotice = describeDroppedMedia(result.content, { audioDropReason });
                 return {
                     content: mediaNotice ? `${content}${mediaNotice}` : content,

@@ -8,7 +8,7 @@ import {
 } from "../../src/tools/orchestrator/request-builder.js";
 import { isToolSearchEnabled, prepareRequest } from "../../src/tools/orchestrator/turn-request.js";
 
-/** OPENAI_RESPONSES_HOSTED_TOOLS 的托管工具声明：只声明，不执行，且不挤动 function 前缀。 */
+/** provider.hostedTools 的托管工具声明：只声明，不执行，且不挤动 function 前缀。 */
 
 const functionTools = [
     { type: "function", function: { name: "grep", parameters: { type: "object", properties: {} } } },
@@ -22,7 +22,19 @@ describe("toHostedToolDefinitions", () => {
         expect(isToolSearchEnabled({ ...base, protocol: "responses" })).toBe(true);
         expect(isToolSearchEnabled({ ...base, protocol: "chat_completions" })).toBe(false);
         expect(isToolSearchEnabled({ ...base, protocol: "responses", hostedTools: ["web_search"] })).toBe(false);
-        expect(isToolSearchEnabled({ ...base, protocol: "responses", model: "deepseek-v4-pro" })).toBe(false);
+        expect(isToolSearchEnabled({ ...base, protocol: "responses", model: "deepseek-v4-pro" })).toBe(true);
+        expect(isToolSearchEnabled({
+            ...base,
+            protocol: "responses",
+            model: "deepseek-v4-pro",
+            baseURL: "https://api.deepseek.com/v1",
+        })).toBe(false);
+        expect(isToolSearchEnabled({
+            ...base,
+            protocol: "responses",
+            model: "deepseek-flash",
+            hostedTools: undefined,
+        })).toBe(false);
     });
 
     test("逗号分隔值去空白、去空项、去重后变成扁平工具定义", () => {
@@ -166,9 +178,9 @@ describe("DeepSeek Responses 端点的托管工具", () => {
         deferLoading: true,
         function: { name: "remote__lookup", description: "Lookup", parameters: { type: "object" } },
     };
-    const prepare = (model: string, hostedTools: string[]) => prepareRequest({
+    const prepare = (model: string, hostedTools: string[], baseURL = "https://api.deepseek.com") => prepareRequest({
         client: {
-            baseURL: "https://api.deepseek.com",
+            baseURL,
             protocol: "responses",
             createResponse: async () => {},
         },
@@ -194,5 +206,28 @@ describe("DeepSeek Responses 端点的托管工具", () => {
             expect(requested.requestBody.tools.map((tool: any) => tool.type)).toEqual(["function"]);
             expect(requested.requestBody.tools[0]).not.toHaveProperty("defer_loading");
         }
+    });
+
+    test("网关尊重显式托管工具声明，DeepSeek 模型仍可启用 tool_search 与 defer_loading", async () => {
+        for (const baseURL of ["https://gateway.example/v1", "https://api.deepseek.com.evil.example/v1"]) {
+            for (const model of ["deepseek-v4-pro", "vendor/deepseek-flash"]) {
+                const requested = await prepare(model, ["web_search", "tool_search"], baseURL);
+                expect(isToolSearchEnabled({
+                    protocol: "responses",
+                    model,
+                    baseURL,
+                    hostedTools: ["web_search", "tool_search"],
+                })).toBe(true);
+                expect(requested.requestBody.tools.map((tool: any) => tool.type))
+                    .toEqual(["function", "web_search", "tool_search"]);
+                expect(requested.requestBody.tools[0]).toHaveProperty("defer_loading", true);
+            }
+        }
+    });
+
+    test("网关未声明托管工具时不自动启用，也不发 defer_loading", async () => {
+        const requested = await prepare("vendor/deepseek-flash", [], "https://gateway.example/v1");
+        expect(requested.requestBody.tools.map((tool: any) => tool.type)).toEqual(["function"]);
+        expect(requested.requestBody.tools[0]).not.toHaveProperty("defer_loading");
     });
 });

@@ -17,7 +17,7 @@ import { toUserContent, type UserMessageInput } from "../../types/image.js";
 import { normalizeResponsesResponse } from "./responses-output.js";
 import { decideNext, nextCounters, EMPTY_RESPONSE_RETRY_PROMPT } from "./decide.js";
 import { buildUsageStats, toUsageInfo } from "./usage.js";
-import { isDeepSeekEndpoint, prepareRequest } from "./turn-request.js";
+import { isDeepSeekStyle, prepareRequest } from "./turn-request.js";
 import type { ImageInputCapability } from "./image-input.js";
 import type { LLMRequestKind } from "../../utils/logger.js";
 import { getPromptTooLongLimit, isInvalidAssistantMessageError } from "../../utils/provider-context-limit.js";
@@ -162,7 +162,7 @@ export async function runTurnLoop(ctx: TurnContext): Promise<TurnLoopResult> {
         ...(ctx.hostedTools?.length ? { hostedTools: ctx.hostedTools } : {}),
         ...(ctx.toolChoice ? { toolChoice: ctx.toolChoice } : {}),
         ...(ctx.getContextReminders ? { getContextReminders: ctx.getContextReminders } : {}),
-        normalizedTools: (list: any[]) => (isDeepSeekEndpoint(ctx.model, ctx.client.baseURL)
+        normalizedTools: (list: any[]) => (isDeepSeekStyle(ctx.model, ctx.client.baseURL)
           ? normalizeToolDefinitionsForDeepSeek(list)
           : list),
         isFirstIteration: ctx.iteration === 1,

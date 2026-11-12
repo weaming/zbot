@@ -18,13 +18,13 @@ const providerSchema = z.object({
     models: z.array(z.string()).default([]),
     /** 可选思考强度候选。 */
     efforts: z.array(z.string()).optional(),
-    /** Responses 托管工具类型（如 `web_search`, `tool_search`）。 */
+    /** Responses 托管工具类型；网关尊重声明，官方 DeepSeek 另按能力白名单过滤。 */
     hostedTools: z.array(z.string()).optional(),
     /** Responses 是否走 WebSocket；省略时按模型名启发式。 */
     websocket: z.boolean().optional(),
     /** Responses 是否请求上游保存，默认 `false`。 */
     store: z.boolean().optional(),
-    /** Chat Completions 是否允许下发 `input_audio`；省略时按模型名启发式。 */
+    /** Chat Completions 音频输入；网关优先尊重配置，官方 DeepSeek 保持禁用，省略时按模型名启发式。 */
     audioInput: z.boolean().optional(),
     /** 该服务是否接受图片内容块；省略时视为接受，只有 `textOnlyModels` 命中的模型判否。 */
     imageInput: z.boolean().optional(),

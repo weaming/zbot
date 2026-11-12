@@ -11,7 +11,7 @@
  */
 
 import { getRuntimeConfig } from "../../config/index.js";
-import { isDeepSeekEndpoint } from "../../pricing/deepseek.js";
+import { isDeepSeekStyle } from "../../pricing/deepseek.js";
 import { isApplyPatchTool } from "../tool-kinds.js";
 
 /** 工具形态：custom 自由文本 / off 原样下发（含 DeepSeek 这类只支持 function 的上游）。 */
@@ -27,7 +27,7 @@ export function resolveApplyPatchToolMode(
 ): ApplyPatchToolMode {
     if (configured) return configured;
 
-    if (isDeepSeekEndpoint(input.model, input.baseURL)) return "off";
+    if (isDeepSeekStyle(input.model, input.baseURL)) return "off";
     if (input.model.toLowerCase().includes("gpt-")) return "custom";
     return "off";
 }

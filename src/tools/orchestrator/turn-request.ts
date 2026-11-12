@@ -5,7 +5,7 @@
  * 循环只剩：准备一轮 → 决策 → 执行工具。
  */
 
-import { isDeepSeekEndpoint, isDeepSeekFlashModel, isOfficialDeepSeekEndpoint } from "../../pricing/deepseek.js";
+import { isDeepSeekStyle, isDeepSeekFlashModel, isOfficialDeepSeekEndpoint } from "../../pricing/deepseek.js";
 import { dropUnsupportedImages, type ImageInputCapability } from "./image-input.js";
 import type { ChatMessage } from "../../types/session.js";
 import { projectChatMessagesForPrompt } from "../../utils/tool-result-context.js";
@@ -64,39 +64,36 @@ async function uploadImageForDeepSeek(client: ChatClient, image: any): Promise<s
 }
 
 /** 历史调用方从本模块取该判定，实现已下沉到 pricing（无上游依赖）。 */
-export { isDeepSeekEndpoint };
+export { isDeepSeekStyle };
 
 /**
  * 判定接入端是否接受 Chat Completions 的 `input_audio` 内容块。
  *
- * 目前只有音频模型（如 gpt-audio-*、gpt-4o-audio-preview）支持；DeepSeek 只有视觉能力，
- * 收到 audio 内容块会返回 400。默认关闭，宁可退化成文本占位符。
- *
- * 名字启发式会误判「名字含 audio 但端点不接受 input_audio」的网关别名
- * （如自建 LiteLLM 的 my-audio-model），可用 provider 的 `audioInput` 强制开关。
+ * 官方 DeepSeek 保持禁用；其他端点优先尊重配置，
+ * 未配置时才按 DeepSeek 风格与音频模型名采用保守默认值。
  */
 export function supportsAudioInput(model: string, baseURL: string, configured?: boolean): boolean {
-    // 硬性不支持：DeepSeek 端点只有视觉能力，provider 开关也不能让它发 input_audio
-    if (isDeepSeekEndpoint(model, baseURL)) return false;
+    if (isOfficialDeepSeekEndpoint(baseURL)) return false;
     if (configured !== undefined) return configured;
+    if (isDeepSeekStyle(model, baseURL)) return false;
 
     return /audio/i.test(model);
 }
 
-/** DeepSeek 兼容端只托管服务端 web_search，且 flash 档上游会忽略，因此其余类型与 flash 档一律不发。 */
+/** 官方 DeepSeek 的托管工具白名单，不应用于第三方网关。 */
 const DEEPSEEK_HOSTED_TOOL_TYPES: ReadonlySet<string> = new Set(["web_search"]);
 
 const NO_HOSTED_TOOL_TYPES: ReadonlySet<string> = new Set();
 
-/** 按接入端解析可声明的托管工具类型；不是 DeepSeek 时返回 undefined（不限制）。 */
+/** 仅官方端点应用托管工具限制；网关以显式声明为准。 */
 function resolveHostedToolTypes(model: string, baseURL: string): ReadonlySet<string> | undefined {
-    if (!isDeepSeekEndpoint(model, baseURL)) return undefined;
+    if (!isOfficialDeepSeekEndpoint(baseURL)) return undefined;
     return isDeepSeekFlashModel(model) ? NO_HOSTED_TOOL_TYPES : DEEPSEEK_HOSTED_TOOL_TYPES;
 }
 
 /**
  * 接入端本次请求能否声明 tool_search：托管工具只在 Responses 协议下发，
- * 且该类型要出现在接入端的能力集合里（DeepSeek 兼容端一个都没有）。
+ * 且该类型要出现在接入端的能力集合里（官方 DeepSeek 不声明 tool_search）。
  * lazy MCP 工具的下发判定与 defer_loading 投影共用这一口径。
  */
 export function isToolSearchEnabled(options: {
@@ -121,7 +118,7 @@ export interface PrepareRequestOptions {
     /** 基础工具定义（未排序）。 */
     tools: any[];
     getToolDefinitions?: () => any[];
-    /** 托管工具类型（上游执行，本地不执行）：调用方解析 OPENAI_RESPONSES_HOSTED_TOOLS 后传入。 */
+    /** 托管工具类型（上游执行，本地不执行），来自 provider 的 hostedTools 配置。 */
     hostedTools?: string[];
     getContextReminders?: () => string[] | undefined;
     normalizedTools: (tools: any[]) => any[];
@@ -153,7 +150,7 @@ export async function prepareRequest(options: PrepareRequestOptions): Promise<Pr
     // 历史里的消息 id 只服务于本地 token 缓存，构造请求体前必须剥掉
     const projected = stripInternalPromptIds(projectChatMessagesForPrompt(options.messages));
     // 不下发工具时（纯生成请求）DeepSeek 不需要、也不会拼接历史思维链，剥掉省请求体
-    const promptMessages = currentTools.length === 0 && isDeepSeekEndpoint(model, client.baseURL)
+    const promptMessages = currentTools.length === 0 && isDeepSeekStyle(model, client.baseURL)
       ? stripReasoningContent(projected)
       : projected;
     const reminders = options.isFirstIteration ? [] : options.getContextReminders?.() ?? [];
@@ -166,7 +163,7 @@ export async function prepareRequest(options: PrepareRequestOptions): Promise<Pr
     const expandedMessages = useResponses
         ? shapedMessages
         : expandToolMediaMessages(stripResponsesMetadata(shapedMessages), {
-            allowAudio: client.transport?.audioInput ?? supportsAudioInput(model, client.baseURL),
+            allowAudio: supportsAudioInput(model, client.baseURL, client.transport?.audioInput),
         });
     // 纯文本端点收不到图片会整轮 404，先把图片降级成文本说明
     const requestMessages = dropUnsupportedImages(model, expandedMessages, options.imageInput);
@@ -189,7 +186,7 @@ export async function prepareRequest(options: PrepareRequestOptions): Promise<Pr
     const adaptedTools = adaptToolsForUpstream(normalizedTools, { mode: applyPatchMode, protocol });
     // 托管工具只在 Responses 协议声明：Chat Completions 只接受 function 类型，
     // 严格的上游会直接以 422 unknown variant 拒绝 web_search 等类型。
-    // DeepSeek 兼容端只有 pro 档托管 web_search；flash 档与 tool_search 均由能力集合过滤掉。
+    // 官方 DeepSeek 按能力集合过滤；第三方网关按 provider 的显式声明下发。
     const hostedToolTypes = resolveHostedToolTypes(model, client.baseURL);
     const supportedHostedTools = useResponses
         ? toHostedToolDefinitions(options.hostedTools ?? [], { supportedTypes: hostedToolTypes })

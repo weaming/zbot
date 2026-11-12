@@ -6,7 +6,7 @@ import {
     toolContentToImageContent,
 } from "../../src/tools/tool-interface.js";
 import { expandToolMediaMessages } from "../../src/tools/orchestrator/messages.js";
-import { supportsAudioInput } from "../../src/tools/orchestrator/turn-request.js";
+import { prepareRequest, supportsAudioInput } from "../../src/tools/orchestrator/turn-request.js";
 import type { ChatMessage } from "../../src/types/session.js";
 
 const WAV_BASE64 = "UklGRg==";
@@ -145,9 +145,59 @@ describe("supportsAudioInput 的 provider.audioInput 覆盖", () => {
         expect(supportsAudioInput("gpt-4o", "https://api.openai.com/v1")).toBe(false);
     });
 
-    test("DeepSeek 端点不受覆盖影响", () => {
+    test("DeepSeek 官方端点不受覆盖影响，官方模型别名也保持禁用", () => {
         expect(supportsAudioInput("deepseek-chat", "https://api.deepseek.com", true)).toBe(false);
+        expect(supportsAudioInput("my-audio-model", "https://api.deepseek.com/v1", true)).toBe(false);
     });
+
+    test("DeepSeek 网关显式配置优先于模型风格，未配置时仍保守禁用", () => {
+        const baseURL = "https://gateway.example/v1";
+        expect(supportsAudioInput("vendor/deepseek-audio", baseURL, true)).toBe(true);
+        expect(supportsAudioInput("vendor/deepseek-audio", baseURL, false)).toBe(false);
+        expect(supportsAudioInput("vendor/deepseek-audio", baseURL)).toBe(false);
+    });
+});
+
+describe("prepareRequest 音频能力与实际请求一致", () => {
+    const cases = [
+        { model: "deepseek-flash", baseURL: "https://api.deepseek.com/v1", audioInput: true, expected: false },
+        { model: "my-audio-model", baseURL: "https://api.deepseek.com/v1", audioInput: true, expected: false },
+        { model: "vendor/deepseek-flash", baseURL: "https://gateway.example/v1", audioInput: true, expected: true },
+        { model: "vendor/deepseek-audio", baseURL: "https://gateway.example/v1", audioInput: undefined, expected: false },
+        { model: "vendor/deepseek-audio", baseURL: "https://gateway.example/v1", audioInput: false, expected: false },
+        { model: "gpt-audio-test", baseURL: "https://gateway.example/v1", audioInput: undefined, expected: true },
+        { model: "gpt-audio-test", baseURL: "https://gateway.example/v1", audioInput: false, expected: false },
+        { model: "deepseek-flash", baseURL: "https://api.deepseek.com.evil.example/v1", audioInput: true, expected: true },
+    ];
+
+    for (const { model, baseURL, audioInput, expected } of cases) {
+        test(`${model} @ ${baseURL} / audioInput=${audioInput}`, async () => {
+            const message: ChatMessage = {
+                role: "tool",
+                tool_call_id: "call_audio",
+                content: "音频",
+                audioContent: [{ data: WAV_BASE64, format: "wav" }],
+            };
+            const prepared = await prepareRequest({
+                client: {
+                    baseURL,
+                    protocol: "chat_completions",
+                    transport: { ...(audioInput === undefined ? {} : { audioInput }) },
+                },
+                model,
+                messages: [message],
+                tools: [],
+                normalizedTools: tools => tools,
+                isFirstIteration: true,
+                stream: false,
+            });
+            const serialized = JSON.stringify(prepared.requestBody);
+            expect(supportsAudioInput(model, baseURL, audioInput)).toBe(expected);
+            expect(serialized.includes("input_audio")).toBe(expected);
+            expect(serialized).not.toContain("audioContent");
+            expect(message.audioContent).toHaveLength(1);
+        });
+    }
 });
 
 describe("turn_message 事件落盘", () => {

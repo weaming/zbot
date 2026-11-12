@@ -8,6 +8,7 @@ import {
     goDurationMinutes,
     isDeepSeekCostStatEnabled,
     isDeepSeekPeakTime,
+    isDeepSeekStyle,
     isOfficialDeepSeekEndpoint,
     normalizeDeepSeekModel,
     officialDeepSeekCostYuan,
@@ -69,6 +70,15 @@ describe("normalizeDeepSeekModel", () => {
 
     test("flash 优先于 pro：同时含两关键词时归 flash", () => {
         expect(normalizeDeepSeekModel("deepseek-flash-pro", true)).toBe("flash");
+    });
+});
+
+describe("isDeepSeekStyle", () => {
+    test("按模型风格识别，官方端点兼容模型别名", () => {
+        expect(isDeepSeekStyle("vendor/DEEPSEEK-flash", "https://gateway.example/v1")).toBe(true);
+        expect(isDeepSeekStyle("my-model", "https://api.deepseek.com/v1")).toBe(true);
+        expect(isDeepSeekStyle("gpt-audio-test", "https://gateway.example/v1")).toBe(false);
+        expect(isDeepSeekStyle("my-model", "https://api.deepseek.com.evil.example/v1")).toBe(false);
     });
 });
 

@@ -17,7 +17,7 @@ import {
 } from "./deepseek-pricing.js";
 
 /** 官方 OpenAI/Anthropic 兼容端点的 host（Anthropic 格式为 https://api.deepseek.com/anthropic，host 相同）。 */
-export const DEEPSEEK_OFFICIAL_HOST = "api.deepseek.com";
+const DEEPSEEK_OFFICIAL_HOST = "api.deepseek.com";
 
 /** 放开端点限制、对局域网网关也统计费用：`runtime.deepseekCostStat`。 */
 export function isDeepSeekCostStatEnabled(enabled = getRuntimeConfig().deepseekCostStat): boolean {
@@ -85,10 +85,9 @@ export function isOfficialDeepSeekEndpoint(apiBase?: string): boolean {
 }
 
 /**
- * 接入端是否跑 DeepSeek 模型：模型名含 deepseek，或端点就是官方 host。
- * 两者任一命中都按 DeepSeek 口径处理（能力集合、计费、工具形态都依赖它）。
+ * 是否采用 DeepSeek 兼容处理：模型名含 deepseek，或端点为官方。
  */
-export function isDeepSeekEndpoint(model: string, baseURL?: string): boolean {
+export function isDeepSeekStyle(model: string, baseURL?: string): boolean {
     return model.toLowerCase().includes("deepseek") || isOfficialDeepSeekEndpoint(baseURL);
 }
 
