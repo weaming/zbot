@@ -3,7 +3,7 @@ import { test, expect, describe } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createTestImageFile } from "./image-fixture.js";
+import { createTestImageFile, TEST_IMAGE_BYTES } from "./image-fixture.js";
 
 /** 断言送 LLM 的内容时忽略内部消息 id（只服务本地缓存，构造请求体前会剥掉）。 */
 function stripMessageIds<T>(messages: T[]): Array<Omit<T, "id">> {
@@ -1005,7 +1005,7 @@ describe("Chat Orchestrator", () => {
     expect(result.messages.some(message => message.role === "assistant" && message.reasoning === "想了一下")).toBe(true);
   });
 
-  test("图片请求携带工具并保留图片 URL", async () => {
+  test("图片请求携带工具并保留 base64 图片", async () => {
     const { executeWithChat } = await import('../../src/tools/chat-orchestrator.js');
     let request: any;
     const client = {
@@ -1015,7 +1015,7 @@ describe("Chat Orchestrator", () => {
         return { choices: [{ message: { role: "assistant", content: "图片内容" } }] };
       },
     };
-    const imageURL = "https://example.com/photo.jpg";
+    const imageURL = `data:image/png;base64,${TEST_IMAGE_BYTES.toString("base64")}`;
 
     const result = await executeWithChat({
       query: "识别图片",
@@ -1043,7 +1043,7 @@ describe("Chat Orchestrator", () => {
   test("图片历史后的文本请求继续携带工具", async () => {
     const { executeWithChat } = await import('../../src/tools/chat-orchestrator.js');
     let request: any;
-    const imageURL = "https://example.com/photo.jpg";
+    const imageURL = `data:image/png;base64,${TEST_IMAGE_BYTES.toString("base64")}`;
     const client = {
       baseURL: "http://llm-server:8080/v1",
       create: async (body: any) => {
@@ -1077,6 +1077,7 @@ describe("Chat Orchestrator", () => {
     const requests: any[] = [];
     const client = {
       baseURL: "https://api.deepseek.com/v1",
+      uploadFileData: async () => ({ id: "file-orchestrator-image" }),
       create: async (body: any) => {
         requests.push(structuredClone(body));
         return { choices: [{ message: { role: "assistant", content: "图片识别成功" } }] };
@@ -1107,8 +1108,8 @@ describe("Chat Orchestrator", () => {
     expect(requests[0].tools).toHaveLength(1);
     expect(requests[0].tool_choice).toBe("auto");
     expect(requests[0].messages.at(-1).content.at(-1)).toMatchObject({
-      type: "image_url",
-      image_url: { url: expect.stringContaining("data:image/png;base64,") },
+      type: "file",
+      file_id: "file-orchestrator-image",
     });
     fs.rmSync(tempDir, { recursive: true, force: true });
   });

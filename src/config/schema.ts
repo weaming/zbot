@@ -26,6 +26,10 @@ const providerSchema = z.object({
     store: z.boolean().optional(),
     /** Chat Completions 是否允许下发 `input_audio`；省略时按模型名启发式。 */
     audioInput: z.boolean().optional(),
+    /** 该服务是否接受图片内容块；省略时视为接受，只有 `textOnlyModels` 命中的模型判否。 */
+    imageInput: z.boolean().optional(),
+    /** 纯文本模型名（小写子串匹配）：发请求前把图片块降级成文本说明，避免整轮 404。 */
+    textOnlyModels: z.array(z.string()).optional(),
     /** 该服务的上下文窗口；省略时用 runtime 值或内置模型表。 */
     contextWindowTokens: z.number().int().positive().optional(),
 });
@@ -57,8 +61,6 @@ const runtimeSchema = z.object({
     memoryUserId: z.number().int().nonnegative().default(0),
     identityFile: z.string().trim().min(1).optional(),
     extraIdentityFile: z.string().trim().min(1).optional(),
-    /** DeepSeek Files API 地址（图片上传）。 */
-    deepseekFilesApi: z.string().trim().min(1).optional(),
     /** 归档会话保留天数，<= 0 表示不清理。 */
     archiveRetentionDays: z.number().int().default(14),
     /** 协议日志里保留流式增量事件。 */

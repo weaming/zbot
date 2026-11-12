@@ -18,6 +18,7 @@ import { normalizeResponsesResponse } from "./responses-output.js";
 import { decideNext, nextCounters, EMPTY_RESPONSE_RETRY_PROMPT } from "./decide.js";
 import { buildUsageStats, toUsageInfo } from "./usage.js";
 import { isDeepSeekEndpoint, prepareRequest } from "./turn-request.js";
+import type { ImageInputCapability } from "./image-input.js";
 import type { LLMRequestKind } from "../../utils/logger.js";
 import { getPromptTooLongLimit, isInvalidAssistantMessageError } from "../../utils/provider-context-limit.js";
 import { filterEmptyAssistantMessages } from "../../utils/conversation-history-repair.js";
@@ -37,6 +38,8 @@ export interface TurnContext {
   client: TurnClient;
   model: string;
   baseURL: string;
+  /** 接入端图片能力（来自 provider 配置）：收不了时把图片块降级成文本。 */
+  imageInput?: ImageInputCapability;
   tools: any[];
   signal?: AbortSignal;
   stream: boolean;
@@ -152,6 +155,7 @@ export async function runTurnLoop(ctx: TurnContext): Promise<TurnLoopResult> {
       const prepareCurrentRequest = () => prepareRequest({
         client: ctx.client,
         model: ctx.model,
+        ...(ctx.imageInput ? { imageInput: ctx.imageInput } : {}),
         messages: ctx.messages,
         tools: ctx.tools,
         ...(ctx.getToolDefinitions ? { getToolDefinitions: ctx.getToolDefinitions } : {}),

@@ -4,13 +4,14 @@
  * 支持完整的 LLM 调用循环
  */
 
+import crypto from "node:crypto";
 import OpenAI from "openai";
 import type { UIEvent } from "../events/ui-events.js";
 import type { SteerUpdate, StreamDelta } from "../types/chat.js";
 import { toUserContent, type UserContent, type UserMessageInput } from "../types/image.js";
 import type { ChatMessage } from "../types/session.js";
 import { type ToolCall } from "../types/tool-call.js";
-import { resolveDeepSeekFilesAPI, uploadDeepSeekFile, uploadDeepSeekFileData } from "../utils/image-assets.js";
+import { uploadDeepSeekFile, uploadDeepSeekFileData } from "../utils/image-assets.js";
 import { type LLMRequestKind } from "../utils/logger.js";
 import { getOpenAIProxyFetch } from "../utils/proxy.js";
 import { isGptModel } from "../utils/responses-transport.js";
@@ -21,6 +22,7 @@ import { acquireResponsesSession } from "./orchestrator/responses-session.js";
 import { runToolBatch, type ToolBatchOutcome } from "./orchestrator/tool-loop.js";
 import { truncateAssistantToolCalls } from "./orchestrator/tool-order.js";
 import { runTurnLoop, type TurnContext } from "./orchestrator/turn-loop.js";
+import type { ImageInputCapability } from "./orchestrator/image-input.js";
 import { type ToolExecutionResponse } from "./tool-interface.js";
 import { createUlid } from "../utils/ulid.js";
 
@@ -72,6 +74,7 @@ export interface ChatTransportOptions {
 
 // Chat Completions API 客户端
 export interface ChatClient {
+  imageCacheScope?: string;
   baseURL: string;
   protocol?: "responses" | "chat_completions";
   transport?: ChatTransportOptions;
@@ -108,6 +111,7 @@ export function createChatClient(
   const responsesSession = acquireResponsesSession(client, !!normalizedApiKey, cacheSessionId);
   return {
     baseURL: finalURL,
+    imageCacheScope: crypto.createHash("sha256").update(normalizedApiKey).digest("hex"),
     protocol,
     transport,
     async create(params, options) {
@@ -126,14 +130,12 @@ export function createChatClient(
     },
     async uploadFile(imagePath: string) {
       const fileID = await uploadDeepSeekFile(imagePath, {
-        filesAPI: resolveDeepSeekFilesAPI(finalURL),
         apiKey: normalizedApiKey,
       });
       return { id: fileID };
     },
     async uploadFileData(data: string, filename: string, mimeType: string) {
       const fileID = await uploadDeepSeekFileData(data, filename, mimeType, {
-        filesAPI: resolveDeepSeekFilesAPI(finalURL),
         apiKey: normalizedApiKey,
       });
       return { id: fileID };
@@ -146,6 +148,8 @@ export interface OrchestratorOptions {
   queryContent?: UserContent;
   client: ChatClient;
   model: string;
+  /** 接入端图片能力（来自 provider 配置）：收不了时把图片块降级成文本。 */
+  imageInput?: ImageInputCapability;
   reasoningEffort?: string;
   reasoningEfforts?: string[];
   toolChoice?: "auto" | "none";
@@ -210,6 +214,7 @@ export async function executeWithChat(
     queryContent,
     client,
     model,
+    imageInput,
     tools = [],
     hostedTools,
     toolChoice,
@@ -333,6 +338,7 @@ export async function executeWithChat(
     ...(toolChoice ? { toolChoice } : {}),
     messages,
     turnMessages,
+    ...(imageInput ? { imageInput } : {}),
     counters: { emptyResponse: 0, lengthRetry: 0 },
     iteration: 0,
     ...(hostedTools?.length ? { hostedTools } : {}),

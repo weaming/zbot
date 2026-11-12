@@ -8,18 +8,15 @@ import {
     deleteSessionImageAssets,
     materializeDeepSeekImageMessages,
     materializeImageMessages,
-    resolveDeepSeekFilesAPI,
     uploadDeepSeekFile,
 } from "../../src/utils/image-assets.js";
 import { toolContentToImageContent } from "../../src/tools/tool-interface.js";
 import { toUserContent } from "../../src/types/image.js";
 import { createTestImageFile, TEST_IMAGE_BYTES } from "./image-fixture.js";
-import { defaultTestConfig, useConfig } from "./test-config.js";
 
 describe("image assets", () => {
     let stateDir: string;
     let previousStateDir: string | undefined;
-    let restoreConfig: (() => void) | undefined;
 
     beforeEach(() => {
         stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "zbot-image-assets-"));
@@ -30,8 +27,6 @@ describe("image assets", () => {
     afterEach(() => {
         if (previousStateDir === undefined) delete process.env.ZBOT_STATE_DIR;
         else process.env.ZBOT_STATE_DIR = previousStateDir;
-        restoreConfig?.();
-        restoreConfig = undefined;
         fs.rmSync(stateDir, { recursive: true, force: true });
     });
 
@@ -81,12 +76,6 @@ describe("image assets", () => {
         await expect(deleteSessionImageAssets("")).rejects.toThrow("会话 ID 无效");
     });
 
-    test("官方 DeepSeek 地址自动推导 Files API", () => {
-        expect(resolveDeepSeekFilesAPI("https://api.deepseek.com/v1")).toBe("https://api.deepseek.com/files");
-        expect(resolveDeepSeekFilesAPI("https://api.deepseek.com")).toBe("https://api.deepseek.com/files");
-        expect(resolveDeepSeekFilesAPI("https://gateway.example.com/v1")).toBe("https://api.deepseek.com/files");
-    });
-
     test("历史图片文件不存在时降级为文本，不阻断请求", async () => {
         const missingPath = path.join(stateDir, "deleted.png");
         await expect(materializeImageMessages([{
@@ -132,7 +121,7 @@ describe("image assets", () => {
         expect(fs.readFileSync(assetPath)).toEqual(TEST_IMAGE_BYTES);
     });
 
-    test("Files API 上传使用原始 multipart 请求并设置七天有效期", async () => {
+    test("Files API 上传使用原始 multipart 请求并设置三十天有效期", async () => {
         const originalPath = createTestImageFile(stateDir);
         const original = fs.readFileSync(originalPath);
         let requestBody = Buffer.alloc(0);
@@ -156,11 +145,9 @@ describe("image assets", () => {
         try {
             const address = server.address();
             if (!address || typeof address === "string") throw new Error("无法获取测试 Files API 地址");
-            restoreConfig = useConfig(defaultTestConfig({
-                runtime: { tokenizer: false, memoryUserId: 0, deepseekFilesApi: `http://127.0.0.1:${address.port}/files` },
-            })).restore;
-
-            await expect(uploadDeepSeekFile(originalPath)).resolves.toBe("file-api-test");
+            await expect(uploadDeepSeekFile(originalPath, {
+                filesAPI: `http://127.0.0.1:${address.port}/files`,
+            })).resolves.toBe("file-api-test");
             expect(requestHeaders.authorization).toBeUndefined();
             expect(requestHeaders["content-type"]).toContain("multipart/form-data; boundary=");
             expect(requestBody.toString()).toContain('name="purpose"');
@@ -168,14 +155,14 @@ describe("image assets", () => {
             expect(requestBody.toString()).toContain('name="expires_after[anchor]"');
             expect(requestBody.toString()).toContain("created_at");
             expect(requestBody.toString()).toContain('name="expires_after[seconds]"');
-            expect(requestBody.toString()).toContain("604800");
+            expect(requestBody.toString()).toContain("2592000");
             expect(requestBody.includes(original)).toBe(true);
         } finally {
             await new Promise<void>(resolve => server.close(() => resolve()));
         }
     });
 
-    test("DeepSeek 本地图片继续使用 image_url，不上传 Files API", async () => {
+    test("DeepSeek 本地图片上传 Files API", async () => {
         const originalPath = createTestImageFile(stateDir);
         const original = fs.readFileSync(originalPath);
         const image = {
@@ -185,7 +172,7 @@ describe("image assets", () => {
             mimeType: "image/png" as const,
             sizeBytes: original.length,
         };
-        const uploadedPaths: string[] = [];
+        const uploadedData: string[] = [];
         const messages = [
             {
                 role: "user",
@@ -197,26 +184,23 @@ describe("image assets", () => {
         ];
 
         const materialized = await materializeDeepSeekImageMessages(messages, async asset => {
-            uploadedPaths.push(asset.path);
+            uploadedData.push(asset.data);
             return "file-test-1";
         });
 
-        expect(uploadedPaths).toEqual([]);
+        expect(uploadedData).toEqual([original.toString("base64")]);
         expect(materialized[0].content).toEqual([
             { type: "text", text: "分析图片" },
             {
-                type: "image_url",
-                image_url: {
-                    url: `data:image/png;base64,${original.toString("base64")}`,
-                    detail: "original",
-                },
+                type: "file",
+                file_id: "file-test-1",
             },
         ]);
     });
 
-    test("外部图片引用直接物化为 image_url，不读取本地文件", async () => {
+    test("data URL 直接物化为 image_url，不读取本地文件", async () => {
         const image = {
-            url: "https://example.com/photo.jpg",
+            url: `data:image/png;base64,${TEST_IMAGE_BYTES.toString("base64")}`,
             filename: "photo.jpg",
             mimeType: "image/jpeg",
         };
@@ -237,7 +221,7 @@ describe("image assets", () => {
         }]);
     });
 
-    test("DeepSeek 外链尺寸合规时保留原链接", async () => {
+    test("外链下载后普通接口转 base64，DeepSeek 上传 Files API", async () => {
         const original = TEST_IMAGE_BYTES;
         const server = createServer((_request, response) => {
             response.setHeader("Content-Type", "image/png");
@@ -260,13 +244,18 @@ describe("image assets", () => {
                 role: "user",
                 content: toUserContent({ text: "分析这张图", images: [image] }),
             }];
-            await expect(materializeDeepSeekImageMessages(messages, async () => {
-                throw new Error("尺寸合规的外链图片不应上传");
+            const inline = await materializeImageMessages(messages);
+            expect(inline[0].content[1].image_url.url).toBe(
+                `data:image/png;base64,${TEST_IMAGE_BYTES.toString("base64")}`,
+            );
+            await expect(materializeDeepSeekImageMessages(messages, async image => {
+                expect(image.data).toBe(TEST_IMAGE_BYTES.toString("base64"));
+                return "file-external";
             })).resolves.toEqual([{
                 role: "user",
                 content: [
                     { type: "text", text: "分析这张图" },
-                    { type: "image_url", image_url: { url: image.url } },
+                    { type: "file", file_id: "file-external" },
                 ],
             }]);
         } finally {
@@ -308,5 +297,55 @@ describe("image assets", () => {
             filename: "result.png",
             mimeType: "image/png",
         }]);
+    });
+
+    test("内容相同的图片并发上传去重，账号作用域之间隔离", async () => {
+        const messages = [{
+            role: "user",
+            content: [{
+                type: "image_data",
+                image: {
+                    id: "not-trusted",
+                    data: TEST_IMAGE_BYTES.toString("base64"),
+                    filename: "cache.png",
+                    mimeType: "image/png",
+                },
+            }],
+        }];
+        const scope = `cache-${stateDir}`;
+        let uploads = 0;
+        const upload = async () => `file-cache-${++uploads}`;
+        const results = await Promise.all([
+            materializeDeepSeekImageMessages(messages, upload, scope),
+            materializeDeepSeekImageMessages(messages, upload, scope),
+        ]);
+        expect(uploads).toBe(1);
+        expect(results[0]).toEqual(results[1]);
+        await materializeDeepSeekImageMessages(messages, async () => {
+            throw new Error("同账号跨回调应复用缓存");
+        }, scope);
+        await materializeDeepSeekImageMessages(messages, upload, `${scope}-other-account`);
+        expect(uploads).toBe(2);
+    });
+
+    test("上传失败不污染缓存，下一次可以重传", async () => {
+        const messages = [{
+            role: "user",
+            content: [{
+                type: "image_data",
+                image: {
+                    id: "retry-image",
+                    data: TEST_IMAGE_BYTES.toString("base64"),
+                    filename: "retry.png",
+                    mimeType: "image/png",
+                },
+            }],
+        }];
+        const scope = `retry-${stateDir}`;
+        await expect(materializeDeepSeekImageMessages(messages, async () => {
+            throw new Error("上传失败");
+        }, scope)).rejects.toThrow("上传失败");
+        const retry = await materializeDeepSeekImageMessages(messages, async () => "file-retry", scope);
+        expect(retry[0].content[0]).toEqual({ type: "file", file_id: "file-retry" });
     });
 });

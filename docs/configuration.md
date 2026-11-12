@@ -87,6 +87,8 @@ providers:
 | `providers.<name>.hostedTools` | Responses 托管工具（如 `web_search`、`tool_search`），上游执行；Chat Completions 没有托管工具 |
 | `providers.<name>.efforts` | 可选思考强度清单，取代旧 `*_EFFORTS` |
 | `providers.<name>.audioInput` | Chat Completions 是否允许下发 `input_audio`；省略时按模型名启发式 |
+| `providers.<name>.imageInput` | 该服务是否接受图片内容块；省略时视为接受。显式 `false` 时整台接入端都不发图片 |
+| `providers.<name>.textOnlyModels` | 纯文本模型名关键词（小写子串匹配）；命中的模型在发请求前把图片块换成文字说明，避免整轮 404。同一张卡上的其他模型不受影响 |
 | `providers.<name>.contextWindowTokens` | 该服务的上下文窗口，压过内置模型表 |
 | `runtime.contextWindowTokens` | 全局上下文窗口，压过内置模型表 |
 | `runtime.reservedOutputTokens` / `autocompactBufferTokens` / `retainTailTokens` / `autocompactRatio` | 压缩与尾部保留预算 |
@@ -94,7 +96,6 @@ providers:
 | `runtime.tokenizer` | 是否用真分词（`false` 回退估算，诊断用） |
 | `runtime.memoryUserId` | 记忆用户标识，默认 `0` |
 | `runtime.identityFile` / `runtime.extraIdentityFile` | 身份文件覆盖与额外身份文件 |
-| `runtime.deepseekFilesApi` | DeepSeek Files API 地址（图片上传） |
 | `runtime.archiveRetentionDays` | 归档会话保留天数，`<= 0` 表示不清理 |
 | `runtime.llmLogDeltas` | 协议日志里保留流式增量事件（体积大，排障时开） |
 | `runtime.deepseekCostStat` | 非官方端点（局域网网关）也按 DeepSeek 官方价格表估算费用；模型名需同时含 `deepseek` 与 `flash`/`pro`（否则不计） |
@@ -104,6 +105,8 @@ providers:
 | `mcp.serversFile` | MCP 服务配置文件，默认 `~/.zbot/mcp-servers.yaml` |
 | `tui.disableNotifications` | 关闭终端通知 |
 | `tui.debugWheel` | 滚轮诊断日志 |
+
+图片上传策略不提供配置：仅 HTTPS 官方端点 `api.deepseek.com` 使用 Files API，文件保留 30 天；Responses 以 `input_image.file_id` 引用，Chat Completions 以 `file.file_id` 引用。其他端点使用 base64 data URL，分别投影为 Responses 的 `input_image` 或 Chat Completions 的 `image_url`，不会因为模型名含 `deepseek` 就调用官方上传接口。
 
 启用 Responses 存储后，HTTP 与 WebSocket 都会在请求选项和上下文前缀一致时使用 `previous_response_id` 增量续接；旧响应不可用时会重发完整上下文。每个会话的续接基准保存在状态目录 `sessions/responses/`，文件权限为 0600，最大 2 MB，超过 29 天不再使用；清空或删除会话时同时删除。WS 回合经过 steering 后，下一次请求使用完整上下文建立新基准。GPT 的存储请求包含 `reasoning.encrypted_content`，以便回退时重放思考项。
 

@@ -36,6 +36,10 @@ export interface ProviderConfig {
     websocket?: boolean;
     store: boolean;
     audioInput?: boolean;
+    /** 该服务是否接受图片内容块；省略时视为接受。 */
+    imageInput?: boolean;
+    /** 纯文本模型名关键词（已小写）：命中即在发请求前降级掉图片。 */
+    textOnlyModels?: string[];
     contextWindowTokens?: number;
 }
 
@@ -50,7 +54,6 @@ export interface RuntimeConfig {
     memoryUserId: number;
     identityFile?: string;
     extraIdentityFile?: string;
-    deepseekFilesApi?: string;
     archiveRetentionDays: number;
     llmLogDeltas: boolean;
     deepseekCostStat: boolean;
@@ -143,6 +146,8 @@ function normalizeProvider(name: string, raw: RawProvider, file: string): Provid
         ...(raw.websocket === undefined ? {} : { websocket: raw.websocket }),
         store: raw.store ?? false,
         ...(raw.audioInput === undefined ? {} : { audioInput: raw.audioInput }),
+        ...(raw.imageInput === undefined ? {} : { imageInput: raw.imageInput }),
+        ...(raw.textOnlyModels ? { textOnlyModels: normalizeList(raw.textOnlyModels, value => value.toLowerCase()) } : {}),
         ...(raw.contextWindowTokens === undefined ? {} : { contextWindowTokens: raw.contextWindowTokens }),
     };
 }

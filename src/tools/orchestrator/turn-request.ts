@@ -5,7 +5,8 @@
  * 循环只剩：准备一轮 → 决策 → 执行工具。
  */
 
-import { isDeepSeekEndpoint } from "../../pricing/deepseek.js";
+import { isDeepSeekEndpoint, isDeepSeekFlashModel, isOfficialDeepSeekEndpoint } from "../../pricing/deepseek.js";
+import { dropUnsupportedImages, type ImageInputCapability } from "./image-input.js";
 import type { ChatMessage } from "../../types/session.js";
 import { projectChatMessagesForPrompt } from "../../utils/tool-result-context.js";
 import { isResponsesStoreEnabled } from "../../utils/responses-transport.js";
@@ -17,6 +18,7 @@ import type { UIEvent } from "../../events/ui-events.js";
 /** 只声明本模块用到的最小客户端形状，避免与主模块形成循环依赖。 */
 interface RequestClient {
     baseURL: string;
+    imageCacheScope?: string;
     protocol?: "responses" | "chat_completions";
     /** 协议传输开关（来自 provider 配置）；省略时按模型名启发式。 */
     transport?: {
@@ -86,12 +88,6 @@ const DEEPSEEK_HOSTED_TOOL_TYPES: ReadonlySet<string> = new Set(["web_search"]);
 
 const NO_HOSTED_TOOL_TYPES: ReadonlySet<string> = new Set();
 
-/** 模型名同时含 deepseek 与 flash 的档位不执行服务端 web_search。 */
-function isDeepSeekFlashModel(model: string): boolean {
-    const name = model.toLowerCase();
-    return name.includes("deepseek") && name.includes("flash");
-}
-
 /** 按接入端解析可声明的托管工具类型；不是 DeepSeek 时返回 undefined（不限制）。 */
 function resolveHostedToolTypes(model: string, baseURL: string): ReadonlySet<string> | undefined {
     if (!isDeepSeekEndpoint(model, baseURL)) return undefined;
@@ -118,6 +114,8 @@ export function isToolSearchEnabled(options: {
 export interface PrepareRequestOptions {
     client: ChatClient;
     model: string;
+    /** 接入端图片能力（来自 provider 配置）：收不了时把图片块降级成文本。 */
+    imageInput?: ImageInputCapability;
     /** 当前完整消息列表（含本轮已产生消息）。 */
     messages: ChatMessage[];
     /** 基础工具定义（未排序）。 */
@@ -165,17 +163,27 @@ export async function prepareRequest(options: PrepareRequestOptions): Promise<Pr
 
     // 历史里的 apply_patch 调用先按当前上游形态归一，再按协议物化
     const shapedMessages = normalizeToolCallShapes(sourceMessages, applyPatchMode);
-    const requestMessages = useResponses
+    const expandedMessages = useResponses
         ? shapedMessages
         : expandToolMediaMessages(stripResponsesMetadata(shapedMessages), {
             allowAudio: client.transport?.audioInput ?? supportsAudioInput(model, client.baseURL),
         });
+    // 纯文本端点收不到图片会整轮 404，先把图片降级成文本说明
+    const requestMessages = dropUnsupportedImages(model, expandedMessages, options.imageInput);
 
+    const usesOfficialFiles = isOfficialDeepSeekEndpoint(client.baseURL)
+        && new URL(client.baseURL).protocol === "https:";
+    const uploadImage = (image: Parameters<typeof uploadImageForDeepSeek>[1]) => uploadImageForDeepSeek(client, image);
+    const materializeImages = usesOfficialFiles
+        ? (messages: any[]) => materializeDeepSeekImageMessages(
+            messages,
+            uploadImage,
+            client.imageCacheScope,
+        )
+        : materializeImageMessages;
     const materializedMessages = useResponses
-        ? await materializeResponsesInput(requestMessages)
-        : isDeepSeekEndpoint(model, client.baseURL)
-            ? await materializeDeepSeekImageMessages(requestMessages, image => uploadImageForDeepSeek(client, image))
-            : await materializeImageMessages(requestMessages);
+        ? await materializeResponsesInput(requestMessages, materializeImages)
+        : await materializeImages(requestMessages);
 
     const normalizedTools = options.normalizedTools(currentTools);
     const adaptedTools = adaptToolsForUpstream(normalizedTools, { mode: applyPatchMode, protocol });

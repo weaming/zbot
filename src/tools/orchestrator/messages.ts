@@ -113,6 +113,7 @@ export function normalizeToolCallShapes(
 }
 
 function responseImagePart(part: any): any {
+  if (part.type === "file") return { type: "input_image", file_id: part.file_id };
   return {
     type: "input_image",
     image_url: part.image_url?.url,
@@ -120,8 +121,11 @@ function responseImagePart(part: any): any {
   };
 }
 
-export async function materializeResponsesInput(messages: ChatMessage[]): Promise<any[]> {
-  const materializedUsers = await materializeImageMessages(messages);
+export async function materializeResponsesInput(
+  messages: ChatMessage[],
+  materializeImages: typeof materializeImageMessages = materializeImageMessages,
+): Promise<any[]> {
+  const materializedUsers = await materializeImages(messages);
   const result: any[] = [];
 
   // custom 工具调用的结果必须回成 custom_tool_call_output，否则上游对不上调用类型
@@ -143,7 +147,7 @@ export async function materializeResponsesInput(messages: ChatMessage[]): Promis
     if (message.role === "tool") {
       const output: any[] = [{ type: "input_text", text: message.content }];
       if (message.imageContent && message.imageContent.length > 0) {
-        const imageMessage = await materializeImageMessages([{
+        const imageMessage = await materializeImages([{
           role: "user",
           content: [
             { type: "text", text: "" },
@@ -151,7 +155,7 @@ export async function materializeResponsesInput(messages: ChatMessage[]): Promis
           ],
         } as ChatMessage]);
         for (const part of (imageMessage[0] as any).content.slice(1)) {
-          if (part.type === "image_url") {
+          if (part.type === "image_url" || part.type === "file") {
             output.push(responseImagePart(part));
           } else if (part.type === "text" && part.text) {
             output.push({ type: "input_text", text: part.text });
@@ -211,7 +215,7 @@ export async function materializeResponsesInput(messages: ChatMessage[]): Promis
       role: "user",
       content: materialized.content.map((part: any) => {
         if (part.type === "text") return { type: "input_text", text: part.text };
-        if (part.type === "image_url") return responseImagePart(part);
+        if (part.type === "image_url" || part.type === "file") return responseImagePart(part);
         // 其余块类型（将来的 user 音频等）原样透传，避免被当成图片构造成 input_image
         return part;
       }),

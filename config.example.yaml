@@ -20,6 +20,12 @@ providers:
     # Responses 是否请求上游保存会话；默认 false
     store: false
 
+    # 图片能力由接入端声明，代码不内置模型名单：同一模型经不同网关能力可能不同。
+    # imageInput: false 表示整台接入端都不发图片；textOnlyModels 按模型名小写子串命中，
+    # 命中的模型在发请求前把图片块换成文字说明，避免整轮 404。
+    # imageInput: true
+    # textOnlyModels: [ernie-5.5-flash]
+
   local:
     protocol: chat_completions
     baseUrl: http://127.0.0.1:3030/v1

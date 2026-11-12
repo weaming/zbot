@@ -15,6 +15,7 @@ import {
     toolResultToText,
 } from "../tools/tool-interface.js";
 import { isToolSearchEnabled, supportsAudioInput } from "../tools/orchestrator/turn-request.js";
+import type { ImageInputCapability } from "../tools/orchestrator/image-input.js";
 import { resolveProtocol } from "../tools/orchestrator/request-builder.js";
 import type { ChatMessage, Session } from "../types/session.js";
 import type { SteerUpdate, StreamDelta } from "../types/chat.js";
@@ -93,6 +94,8 @@ export interface ChatApiSettings {
     store: boolean;
     /** Chat Completions 是否允许 `input_audio`；省略时按模型名启发式。 */
     audioInput?: boolean;
+    /** 该服务是否接受图片；省略时视为接受，只有 `textOnlyModels` 命中的模型判否。 */
+    imageInput?: ImageInputCapability;
     /** 该 provider 的上下文窗口覆盖值。 */
     contextWindowTokens?: number;
     /** runtime.deepseekCostStat：开启后非官方端点（局域网网关）也按官方价格表估算费用。 */
@@ -359,6 +362,10 @@ export function getChatApiSettings(sessionSelection?: ChatModelSelection): ChatA
         ...(provider.websocket === undefined ? {} : { websocket: provider.websocket }),
         store: provider.store,
         ...(provider.audioInput === undefined ? {} : { audioInput: provider.audioInput }),
+        imageInput: {
+            ...(provider.imageInput === undefined ? {} : { imageInput: provider.imageInput }),
+            ...(provider.textOnlyModels ? { textOnlyModels: provider.textOnlyModels } : {}),
+        },
         ...(provider.contextWindowTokens === undefined ? {} : { contextWindowTokens: provider.contextWindowTokens }),
         enableCostStat: isDeepSeekCostStatEnabled(),
     };
@@ -435,6 +442,7 @@ export async function runChatQuery(options: ChatRunOptions) {
             reasoningEffort: settings.reasoningEffort,
             reasoningEfforts: settings.reasoningEfforts,
             ...(settings.hostedTools.length > 0 ? { hostedTools: settings.hostedTools } : {}),
+            ...(settings.imageInput ? { imageInput: settings.imageInput } : {}),
             executeTool: async (name: string, args: any) => {
                 if (options.signal?.aborted) {
                     throw new DOMException("User terminated the request", "AbortError");

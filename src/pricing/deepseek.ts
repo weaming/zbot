@@ -93,6 +93,15 @@ export function isDeepSeekEndpoint(model: string, baseURL?: string): boolean {
 }
 
 /**
+ * 是否为 DeepSeek flash 模型。
+ * 计费口径专用：flash 档不执行服务端 web_search（图片能力见 `image-input.ts`）。
+ */
+export function isDeepSeekFlashModel(model: string): boolean {
+    const name = model.toLowerCase();
+    return name.includes("deepseek") && name.includes("flash");
+}
+
+/**
  * 是否为高峰时段：北京时间周一至周五 9:00-12:00、14:00-18:00（半开区间）。
  * 上海无夏令时，用固定 +8 偏移换算，避免依赖运行环境 TZ。
  */

@@ -1,7 +1,6 @@
 import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
-import { getRuntimeConfig } from "../config/index.js";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -17,6 +16,7 @@ import { getSessionsDir, getStateDir } from "./runtime-paths.js";
 import { sanitizeSessionId } from "./session-id.js";
 
 const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
+const DATA_URL_PATTERN = /^data:(image\/[a-z0-9.+-]+);base64,([\s\S]+)$/i;
 const execFileAsync = promisify(execFile);
 
 function getImageAssetsDir(sessionId?: string): string {
@@ -132,17 +132,28 @@ function materializeImageAsset(image: ImageAssetRef): unknown {
     }
 }
 
+/** 统一内联图片：外链先下载再转 data URL，避免依赖上游拉取能力。 */
+async function materializeImageUrl(image: ImageUrlRef): Promise<unknown> {
+    if (DATA_URL_PATTERN.test(image.url)) {
+        return {
+            type: "image_url" as const,
+            image_url: { url: image.url },
+        };
+    }
+
+    const data = await readImageUrl(image);
+    return {
+        type: "image_url" as const,
+        image_url: { url: `data:${data.mimeType};base64,${data.data}` },
+    };
+}
+
 function materializeImageContent(content: UserContent): unknown {
     if (typeof content === "string") return content;
 
     return Promise.all(content.map(async block => {
         if (block.type === "text") return block;
-        if (block.type === "image_url") {
-            return {
-                type: "image_url" as const,
-                image_url: { url: block.image.url },
-            };
-        }
+        if (block.type === "image_url") return materializeImageUrl(block.image);
         if (block.type === "image_data") {
             return {
                 type: "image_url" as const,
@@ -169,11 +180,14 @@ export async function materializeImageMessages(messages: any[]): Promise<any[]> 
     }));
 }
 
-const DEEPSEEK_FILE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const DEEPSEEK_FILE_TTL_SECONDS = 30 * 24 * 60 * 60;
+const DEEPSEEK_FILE_TTL_MS = DEEPSEEK_FILE_TTL_SECONDS * 1000;
 const DEEPSEEK_FILE_REFRESH_MARGIN_MS = 5 * 60 * 1000;
+const DEEPSEEK_FILE_CACHE_LIMIT = 1000;
 const DEFAULT_DEEPSEEK_FILES_API = "https://api.deepseek.com/files";
-const deepSeekFileIds = new Map<string, { promise: Promise<string>; expiresAt: number }>();
 const DEEPSEEK_MAX_IMAGE_SIDE = 4096;
+/** 外链图片下载限制：单张 32 MiB、60 秒超时。 */
+const IMAGE_DOWNLOAD_TIMEOUT_MS = 60 * 1000;
 
 interface DeepSeekFileResponse {
     id?: string;
@@ -181,9 +195,21 @@ interface DeepSeekFileResponse {
 }
 
 export interface DeepSeekFileUploadOptions {
+    /** 仅测试注入；生产固定官方 Files API，不受 runtime 配置影响。 */
     filesAPI?: string;
     apiKey?: string;
 }
+
+type DeepSeekImageUpload = (image: ImageDataRef) => Promise<string>;
+
+interface DeepSeekFileCacheEntry {
+    promise: Promise<string>;
+    expiresAt: number;
+}
+
+/** 生产按凭据摘要隔离；未提供作用域的调用按上传回调身份隔离。 */
+const deepSeekFileCaches = new WeakMap<DeepSeekImageUpload, Map<string, DeepSeekFileCacheEntry>>();
+const scopedFileCache = new Map<string, DeepSeekFileCacheEntry>();
 
 async function resizeDeepSeekImage(
     data: Buffer,
@@ -248,22 +274,47 @@ async function resizeDeepSeekImage(
     }
 }
 
+/** 读取图片 URL：data URL 直接解码，外链先下载再转 base64，两条来源共用同一份后续处理。 */
 async function readImageUrl(image: ImageUrlRef): Promise<ImageDataRef> {
-    const match = image.url.match(/^data:(image\/[a-z0-9.+-]+);base64,([\s\S]+)$/i);
-    if (!match) throw new Error(`无法解析图片数据：${image.filename}`);
-    const data = Buffer.from(match[2]!, "base64");
+    const match = image.url.match(DATA_URL_PATTERN);
+    const data = match ? Buffer.from(match[2]!, "base64") : await downloadImage(image.url);
     return {
         id: crypto.createHash("sha256").update(data).digest("hex"),
         data: data.toString("base64"),
         filename: image.filename,
-        mimeType: match[1]!,
+        mimeType: match?.[1] ?? resolveDownloadedMimeType(data, image),
     };
 }
 
-/** 返回 DeepSeek Files API 地址；自定义部署可在 config.yaml 里覆盖。 */
-export function resolveDeepSeekFilesAPI(_apiBase?: string): string {
-    const configured = getRuntimeConfig().deepseekFilesApi?.trim();
-    return configured || DEFAULT_DEEPSEEK_FILES_API;
+/** 外链图片按 32 MiB / 60 秒约束下载，避免超大响应拖垮进程。 */
+async function downloadImage(url: string): Promise<Buffer> {
+    let response;
+    try {
+        response = await axios.get<ArrayBuffer>(url, {
+            responseType: "arraybuffer",
+            timeout: IMAGE_DOWNLOAD_TIMEOUT_MS,
+            maxContentLength: MAX_IMAGE_BYTES,
+            maxBodyLength: MAX_IMAGE_BYTES,
+        });
+    } catch (error: any) {
+        const status = error.response?.status ? `HTTP ${error.response.status}: ` : "";
+        throw new Error(`图片下载失败（${status}${error.message}）：${url}`);
+    }
+
+    const data = Buffer.from(response.data);
+    if (data.length === 0) throw new Error(`图片内容为空：${url}`);
+    if (data.length > MAX_IMAGE_BYTES) throw new Error(`图片大小超过 32 MiB：${url}`);
+    return data;
+}
+
+/** 引用里声明了 image/* 就用它，否则按文件头识别，识别不出按二进制上传。 */
+function resolveDownloadedMimeType(data: Buffer, image: ImageUrlRef): string {
+    if (image.mimeType?.startsWith("image/")) return image.mimeType;
+    try {
+        return detectImageType(data, image.filename).mimeType;
+    } catch {
+        return "application/octet-stream";
+    }
 }
 
 /** 向由部署方负责鉴权的 Files API 上传原始图片。 */
@@ -287,10 +338,7 @@ export async function uploadDeepSeekFileData(
     mimeType: string,
     options?: DeepSeekFileUploadOptions,
 ): Promise<string> {
-    const filesAPI = options?.filesAPI?.trim() || resolveDeepSeekFilesAPI();
-    if (!filesAPI) {
-        throw new Error("无法确定 DeepSeek Files API，请在 config.yaml 里设置 runtime.deepseekFilesApi");
-    }
+    const filesAPI = options?.filesAPI?.trim() || DEFAULT_DEEPSEEK_FILES_API;
 
     const fileData = typeof data === "string" ? Buffer.from(data, "base64") : data;
     const boundary = `zbot-${crypto.randomUUID()}`;
@@ -306,7 +354,7 @@ export async function uploadDeepSeekFileData(
     const body = Buffer.concat([
         field("purpose", "user_data"),
         field("expires_after[anchor]", "created_at"),
-        field("expires_after[seconds]", String(7 * 24 * 60 * 60)),
+        field("expires_after[seconds]", String(DEEPSEEK_FILE_TTL_SECONDS)),
         fileHeader,
         fileData,
         Buffer.from(`\r\n--${boundary}--\r\n`),
@@ -339,105 +387,117 @@ export async function uploadDeepSeekFileData(
     return fileID;
 }
 
-/** 将图片上传到 DeepSeek Files API，并在当前进程内复用七天有效的 file_id。 */
+/** file_id 缓存按内容哈希命中，过期或失败都立刻移除，保证下一轮能重新上传。 */
+async function uploadImageFile(
+    uploadFile: DeepSeekImageUpload,
+    image: ImageDataRef,
+    cacheScope?: string,
+): Promise<string> {
+    const cache = cacheScope === undefined ? getFileCache(uploadFile) : scopedFileCache;
+    const cacheKey = cacheScope === undefined ? image.id : `${cacheScope}:${image.id}`;
+    const now = Date.now();
+    const cached = cache.get(cacheKey);
+    if (cached) {
+        if (cached.expiresAt > now) return cached.promise;
+        cache.delete(cacheKey);
+    }
+
+    const promise = uploadFile(image);
+    cache.set(cacheKey, { promise, expiresAt: now + DEEPSEEK_FILE_TTL_MS - DEEPSEEK_FILE_REFRESH_MARGIN_MS });
+    trimFileCache(cache);
+
+    try {
+        return await promise;
+    } catch (error) {
+        // 失败留在缓存里会让后续请求拿到同一个失败 promise，必须清掉
+        if (cache.get(cacheKey)?.promise === promise) cache.delete(cacheKey);
+        throw error;
+    }
+}
+
+function getFileCache(uploadFile: DeepSeekImageUpload): Map<string, DeepSeekFileCacheEntry> {
+    const existing = deepSeekFileCaches.get(uploadFile);
+    if (existing) return existing;
+    const cache = new Map<string, DeepSeekFileCacheEntry>();
+    deepSeekFileCaches.set(uploadFile, cache);
+    return cache;
+}
+
+/** 缓存有界：超限按插入顺序淘汰最早条目，避免长进程无界增长。 */
+function trimFileCache(cache: Map<string, DeepSeekFileCacheEntry>): void {
+    while (cache.size > DEEPSEEK_FILE_CACHE_LIMIT) {
+        const oldest = cache.keys().next();
+        if (oldest.done) return;
+        cache.delete(oldest.value);
+    }
+}
+
+/** 官方图片统一上传：先把超边图片压到 4096，再取得文件引用。 */
+async function materializeDeepSeekFile(
+    data: Buffer,
+    filename: string,
+    mimeType: string,
+    uploadFile: DeepSeekImageUpload,
+    cacheScope?: string,
+): Promise<DeepSeekFileContent> {
+    const prepared = await resizeDeepSeekImage(data, filename, mimeType, DEEPSEEK_MAX_IMAGE_SIDE);
+    const fileId = await uploadImageFile(uploadFile, prepared, cacheScope);
+    return { type: "file", file_id: fileId };
+}
+
+async function materializeDeepSeekBlock(
+    block: any,
+    uploadFile: DeepSeekImageUpload,
+    cacheScope?: string,
+): Promise<any> {
+    if (block.type === "text" || block.type === "file") return block;
+
+    if (block.type === "image_url") {
+        const image = await readImageUrl(block.image);
+        return materializeDeepSeekFile(
+            Buffer.from(image.data, "base64"),
+            image.filename,
+            image.mimeType,
+            uploadFile,
+            cacheScope,
+        );
+    }
+
+    if (block.type === "image_asset") {
+        let data: Buffer;
+        try {
+            data = await fs.promises.readFile(block.image.path);
+        } catch (error: any) {
+            if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") throw error;
+            return materializeImageAsset(block.image);
+        }
+        return materializeDeepSeekFile(data, block.image.filename, block.image.mimeType, uploadFile, cacheScope);
+    }
+
+    if (block.type === "image_data") {
+        return materializeDeepSeekFile(
+            Buffer.from(block.image.data, "base64"),
+            block.image.filename,
+            block.image.mimeType,
+            uploadFile,
+            cacheScope,
+        );
+    }
+
+    return block;
+}
+
+/** 把所有图片来源（本地资产、内存、data URL、外链）上传成 Files API 的 file 引用。 */
 export async function materializeDeepSeekImageMessages(
     messages: any[],
-    uploadFile: (image: ImageAssetRef | ImageDataRef) => Promise<string>,
+    uploadFile: DeepSeekImageUpload,
+    cacheScope?: string,
 ): Promise<any[]> {
-    const uploadImage = async (image: ImageAssetRef | ImageDataRef): Promise<string> => {
-        const cached = deepSeekFileIds.get(image.id);
-        const now = Date.now();
-        let fileIdPromise = cached && cached.expiresAt > now
-            ? cached.promise
-            : undefined;
-        if (!fileIdPromise) {
-            fileIdPromise = uploadFile(image);
-            deepSeekFileIds.set(image.id, {
-                promise: fileIdPromise,
-                expiresAt: now + DEEPSEEK_FILE_TTL_MS - DEEPSEEK_FILE_REFRESH_MARGIN_MS,
-            });
-            void fileIdPromise.catch(() => deepSeekFileIds.delete(image.id));
-        }
-        return fileIdPromise;
-    };
-
     return Promise.all(messages.map(async message => {
         if (message?.role !== "user" || typeof message.content === "string") return message;
-
-        const content = await Promise.all(message.content.map(async (block: any) => {
-            if (block.type === "text") return block;
-            if (block.type === "file") return block;
-
-            if (block.type === "image_url") {
-                if (!block.image.url.startsWith("data:")) {
-                    return {
-                        type: "image_url" as const,
-                        image_url: { url: block.image.url },
-                    };
-                }
-
-                const image = await readImageUrl(block.image);
-                const prepared = await resizeDeepSeekImage(
-                    Buffer.from(image.data, "base64"),
-                    image.filename,
-                    image.mimeType,
-                    DEEPSEEK_MAX_IMAGE_SIDE,
-                );
-                if (prepared.id === image.id) {
-                    return {
-                        type: "image_url" as const,
-                        image_url: { url: block.image.url },
-                    };
-                }
-                const fileId = await uploadImage(prepared);
-                return {
-                    type: "file",
-                    file_id: fileId,
-                } satisfies DeepSeekFileContent;
-            }
-
-            if (block.type === "image_asset") {
-                let data: Buffer;
-                try {
-                    data = await fs.promises.readFile(block.image.path);
-                } catch (error: any) {
-                    if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") throw error;
-                    return materializeImageAsset(block.image);
-                }
-                const prepared = await resizeDeepSeekImage(
-                    data,
-                    block.image.filename,
-                    block.image.mimeType,
-                    DEEPSEEK_MAX_IMAGE_SIDE,
-                );
-                if (prepared.id !== crypto.createHash("sha256").update(data).digest("hex")) {
-                    return {
-                        type: "image_url" as const,
-                        image_url: {
-                            url: `data:${prepared.mimeType};base64,${prepared.data}`,
-                            detail: "original" as const,
-                        },
-                    };
-                }
-                return materializeImageAsset(block.image);
-            }
-
-            if (block.type === "image_data") {
-                const prepared = await resizeDeepSeekImage(
-                    Buffer.from(block.image.data, "base64"),
-                    block.image.filename,
-                    block.image.mimeType,
-                    DEEPSEEK_MAX_IMAGE_SIDE,
-                );
-                const fileId = await uploadImage(prepared);
-                return {
-                    type: "file",
-                    file_id: fileId,
-                } satisfies DeepSeekFileContent;
-            }
-
-            return block;
-        }));
+        const content = await Promise.all(
+            message.content.map((block: any) => materializeDeepSeekBlock(block, uploadFile, cacheScope)),
+        );
         return { ...message, content };
     }));
 }
