@@ -4,6 +4,7 @@ import type { ChatMessage } from "../../types/session.js";
 import type { ChatCompletionChunk } from "openai/resources/chat/completions/completions";
 import { patchArgumentsJson } from "../../utils/patch-args.js";
 import { partialAssistantMessage } from "../../utils/stream-recovery.js";
+import { GptTextFilter } from "./gpt-text.js";
 
 interface ChatStreamChunk extends Omit<ChatCompletionChunk, "choices"> {
   x_usage_source?: string;
@@ -37,9 +38,18 @@ export async function collectChatStream(
   stream: AsyncIterable<ChatStreamChunk>,
   emit: (event: UIEvent) => void,
   persistDelta?: (delta: StreamDelta) => Promise<void>,
+  requestModel?: string,
 ): Promise<{ assistantMsg: any; usage: any; model: string; finishReason: string }> {
+  const textFilter = new GptTextFilter(requestModel);
   let content = "";
   let reasoningContent = "";
+  const finishText = async (): Promise<void> => {
+    const text = textFilter.finish();
+    if (!text) return;
+    await persistDelta?.({ text });
+    content += text;
+    emit({ type: "text_delta", delta: text });
+  };
   const toolCalls = new Map<number, {
     id: string;
     name: string;
@@ -62,6 +72,7 @@ export async function collectChatStream(
 
       const choice = chunk.choices?.[0];
       const delta = choice?.delta ?? {};
+      const text = textFilter.push(delta.content ?? "");
       // Chat chunk 没有与 Responses 相同的事件 type；正文、reasoning 和工具参数可同帧出现。
       const toolDeltas = (delta.tool_calls ?? []).map((call: any) => ({
         ...call,
@@ -71,7 +82,7 @@ export async function collectChatStream(
       const toolDeltaName = (call: any) => call?.custom?.name ?? call?.function?.name;
       const toolDeltaArgs = (call: any) => call?.custom?.input ?? call?.function?.arguments;
       const streamDelta: StreamDelta = {
-        ...(delta.content ? { text: delta.content } : {}),
+        ...(text ? { text } : {}),
         ...(delta.reasoning_content ? { reasoning: delta.reasoning_content } : {}),
         ...(toolDeltas.length > 0 ? { toolCalls: toolDeltas.map((call: any) => ({
           index: call.index,
@@ -87,9 +98,9 @@ export async function collectChatStream(
         await persistDelta?.(streamDelta);
       }
 
-      if (delta.content) {
-        content += delta.content;
-        emit({ type: "text_delta", delta: delta.content });
+      if (text) {
+        content += text;
+        emit({ type: "text_delta", delta: text });
       }
       if (delta.reasoning_content) {
         reasoningContent += delta.reasoning_content;
@@ -126,8 +137,11 @@ export async function collectChatStream(
       if (choice?.finish_reason) finishReason = choice.finish_reason;
     }
   } catch (error) {
+    await finishText();
     throw withPartialMessage(error, partialAssistantMessage(content, reasoningContent, [...toolCalls.values()]));
   }
+
+  await finishText();
 
   for (const [index, slot] of toolCalls) {
     emit({

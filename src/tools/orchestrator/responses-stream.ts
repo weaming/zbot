@@ -4,13 +4,28 @@ import type { StreamDelta } from "../../types/chat.js";
 import type { ChatMessage } from "../../types/session.js";
 import { patchArgumentsJson } from "../../utils/patch-args.js";
 import { partialAssistantMessage } from "../../utils/stream-recovery.js";
+import { cleanGptText, GptTextFilter } from "./gpt-text.js";
 
 /** 将 Responses 协议事件聚合为内部响应，并发出界面事件。 */
 export async function collectResponsesStream(
   stream: AsyncIterable<ResponsesServerEvent>,
   emit: (event: UIEvent) => void,
   persistDelta?: (delta: StreamDelta) => Promise<void>,
+  requestModel?: string,
 ): Promise<any> {
+  const textFilter = new GptTextFilter(requestModel);
+  const emitText = async (rawText: string): Promise<void> => {
+    const text = textFilter.push(rawText);
+    if (!text) return;
+    await persistDelta?.({ text });
+    emit({ type: "text_delta", delta: text });
+  };
+  const finishText = async (): Promise<void> => {
+    const text = textFilter.finish();
+    if (!text) return;
+    await persistDelta?.({ text });
+    emit({ type: "text_delta", delta: text });
+  };
   let completedResponse: any;
   const outputItems: any[] = [];
   const functionCalls = new Map<string, {
@@ -40,6 +55,7 @@ export async function collectResponsesStream(
             outputItems.length = 0;
             functionCalls.clear();
             partialText = "";
+            await finishText();
             partialReasoning = "";
             activeSearches.clear();
             finishedSearches = 0;
@@ -54,9 +70,8 @@ export async function collectResponsesStream(
         }
         case "response.output_text.delta":
         case "response.refusal.delta": {
-          await persistDelta?.({ text: event.delta });
           partialText += event.delta;
-          emit({ type: "text_delta", delta: event.delta });
+          await emitText(event.delta);
           break;
         }
         case "response.reasoning_summary_text.delta":
@@ -121,18 +136,16 @@ export async function collectResponsesStream(
           // 网关把增量合并成单个 done 事件时补上正文，已有 delta 时不重复追加
           const text = typeof event.text === "string" ? event.text : "";
           if (partialText.length === 0 && text) {
-            await persistDelta?.({ text });
             partialText = text;
-            emit({ type: "text_delta", delta: text });
+            await emitText(text);
           }
           break;
         }
         case "response.refusal.done": {
           const text = event.refusal;
           if (partialText.length === 0 && text) {
-            await persistDelta?.({ text });
             partialText = text;
-            emit({ type: "text_delta", delta: text });
+            await emitText(text);
           }
           break;
         }
@@ -263,8 +276,12 @@ export async function collectResponsesStream(
       }
     }
   } catch (error) {
-    throw withPartialMessage(error, partialAssistantMessage(partialText, partialReasoning, [...functionCalls.values()]));
+    await finishText();
+    const text = cleanGptText(partialText, requestModel);
+    throw withPartialMessage(error, partialAssistantMessage(text, partialReasoning, [...functionCalls.values()]));
   }
+
+  await finishText();
 
   for (const call of functionCalls.values()) {
     emit({

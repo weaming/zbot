@@ -425,7 +425,7 @@ async function collectStreamResponse(
   persistDelta?: (delta: StreamDelta) => Promise<void>,
 ): Promise<any> {
   const stream = await client.create(requestBody, { signal });
-  const { assistantMsg, usage, model, finishReason } = await collectChatStream(stream, emit, persistDelta);
+  const { assistantMsg, usage, model, finishReason } = await collectChatStream(stream, emit, persistDelta, requestBody.model);
   return {
     model,
     choices: [{ message: assistantMsg, finish_reason: finishReason }],
@@ -444,5 +444,5 @@ async function collectResponsesResponse(
 ): Promise<any> {
   const stream = await client.createResponse?.(requestBody, { signal, onSteerAccepted, onSteerUpdate });
   if (!stream || typeof stream[Symbol.asyncIterator] !== "function") return stream;
-  return collectResponsesStream(stream, emit, persistDelta);
+  return collectResponsesStream(stream, emit, persistDelta, requestBody.model);
 }

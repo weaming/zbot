@@ -23,6 +23,7 @@ import type { LLMRequestKind } from "../../utils/logger.js";
 import { getPromptTooLongLimit, isInvalidAssistantMessageError } from "../../utils/provider-context-limit.js";
 import { filterEmptyAssistantMessages } from "../../utils/conversation-history-repair.js";
 import { extractCitations } from "./citations.js";
+import { cleanGptText } from "./gpt-text.js";
 
 /** 每轮请求的协议与客户端形状。 */
 interface TurnClient {
@@ -209,6 +210,9 @@ export async function runTurnLoop(ctx: TurnContext): Promise<TurnLoopResult> {
       }
       const normalized = prepared.protocol === "responses" ? normalizeResponsesResponse(response) : response;
       const assistantMsg = normalized.choices?.[0]?.message;
+      if (typeof assistantMsg?.content === "string") {
+        assistantMsg.content = cleanGptText(assistantMsg.content, ctx.model);
+      }
       lastFinishReason = normalizeFinishReason(normalized.choices?.[0]?.finish_reason);
 
       lastUsageInfo = toUsageInfo({
