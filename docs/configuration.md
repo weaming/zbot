@@ -114,6 +114,14 @@ providers:
 
 WS 模式的取消依赖 `response.interrupt`：上游对带托管工具（如 `web_search`）的响应可能回 `interrupt_not_supported`，此时 zbot 按「已取消」结束本轮并断开连接，不再把整轮报成请求失败。这也是默认走 HTTP 的原因；需要 steering 与连接复用时再为 provider 打开 `websocket: true`。
 
+## 网络重试与熔断
+
+对话主链路（Chat Completions 与 Responses 的 HTTP、SSE，以及 WS 建连）遇到连接类错误（`ECONNRESET`/`ETIMEDOUT`/`EPIPE`/`EAI_AGAIN` 等）、`5xx` 与 `408` 会自动重试：指数退避 `0.5s → 1s → 2s`，各带 ±25% 抖动，最多重试 3 次。`429`、`4xx` 与其他业务错误不重试。
+
+已经向界面输出过内容的流式请求不会重放（否则正文与会话记录会重复），只在「尚未产出任何事件」时重试；Responses 的 SSE 重试沿用原请求（含 `previous_response_id`），不会因此丢弃增量续接。
+
+同一 provider（以 `baseUrl` 区分）连续 5 次重试链最终失败即熔断 60s：期间请求直接报「已熔断，N s 后再试」，不再打上游；冷却结束只放一次半开探测，成功则关闭熔断，失败则重新计时。熔断状态在进程内，重启即清空。退避起点可用 `ZBOT_RETRY_BASE_DELAY_MS` 覆盖（测试用，`0` 表示不等待）。
+
 会话的协议日志位于 `sessions/http/<会话 ID>.jsonl`：HTTP 记录实际请求、响应或 SSE 事件，WS 记录请求、收到的消息及错误。同一次请求只记一份：请求统一按请求链记录（`requestId`/`parentRequestId` 与输入增量），其余字段与真实网络请求一致；使用 `previous_response_id` 时保留实际发送的增量 `input`，未变化的工具定义只写 `toolsHash`。响应里回显的 `tools` 与请求一致时只写 `toolsRef`（指向写入该份工具定义的请求 `requestId`），不再逐条重复；工具定义变化时仍保留全量。流式增量事件（`response.output_text.delta` 等 `*.delta`）默认不落盘，只保留 `*.done`、`response.completed` 等终态与错误事件；需要逐帧复刻时打开 `runtime.llmLogDeltas`。WS 的控制消息（steer/interrupt）原样记录为 `WS_SEND`。
 
 TUI 的 MCP 服务列表由 `~/.zbot/mcp-servers.yaml` 管理。详见 [MCP 服务配置](mcp.md)。

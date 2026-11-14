@@ -15,6 +15,7 @@ import { uploadDeepSeekFile, uploadDeepSeekFileData } from "../utils/image-asset
 import { type LLMRequestKind } from "../utils/logger.js";
 import { getOpenAIProxyFetch } from "../utils/proxy.js";
 import { isResponsesWebSocketEnabled } from "../utils/responses-transport.js";
+import { isRetryableNetworkError, withNetworkRetry, type RetryInfo } from "../services/network-retry.js";
 import { resolveProtocol } from "./orchestrator/request-builder.js";
 import { collectChatStream } from "./orchestrator/chat-stream.js";
 import { collectResponsesStream } from "./orchestrator/responses-stream.js";
@@ -409,9 +410,24 @@ async function sendProtocolRequest(input: {
       ? collectResponsesResponse(client, requestBody, signal, emit, persistDelta, onSteerAccepted, onSteerUpdate)
       : client.createResponse?.(requestBody, { signal });
   }
-  return stream
-    ? collectStreamResponse(client, requestBody, signal, emit, persistDelta)
-    : client.create(requestBody, { signal });
+  if (stream) return collectStreamResponse(client, requestBody, signal, emit, persistDelta);
+
+  const key = retryKey(client);
+  return withNetworkRetry(() => client.create(requestBody, { signal }), {
+    key,
+    signal,
+    onRetry: info => logRetry(key, info),
+  });
+}
+
+/** 网络重试的熔断维度：同一 provider 的 baseURL。 */
+function retryKey(client: ChatClient): string {
+  return client.baseURL || "unknown";
+}
+
+function logRetry(key: string, info: RetryInfo): void {
+  const reason = (info.error as any)?.message ?? String(info.error);
+  console.warn(`⚠️ [net] ${key} 第 ${info.attempt} 次重试（${info.delayMs}ms 后）：${reason}`);
 }
 
 /**
@@ -424,13 +440,31 @@ async function collectStreamResponse(
   emit: (event: UIEvent) => void,
   persistDelta?: (delta: StreamDelta) => Promise<void>,
 ): Promise<any> {
-  const stream = await client.create(requestBody, { signal });
-  const { assistantMsg, usage, model, finishReason } = await collectChatStream(stream, emit, persistDelta, requestBody.model);
-  return {
-    model,
-    choices: [{ message: assistantMsg, finish_reason: finishReason }],
-    usage,
-  };
+  const key = retryKey(client);
+  // 已经输出过内容就不能重放：界面与落盘都会重复
+  let hasEmitted = false;
+  return withNetworkRetry(async () => {
+    const stream = await client.create(requestBody, { signal });
+    const { assistantMsg, usage, model, finishReason } = await collectChatStream(
+      stream,
+      event => {
+        hasEmitted = true;
+        emit(event);
+      },
+      persistDelta,
+      requestBody.model,
+    );
+    return {
+      model,
+      choices: [{ message: assistantMsg, finish_reason: finishReason }],
+      usage,
+    };
+  }, {
+    key,
+    signal,
+    isRetryable: error => !hasEmitted && isRetryableNetworkError(error),
+    onRetry: info => logRetry(key, info),
+  });
 }
 
 async function collectResponsesResponse(

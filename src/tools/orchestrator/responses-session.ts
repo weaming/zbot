@@ -7,6 +7,17 @@ import { recordLLMExchange } from "../../utils/logger.js";
 import { isInternalHostname } from "../../utils/proxy.js";
 import { buildResponsesContinuation, ResponsesBaselineStore, responsesIdentity, type ResponseBaseline } from "./responses-baseline.js";
 import type { SteerUpdate } from "../../types/chat.js";
+import {
+  MAX_RETRY_ATTEMPTS,
+  isRetryableNetworkError,
+  networkBackoffDelay,
+  reportNetworkFailure,
+  reportNetworkSuccess,
+  requireRetryPermit,
+  retrySleep,
+  withNetworkRetry,
+  type RetryInfo,
+} from "../../services/network-retry.js";
 
 class WebSocketConnectError extends Error {}
 class WebSocketReconnectError extends Error {}
@@ -134,6 +145,11 @@ export class ResponsesSession {
   /** 连接是否已超过存活上限（服务端 60 分钟硬限之前先轮换）。 */
   isExpired(now = Date.now()): boolean {
     return now - this.createdAt > MAX_AGE_MS;
+  }
+
+  /** 网络重试与熔断的维度：同一 provider 的 baseURL。 */
+  private get retryKey(): string {
+    return this.client.baseURL || "unknown";
   }
 
   private sendWs(socket: ResponsesWS, message: Record<string, any>): void {
@@ -593,9 +609,12 @@ export class ResponsesSession {
   ): AsyncGenerator<any> {
     if (useWebSocket && !this.useHttp) {
       let canReconnect = true;
+      let connectAttempts = 0;
+      const key = this.retryKey;
       while (true) {
         try {
           yield* this.stream(params, signal, onSteerAccepted, onSteerUpdate);
+          reportNetworkSuccess(key);
           return;
         } catch (error) {
           if (signal?.aborted) throw error;
@@ -604,6 +623,16 @@ export class ResponsesSession {
             continue;
           }
           if (!(error instanceof WebSocketConnectError)) throw error;
+          // 只有网络类握手失败才值得重试；明确的协议拒绝（如 426）直接回退 HTTP
+          const isNetworkFailure = isRetryableNetworkError(error) || isRetryableNetworkError((error as any).cause);
+          if (isNetworkFailure && connectAttempts < MAX_RETRY_ATTEMPTS) {
+            const delayMs = networkBackoffDelay(connectAttempts);
+            connectAttempts += 1;
+            this.logRetry("WS", { attempt: connectAttempts, delayMs, error });
+            await retrySleep(delayMs, signal);
+            continue;
+          }
+          if (isNetworkFailure) reportNetworkFailure(key);
           this.useHttp = true;
           break;
         }
@@ -630,31 +659,39 @@ export class ResponsesSession {
     const fullRequest = { ...params };
     delete fullRequest.stream;
     await this.loadBaseline(fullRequest);
-    let request = fullRequest.store === true ? buildResponsesContinuation(fullRequest, this.baseline) : fullRequest;
-    const canRetry = request.previous_response_id !== undefined && params.previous_response_id === undefined;
-    let response: any;
-    try {
-      recordLLMExchange("HTTP_REQUEST", { ...request, stream: false }, { sessionId: this.sessionId });
-      response = await this.client.responses.create({ ...request, stream: false } as any, { signal });
-    } catch (error) {
-      recordLLMExchange("HTTP_ERROR", this.errorDetails(error), { sessionId: this.sessionId });
-      if (!canRetry || !isPreviousResponseNotFound(error)) throw error;
-      await this.saveBaseline(undefined, fullRequest);
-      request = fullRequest;
-      recordLLMExchange("HTTP_REQUEST", { ...request, stream: false }, { sessionId: this.sessionId });
+    const key = this.retryKey;
+
+    const response = await withNetworkRetry(async () => {
+      const request = fullRequest.store === true ? buildResponsesContinuation(fullRequest, this.baseline) : fullRequest;
+      const canRetry = request.previous_response_id !== undefined && params.previous_response_id === undefined;
       try {
-        response = await this.client.responses.create({ ...request, stream: false } as any, { signal });
-      } catch (retryError) {
-        recordLLMExchange("HTTP_ERROR", this.errorDetails(retryError), { sessionId: this.sessionId });
-        throw retryError;
+        recordLLMExchange("HTTP_REQUEST", { ...request, stream: false }, { sessionId: this.sessionId });
+        return await this.client.responses.create({ ...request, stream: false } as any, { signal });
+      } catch (error) {
+        recordLLMExchange("HTTP_ERROR", this.errorDetails(error), { sessionId: this.sessionId });
+        if (!canRetry || !isPreviousResponseNotFound(error)) throw error;
+        await this.saveBaseline(undefined, fullRequest);
+        recordLLMExchange("HTTP_REQUEST", { ...fullRequest, stream: false }, { sessionId: this.sessionId });
+        try {
+          return await this.client.responses.create({ ...fullRequest, stream: false } as any, { signal });
+        } catch (retryError) {
+          recordLLMExchange("HTTP_ERROR", this.errorDetails(retryError), { sessionId: this.sessionId });
+          throw retryError;
+        }
       }
-    }
+    }, { key, signal, onRetry: info => this.logRetry("HTTP", info) });
+
     recordLLMExchange("HTTP_RESPONSE", response, { sessionId: this.sessionId });
     if (response?.status === "completed" || response?.status === undefined) {
       const baseline = Array.isArray(response?.output) ? this.makeBaseline(fullRequest, response?.id, response.output) : undefined;
       await this.saveBaseline(baseline, fullRequest);
     }
     return response;
+  }
+
+  private logRetry(transport: string, info: RetryInfo): void {
+    const reason = (info.error as any)?.message ?? String(info.error);
+    console.warn(`⚠️ [net] ${this.retryKey} ${transport} 第 ${info.attempt} 次重试（${info.delayMs}ms 后）：${reason}`);
   }
 
   private async *streamHttp(params: Record<string, any>, signal?: AbortSignal): AsyncGenerator<any> {
@@ -673,6 +710,11 @@ export class ResponsesSession {
     await this.loadBaseline(fullRequest);
     let request = fullRequest.store === true ? buildResponsesContinuation(fullRequest, this.baseline) : fullRequest;
     let canRetry = request.previous_response_id !== undefined && params.previous_response_id === undefined;
+    const key = this.retryKey;
+    // 熔断中就别再打上游
+    requireRetryPermit(key);
+    let networkAttempt = 0;
+    let hasEmittedAny = false;
 
     while (true) {
       let hasEmitted = false;
@@ -697,14 +739,30 @@ export class ResponsesSession {
             await this.saveBaseline(baseline, fullRequest);
           }
           if (typeof event.type !== "string" || !event.type.startsWith("codex.")) hasEmitted = true;
+          if (hasEmitted) hasEmittedAny = true;
           yield event;
         }
       } catch (error) {
         recordLLMExchange("HTTP_ERROR", this.errorDetails(error), { sessionId: this.sessionId });
+        if (signal?.aborted) throw error;
+        // 还没吐出任何事件的网络抖动：退避后重放同一请求（含 previous_response_id）
+        if (!hasEmitted && !hasEmittedAny
+          && isRetryableNetworkError(error)
+          && networkAttempt < MAX_RETRY_ATTEMPTS) {
+          const delayMs = networkBackoffDelay(networkAttempt);
+          networkAttempt += 1;
+          this.logRetry("SSE", { attempt: networkAttempt, delayMs, error });
+          await retrySleep(delayMs, signal);
+          continue;
+        }
+        if (isRetryableNetworkError(error)) reportNetworkFailure(key);
         if (!canRetry || hasEmitted || !isPreviousResponseNotFound(error)) throw error;
         shouldRetry = true;
       }
-      if (!shouldRetry) return;
+      if (!shouldRetry) {
+        reportNetworkSuccess(key);
+        return;
+      }
       canRetry = false;
       await this.saveBaseline(undefined, fullRequest);
       request = fullRequest;
