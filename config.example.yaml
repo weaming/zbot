@@ -15,8 +15,8 @@ providers:
     efforts: [low, high, max]
     # Responses 专用：托管工具由上游执行，本地没有实现
     hostedTools: [web_search]
-    # Responses 是否走 WebSocket；省略时 gpt-* 默认开、其余默认关
-    websocket: true
+    # Responses 是否走 WebSocket；默认 HTTP，显式 true 才启用（上游需支持 steering/interrupt）
+    # websocket: true
     # Responses 是否请求上游保存会话；默认 false
     store: false
 

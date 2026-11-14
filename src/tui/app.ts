@@ -2853,7 +2853,7 @@ export class ChatApp {
      */
     private renderStatusBar(): void {
         const modelSettings = getChatApiSettings(this.currentModelSelection);
-        const protocolName = protocolStatusLabel(modelSettings.protocol, modelSettings.model, modelSettings.websocket);
+        const protocolName = protocolStatusLabel(modelSettings.protocol, modelSettings.websocket);
         const modelName = `${modelSettings.model || "default"} (${protocolName})`;
         const sessionId = this.store.currentSessionId;
         const pricing = resolvePricingMode(endpointHost(modelSettings.apiBase), modelSettings);

@@ -478,7 +478,9 @@ export class ResponsesSession {
           interruptAccepted = true;
         }
         if (message.type === "response.interrupt.failed" && message.response_id === responseId) {
-          throw new Error(`Responses WebSocket 中断失败: ${JSON.stringify(message)}`);
+          // 上游拒绝中断（例如响应带托管工具）：finally 关闭 socket 侧断上游，
+          // 本轮按取消结束，用户看到的是「已取消」而不是请求失败。
+          throw new DOMException("请求已取消", "AbortError");
         }
         if (typeof message.type === "string" && message.type.startsWith("response.")) isStarted = true;
         if (message.type === "response.output_text.delta" && typeof message.delta === "string") currentOutputText += message.delta;

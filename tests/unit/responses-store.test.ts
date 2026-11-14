@@ -20,21 +20,29 @@ afterEach(() => {
   else process.env.ZBOT_STATE_DIR = previousStateDir;
 });
 
-test("GPT Responses 默认通过 WebSocket 发送且不请求上游存储", async () => {
+test("GPT Responses 默认走 HTTP 且不请求上游存储", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "zbot-responses-default-"));
   process.env.ZBOT_STATE_DIR = stateDir;
   const sessionId = crypto.randomUUID();
-  const requests: any[] = [];
+  const requests: Array<{ transport: string; body: any }> = [];
   const server = Bun.serve({
     port: 0,
     fetch(request, server) {
       if (server.upgrade(request)) return;
-      return new Response("upgrade required", { status: 400 });
+      return (async () => {
+        const body = await request.json() as any;
+        requests.push({ transport: "http", body });
+        const response = { id: "resp_default", status: "completed", output: [] };
+        if (!body.stream) return Response.json(response);
+        return new Response(`data: ${JSON.stringify({ type: "response.completed", response })}\n\n`, {
+          headers: { "content-type": "text/event-stream" },
+        });
+      })();
     },
     websocket: {
       message(socket, raw) {
         const body = JSON.parse(raw.toString());
-        requests.push(body);
+        requests.push({ transport: "ws", body });
         const id = body.generate === false ? "warmup" : "resp_default";
         socket.send(JSON.stringify({ type: "response.completed", response: { id, output: [] } }));
       },
@@ -55,18 +63,19 @@ test("GPT Responses 默认通过 WebSocket 发送且不请求上游存储", asyn
     expect(prepared.requestBody.include).toBeUndefined();
     const events = await client.createResponse!(prepared.requestBody);
     for await (const _event of events) { /* 消费完整响应。 */ }
-    expect(requests).toHaveLength(2);
-    expect(requests[0].generate).toBe(false);
-    expect(requests[1].store).toBe(false);
-    expect(requests[1].previous_response_id).toBe("warmup");
+    // 未配置 websocket 时不再按模型名启发式开 WS：只有一次 HTTP 请求
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.transport).toBe("http");
+    expect(requests[0]!.body.store).toBe(false);
+    expect(requests[0]!.body.previous_response_id).toBeUndefined();
     const log = await readSessionLog(sessionId);
-    expect(log.map(entry => entry.type)).toEqual(["REQUEST", "WS_RECV", "REQUEST", "WS_RECV"]);
+    expect(log[0]!.type).toBe("HTTP_REQUEST");
+    expect(log.every(entry => !String(entry.type).startsWith("WS_"))).toBe(true);
     // 请求除请求链字段外与真实发送内容一致
-    expect(log[0].content).toMatchObject(requests[0]);
-    expect(log[2].content).toMatchObject({ type: "response.create", previous_response_id: "warmup", input: [] });
-    expect(log[0].content.requestId).toBeString();
-    expect(log[2].content.parentRequestId).toBe(log[0].content.requestId);
-    expect(log[3].content.response.id).toBe("resp_default");
+    expect(log[0]!.content).toMatchObject(requests[0]!.body);
+    expect(log[0]!.content.requestId).toBeString();
+    expect(log.at(-1)!.content.type).toBe("response.completed");
+    expect(log.at(-1)!.content.response.id).toBe("resp_default");
   } finally {
     client.close?.();
     closeResponsesSession(sessionId);

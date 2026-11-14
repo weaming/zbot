@@ -14,7 +14,7 @@ import { type ToolCall } from "../types/tool-call.js";
 import { uploadDeepSeekFile, uploadDeepSeekFileData } from "../utils/image-assets.js";
 import { type LLMRequestKind } from "../utils/logger.js";
 import { getOpenAIProxyFetch } from "../utils/proxy.js";
-import { isGptModel } from "../utils/responses-transport.js";
+import { isResponsesWebSocketEnabled } from "../utils/responses-transport.js";
 import { resolveProtocol } from "./orchestrator/request-builder.js";
 import { collectChatStream } from "./orchestrator/chat-stream.js";
 import { collectResponsesStream } from "./orchestrator/responses-stream.js";
@@ -121,12 +121,12 @@ export function createChatClient(
       return response;
     },
     async createResponse(params, options) {
-      const useWebSocket = transport.websocket ?? isGptModel(params.model);
+      const useWebSocket = isResponsesWebSocketEnabled(transport.websocket);
       return responsesSession.session.create(params, options?.signal, options?.onSteerAccepted, useWebSocket, options?.onSteerUpdate);
     },
     close() { responsesSession.release(); },
     preconnect() {
-      if (protocol === "responses" && (transport.websocket ?? isGptModel(model))) responsesSession.session.preconnect();
+      if (protocol === "responses" && isResponsesWebSocketEnabled(transport.websocket)) responsesSession.session.preconnect();
     },
     async uploadFile(imagePath: string) {
       const fileID = await uploadDeepSeekFile(imagePath, {

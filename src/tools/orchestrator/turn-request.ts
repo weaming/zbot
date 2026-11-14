@@ -20,7 +20,7 @@ interface RequestClient {
     baseURL: string;
     imageCacheScope?: string;
     protocol?: "responses" | "chat_completions";
-    /** 协议传输开关（来自 provider 配置）；省略时按模型名启发式。 */
+    /** 协议传输开关（来自 provider 配置）；WS 默认关闭，显式开启才走 WS。 */
     transport?: {
         websocket?: boolean;
         store?: boolean;

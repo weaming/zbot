@@ -20,7 +20,7 @@ const providerSchema = z.object({
     efforts: z.array(z.string()).optional(),
     /** Responses 托管工具类型；网关尊重声明，官方 DeepSeek 另按能力白名单过滤。 */
     hostedTools: z.array(z.string()).optional(),
-    /** Responses 是否走 WebSocket；省略时按模型名启发式。 */
+    /** Responses 是否走 WebSocket；默认走 HTTP，只有显式 `true` 才启用。 */
     websocket: z.boolean().optional(),
     /** Responses 是否请求上游保存，默认 `false`。 */
     store: z.boolean().optional(),

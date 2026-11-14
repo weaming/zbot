@@ -13,7 +13,7 @@ providers:
     models: [deepseek-flash, deepseek-v4-pro]
     efforts: [low, high, max]
     hostedTools: [web_search]    # Responses 专用
-    websocket: true
+    # websocket: true           # 显式开启 Responses WebSocket（默认 HTTP）
     store: false
 
   local:
@@ -82,7 +82,7 @@ providers:
 
 | 键 | 用途 |
 | --- | --- |
-| `providers.<name>.websocket` | Responses 是否走 WebSocket；省略时 GPT 模型默认开、其他默认关。生成中追加的文本会尝试通过 steering 交给当前响应 |
+| `providers.<name>.websocket` | Responses 是否走 WebSocket；默认走 HTTP，显式 `true` 才启用。WS 模式下生成中追加的文本会尝试通过 steering 交给当前响应 |
 | `providers.<name>.store` | Responses 是否请求上游保存，默认 `false`。Codex Responses 代理要求 `store=false` |
 | `providers.<name>.hostedTools` | Responses 托管工具（如 `web_search`、`tool_search`），上游执行；第三方网关按显式声明下发，不因模型名含 `deepseek` 而过滤。官方 DeepSeek 仍按能力白名单过滤；Chat Completions 没有托管工具 |
 | `providers.<name>.efforts` | 可选思考强度清单，取代旧 `*_EFFORTS` |
@@ -111,6 +111,8 @@ providers:
 启用 Responses 存储后，HTTP 与 WebSocket 都会在请求选项和上下文前缀一致时使用 `previous_response_id` 增量续接；旧响应不可用时会重发完整上下文。每个会话的续接基准保存在状态目录 `sessions/responses/`，文件权限为 0600，最大 2 MB，超过 29 天不再使用；清空或删除会话时同时删除。WS 回合经过 steering 后，下一次请求使用完整上下文建立新基准。GPT 的存储请求包含 `reasoning.encrypted_content`，以便回退时重放思考项。
 
 `store=false` 时，WS 在当前连接的缓存有效期间仍可用 `previous_response_id` 增量续接；重连后会重新发送完整上下文。provider 显式设 `store: true` 时，上游若不支持存储会直接报错。
+
+WS 模式的取消依赖 `response.interrupt`：上游对带托管工具（如 `web_search`）的响应可能回 `interrupt_not_supported`，此时 zbot 按「已取消」结束本轮并断开连接，不再把整轮报成请求失败。这也是默认走 HTTP 的原因；需要 steering 与连接复用时再为 provider 打开 `websocket: true`。
 
 会话的协议日志位于 `sessions/http/<会话 ID>.jsonl`：HTTP 记录实际请求、响应或 SSE 事件，WS 记录请求、收到的消息及错误。同一次请求只记一份：请求统一按请求链记录（`requestId`/`parentRequestId` 与输入增量），其余字段与真实网络请求一致；使用 `previous_response_id` 时保留实际发送的增量 `input`，未变化的工具定义只写 `toolsHash`。响应里回显的 `tools` 与请求一致时只写 `toolsRef`（指向写入该份工具定义的请求 `requestId`），不再逐条重复；工具定义变化时仍保留全量。流式增量事件（`response.output_text.delta` 等 `*.delta`）默认不落盘，只保留 `*.done`、`response.completed` 等终态与错误事件；需要逐帧复刻时打开 `runtime.llmLogDeltas`。WS 的控制消息（steer/interrupt）原样记录为 `WS_SEND`。
 

@@ -88,7 +88,7 @@ export interface ChatApiSettings {
     reasoningEfforts?: string[];
     /** 托管工具类型：由上游执行，本地不执行。 */
     hostedTools: string[];
-    /** Responses 是否走 WebSocket；省略时按模型名启发式。 */
+    /** Responses 是否走 WebSocket；默认走 HTTP，只有显式 `true` 才启用。 */
     websocket?: boolean;
     /** Responses 是否请求上游保存。 */
     store: boolean;
