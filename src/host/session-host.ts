@@ -124,6 +124,8 @@ export class LocalSessionHost implements SessionHost {
      * 这里只按它的决策做副作用（落盘、回传、抢互斥、跑回合）。
      */
     private readonly peerInbox = new PeerInbox();
+    /** 本回合已注入、等回合终态统一回传结果的入站消息。 */
+    private readonly injectedInbound = new Map<string, PeerMessage[]>();
     /** 运行时能力注册的注销函数：close() 时按身份注销，避免留下指向已退出宿主的引用。 */
     private readonly unregisterRuntime: () => void;
     private nextRequestId = 1;
@@ -416,7 +418,12 @@ export class LocalSessionHost implements SessionHost {
         return { status: "queued", position: enqueued.position };
     }
 
-    /** 回合结束后尝试执行队首：FIFO、过期即丢弃并回传结果。 */
+    /**
+     * 回合结束后逐条执行队首消息（FIFO、过期即丢弃并回传结果）。
+     *
+     * 回合内已经注入过的消息不在队列里，所以这里只兜底「本回合没轮到注入」的：
+     * 会话一空闲就自动开新一轮，不必等下一次用户输入。
+     */
     private drainPeerQueue(sessionId: string): void {
         if (this.isClosing || !this.peerInbox.head(sessionId)) return;
 
@@ -444,6 +451,83 @@ export class LocalSessionHost implements SessionHost {
         })().catch((error) => {
             console.error("⚠️ [host] 排队消息执行失败:", error);
         });
+    }
+
+    /**
+     * 取出排队中的普通文本消息，注入回合内的下一次请求。
+     *
+     * 出队即标执行中；结果在该回合结束时按回合终态统一回传。
+     * 命令类消息不注入（留给 drainPeerQueue），过期消息在这里丢弃并回传失败。
+     */
+    private takeQueuedInboundMessages(sessionId: string): string[] {
+        const prompts: string[] = [];
+        const injected = this.injectedInbound.get(sessionId) ?? [];
+        while (!this.isClosing) {
+            const head = this.peerInbox.head(sessionId);
+            if (!head) break;
+            if (this.peerInbox.isExpired(head.message)) {
+                this.peerInbox.shift(sessionId);
+                this.settleDroppedMessage(sessionId, head.message, "expired");
+                continue;
+            }
+            const parsed = parseSlashCommand(head.message.text);
+            if (parsed.kind === "command" || parsed.kind === "invalid") break;
+
+            this.peerInbox.shift(sessionId);
+            this.peerInbox.markRunning(head.message);
+            injected.push(head.message);
+            prompts.push(formatInboundPrompt(head.message, this.activeSessions.get(head.message.from)?.session.title));
+        }
+        if (injected.length > 0) this.injectedInbound.set(sessionId, injected);
+        return prompts;
+    }
+
+    /**
+     * 回合内每轮请求前的统一注入：本机 pending 在前，排队入站消息在后。
+     * 各入口（TUI / web / jobs）都经由这里，注入逻辑不必各自接线。
+     */
+    private injectConsumePending(
+        sessionId: string,
+        local?: () => Array<string | UserMessageInput> | undefined,
+    ): () => Array<string | UserMessageInput> | undefined {
+        return () => {
+            const injected = this.takeQueuedInboundMessages(sessionId);
+            const own = local?.();
+            if (injected.length === 0) return own;
+            if (!own?.length) return injected;
+            return [...own, ...injected];
+        };
+    }
+
+    /**
+     * 回合终态：本轮注入的入站消息共享本回合最终回复作为结果。
+     * 取消则回传 aborted，避免发送方继续挂着。
+     */
+    private settleInjectedInbound(sessionId: string): void {
+        const injected = this.injectedInbound.get(sessionId);
+        if (!injected?.length) return;
+        this.injectedInbound.delete(sessionId);
+
+        const aborted = this.activeSessions.get(sessionId)?.abortController?.signal.aborted === true;
+        const content = aborted ? "" : this.lastAssistantText(sessionId);
+        for (const message of injected) {
+            this.completePeerTurn(sessionId, message, aborted
+                ? { content: "", stopReason: "aborted", failure: "回合已取消" }
+                : { content, stopReason: "stop" });
+        }
+    }
+
+    /** 本会话内存里最后一条助手正文：注入消息的结果内容。 */
+    private lastAssistantText(sessionId: string): string {
+        const turns = this.activeSessions.get(sessionId)?.session.turns ?? [];
+        for (let turnIndex = turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
+            const messages = turns[turnIndex]?.messages ?? [];
+            for (let index = messages.length - 1; index >= 0; index -= 1) {
+                const message = messages[index];
+                if (message?.role === "assistant" && message.content) return message.content;
+            }
+        }
+        return "";
     }
 
     /** 出队丢弃（过期/取消）：结果由状态机生成并入幂等窗口，这里只负责回传。 */
@@ -527,6 +611,8 @@ export class LocalSessionHost implements SessionHost {
                 initialRequestKind: "peer_request",
                 // 终态事件带上入站 msgId：`session wait --msg=` 不必靠 seq 猜回合归属
                 peerMsgId: message.id,
+                // 本回合内新排队的入站消息同样注入后续请求
+                consumePendingMessages: this.injectConsumePending(sessionId),
                 onEvent: (event) => {
                     if (event.type === "message_end") {
                         content = event.content;
@@ -1154,10 +1240,14 @@ export class LocalSessionHost implements SessionHost {
         };
         return this.trackTurn(sessionId, this.runTurn(sessionId, {
             turnId: createUlid(),
-            // 等待中的会话间结果在前（下一次 HTTP 请求时附加），本轮驱动消息在后
-            userMessages: [...this.pendingPeerUserMessages(sessionId), current],
+            // 等待中的会话间结果在前（下一次 HTTP 请求时附加），排队入站消息次之，本轮驱动消息最后
+            userMessages: [
+                ...this.pendingPeerUserMessages(sessionId),
+                ...this.takeQueuedInboundMessages(sessionId).map(text => ({ text, trigger: "peer" as const })),
+                current,
+            ],
             query: text,
-            consumePendingMessages: options?.consumePendingMessages,
+            consumePendingMessages: this.injectConsumePending(sessionId, options?.consumePendingMessages),
         }));
     }
 
@@ -1185,7 +1275,7 @@ export class LocalSessionHost implements SessionHost {
             pendingToolCalls: plan.toolCalls,
             skipToolCallIds: new Set(plan.toolCalls.map(call => call.id)),
             initialRequestKind: "turn_resume",
-            consumePendingMessages: options?.consumePendingMessages,
+            consumePendingMessages: this.injectConsumePending(sessionId, options?.consumePendingMessages),
         }, options?.alreadyReserved === true));
         return { resumed: true, aborted: result.aborted };
     }
@@ -1292,6 +1382,7 @@ export class LocalSessionHost implements SessionHost {
             userMessages: results.map(text => ({ text, trigger: "peer" as const })),
             query: results[results.length - 1]!,
             initialRequestKind: "peer_request",
+            consumePendingMessages: this.injectConsumePending(sessionId),
         };
         void this.trackTurn(sessionId, this.runtimeReady.then(() => runSessionTurn(this.turnHost, sessionId, spec, { alreadyReserved: true })))
             .catch((error) => {
@@ -1494,6 +1585,9 @@ export class LocalSessionHost implements SessionHost {
             this.inflightTurns.delete(turn);
             turns.delete(turn);
             if (turns.size === 0) this.turnsBySession.delete(sessionId);
+            // 本会话回合全部收尾：注入过的入站消息按本回合终态回传结果。
+            // 取消路径也要回传，否则发送方会一直挂着等结果。
+            if (!this.turnsBySession.has(sessionId)) this.settleInjectedInbound(sessionId);
             // 回合结束后通知宿主：群消息驱动等非用户回合也要放行排队的输入
             if (!this.cancellingSessions.has(sessionId)) {
                 try {
@@ -1503,7 +1597,7 @@ export class LocalSessionHost implements SessionHost {
                 }
                 // 回合执行期间到达、当时没能驱动的结果，在这里补一次
                 this.driveQueuedResults(sessionId);
-                // 排队投递：队首在会话空闲后依次执行
+                // 排队投递：命令类队首在这里继续执行；普通文本等下一次请求前注入
                 this.drainPeerQueue(sessionId);
             }
         }

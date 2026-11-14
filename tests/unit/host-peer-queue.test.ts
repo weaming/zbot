@@ -1,5 +1,5 @@
 /**
- * 排队投递：忙时入队、回合结束自动执行、队列有界、msgId 幂等、取消与过期。
+ * 排队投递：忙时入队、下一次请求前注入、队列有界、msgId 幂等、取消与过期。
  *
  * 独立文件：mock.module 需要独占进程，否则会和真实上游请求串味。
  */
@@ -14,6 +14,10 @@ let turnGate: Promise<void> | null = null;
 let turnGateSession: string | null = null;
 const startedSessions: string[] = [];
 const finishedQueries: Array<{ sessionId?: string; query?: string }> = [];
+const responses: Array<{ sessionId?: string; content: string }> = [];
+/** 模拟「回合内下一次请求前」的注入：记录被注入的文本。 */
+const injectedTexts: string[] = [];
+let captureInjections: string | null = null;
 
 const realChatRuntime = await import("../../src/services/chat-runtime.js");
 mock.module("../../src/services/chat-runtime.js", () => ({
@@ -21,16 +25,22 @@ mock.module("../../src/services/chat-runtime.js", () => ({
     runChatQuery: async (options: any) => {
         startedSessions.push(options.sessionId);
         if (turnGate && (!turnGateSession || options.sessionId === turnGateSession)) await turnGate;
+        if (captureInjections && options.sessionId === captureInjections) {
+            captureInjections = null;
+            injectedTexts.push(...(options.consumePendingMessages?.() ?? []));
+        }
         if (options.signal?.aborted) {
             options.onEvent?.({ type: "aborted", stopReason: "aborted" });
             return { content: "", toolCalls: 0, messages: [] };
         }
         finishedQueries.push({ sessionId: options.sessionId, query: options.query });
-        options.onEvent?.({ type: "message_end", content: `输出 ${finishedQueries.length}`, stopReason: "stop" });
+        const content = `输出 ${finishedQueries.length}`;
+        responses.push({ sessionId: options.sessionId, content });
+        options.onEvent?.({ type: "message_end", content, stopReason: "stop" });
         return {
-            content: `输出 ${finishedQueries.length}`,
+            content,
             toolCalls: 0,
-            messages: [{ role: "assistant", content: "ok" }],
+            messages: [{ role: "assistant", content }],
         };
     },
 }));
@@ -58,6 +68,9 @@ beforeEach(async () => {
     turnGateSession = null;
     startedSessions.length = 0;
     finishedQueries.length = 0;
+    responses.length = 0;
+    injectedTexts.length = 0;
+    captureInjections = null;
 });
 
 afterEach(async () => {
@@ -108,7 +121,32 @@ function holdSession(sessionId: string): () => void {
 }
 
 describe("排队投递", () => {
-    test("忙时入队并返回位次；回合结束后自动执行并回传结果", async () => {
+    test("回合内下一次请求前注入排队消息，结果同样按本回合回传", async () => {
+        const release = holdSession(sessionB);
+        const occupying = agent.sessionControl.send(sessionA, sessionB, "占用", { expectResult: true });
+        await waitFor(() => startedSessions.includes(sessionB));
+
+        const queued = await agent.sessionControl.send(sessionA, sessionB, "回合内插入", {
+            expectResult: true,
+            queueIfBusy: true,
+        });
+        // 放行时模拟该回合的第二轮请求：注入发生在请求前
+        captureInjections = sessionB;
+        release();
+        await occupying;
+
+        expect(injectedTexts.join("\n")).toContain("回合内插入");
+        expect(await agent.sessionControl.queueState(sessionB)).toEqual([]);
+        await waitFor(() => readEvents(sessionA).some(event => event.type === "peer_result"
+            && event.payload.msgId === queued.message.id));
+        const result = readEvents(sessionA)
+            .filter(event => event.type === "peer_result" && event.payload.msgId === queued.message.id)
+            .at(-1)!.payload as { ok: boolean; text: string };
+        expect(result.ok).toBe(true);
+        expect(result.text).toBe(responses.filter(item => item.sessionId === sessionB).at(-1)!.content);
+    });
+
+    test("忙时入队返回位次；回合结束后自动开新一轮并回传结果", async () => {
         const release = holdSession(sessionB);
         await agent.sessionControl.send(sessionA, sessionB, "占用", { expectResult: true });
         await waitFor(() => startedSessions.includes(sessionB));
@@ -128,7 +166,15 @@ describe("排队投递", () => {
         release();
         await waitFor(() => finishedQueries.filter(query => query.sessionId === sessionB).length === 2);
         expect((await agent.sessionControl.queueState(sessionB))).toEqual([]);
-        await waitFor(() => readEvents(sessionA).filter(event => event.type === "peer_result").length === 2);
+        await waitFor(() => readEvents(sessionA).some(event => event.type === "peer_result"
+            && event.payload.msgId === queued.message.id));
+        const result = readEvents(sessionA)
+            .filter(event => event.type === "peer_result" && event.payload.msgId === queued.message.id)
+            .at(-1)!.payload as { ok: boolean; text: string; stopReason: string };
+        expect(result.ok).toBe(true);
+        // 结果用那一轮的最终回复，而不是消息自己的回显
+        expect(result.text).toBe(responses.filter(item => item.sessionId === sessionB).at(-1)!.content);
+        expect(result.stopReason).toBe("stop");
     });
 
     test("队列有界：超过上限返回 queue_full", async () => {
@@ -208,9 +254,14 @@ describe("排队投递", () => {
 
         release();
         await waitFor(() => finishedQueries.filter(query => query.sessionId === sessionB).length === 3);
+        for (const queued of [first, second]) {
+            await waitFor(() => readEvents(sessionA).some(event => event.type === "peer_result"
+                && event.payload.msgId === queued.message.id));
+        }
+        expect(await agent.sessionControl.queueState(sessionB)).toEqual([]);
     });
 
-    test("取消回合后排队消息继续执行（不永久停滞）", async () => {
+    test("取消回合后排队消息自动开新一轮（不永久停滞）", async () => {
         const spawned = await agent.sessionControl.spawnSession(sessionA, "取消测试");
         expect(spawned.ok).toBe(true);
         if (!spawned.ok) return;
@@ -228,7 +279,7 @@ describe("排队投递", () => {
         release();
         expect(await cancelPromise).toEqual({ ok: true, closed: false });
 
-        // 取消也算回合结束：队首消息要被执行并回传结果
+        // 取消也算回合结束：空闲后自动起新一轮，把队列里的消息执行掉
         await waitFor(() => finishedQueries.filter(query => query.sessionId === child).length === 1);
         await waitFor(() => readEvents(sessionA).some(event => event.type === "peer_result"
             && event.payload.msgId === queued.message.id));
