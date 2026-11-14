@@ -118,12 +118,18 @@ test("管道、重定向、替换、后台任务及复杂 shell 结构不参与�
 });
 
 test("重写超时回退原命令，中途取消不会执行后续命令", async () => {
-    expect(await rewrite("git status", { RTK_TEST_MODE: "timeout" })).toBe("git status");
+    // 默认超时 2s 对用例太长：压到 200ms 仍能验证回退与取消
+    process.env.ZBOT_RTK_TIMEOUT_MS = "200";
+    try {
+        expect(await rewrite("git status", { RTK_TEST_MODE: "timeout" })).toBe("git status");
 
-    const controller = new AbortController();
-    const pending = rewrite("git status", { RTK_TEST_MODE: "timeout" }, controller.signal);
-    controller.abort();
-    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+        const controller = new AbortController();
+        const pending = rewrite("git status", { RTK_TEST_MODE: "timeout" }, controller.signal);
+        controller.abort();
+        await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+        delete process.env.ZBOT_RTK_TIMEOUT_MS;
+    }
 }, 5_000);
 
 test("bash 使用 RTK 执行 git，并保持非 git 命令原样执行", async () => {

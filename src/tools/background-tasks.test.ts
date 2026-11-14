@@ -49,16 +49,16 @@ describe("前台执行", () => {
     });
 
     test("到点未转后台：杀掉进程并标记 timed_out", async () => {
-        const result = await start("sleep 5", { sessionId: "fg-timeout", timeoutSeconds: 1 }).promise;
+        const result = await start("sleep 5", { sessionId: "fg-timeout", timeoutSeconds: 0.2 }).promise;
 
         expect(result.kind).toBe("timed_out");
-        expect(result.kind === "timed_out" ? result.timeoutSeconds : undefined).toBe(1);
+        expect(result.kind === "timed_out" ? result.timeoutSeconds : undefined).toBe(0.2);
     });
 
     test("到点转后台：返回 detached，任务继续跑完并保留输出", async () => {
-        const result = await start("sleep 1; echo done", {
+        const result = await start("sleep 0.4; echo done", {
             sessionId: "fg-detach-timeout",
-            timeoutSeconds: 1,
+            timeoutSeconds: 0.1,
             autoBackgroundOnTimeout: true,
         }).promise;
 

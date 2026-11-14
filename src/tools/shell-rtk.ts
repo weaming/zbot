@@ -1,7 +1,13 @@
 import { execFile } from "node:child_process";
 
-const REWRITE_TIMEOUT_MS = 2_000;
+const DEFAULT_REWRITE_TIMEOUT_MS = 2_000;
 const MAX_REWRITE_BYTES = 1024 * 1024;
+
+/** 重写超时：可用 `ZBOT_RTK_TIMEOUT_MS` 覆盖，测试据此避免干等默认值。 */
+function resolveRewriteTimeoutMs(): number {
+    const configured = Number(process.env.ZBOT_RTK_TIMEOUT_MS);
+    return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_REWRITE_TIMEOUT_MS;
+}
 
 /** 解析已通过简单脚本检查的参数，仅用于白名单判断，不重新生成命令。 */
 function parseSimpleArgs(command: string): string[] {
@@ -107,7 +113,7 @@ async function rewriteCommand(command: string, cwd: string, env: NodeJS.ProcessE
             cwd,
             env,
             signal,
-            timeout: REWRITE_TIMEOUT_MS,
+            timeout: resolveRewriteTimeoutMs(),
             maxBuffer: MAX_REWRITE_BYTES,
             encoding: "utf8",
         }, (error, stdout) => {
