@@ -217,9 +217,11 @@ export async function waitForTurn(options: WaitTurnOptions): Promise<TurnOutcome
                 queryInFlight = safeQuery(peer, selector.msgId)
                     .finally(() => { queryInFlight = undefined; });
             }
-            // 只在循环里等一小段：补查慢（对方不认这个请求）也不能拖住事件日志轮询与超时判定
-            const done = await withLimit(queryInFlight, QUERY_WAIT_MS);
+            // 只在循环里等一小段：补查慢（对方不认这个请求）也不能拖住事件日志轮询与超时判定。
+            // 结果推送先到就立刻醒来，不必干等补查上限。
+            const done = await withLimit(queryInFlight, QUERY_WAIT_MS, wake);
             if (done) return outcomeFromPeer(done, sessionId, "", Date.now() - startedAt);
+            if (peerOutcome) return peerOutcome;
         }
 
         // 补查可能占用一段时间：探测节流按实际时刻算，别用补查前的旧时间
@@ -264,7 +266,11 @@ export async function waitForTurn(options: WaitTurnOptions): Promise<TurnOutcome
             }
         }
 
-        await sleep(POLL_INTERVAL_MS, signal, wake);
+        // 最后一轮按剩余时间睡：超时判定不必多等一个完整轮询周期
+        const remaining = deadline === undefined
+            ? POLL_INTERVAL_MS
+            : Math.max(1, Math.min(POLL_INTERVAL_MS, deadline - Date.now()));
+        await sleep(remaining, signal, wake);
     }
 }
 
@@ -460,9 +466,10 @@ class Wake {
     }
 }
 
-/** 给「结果可有可无」的动作设上限：到点返回 undefined，并清掉定时器。 */
-async function withLimit<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+/** 给「结果可有可无」的动作设上限：到点或结果推送到达时返回 undefined，并清掉定时器。 */
+async function withLimit<T>(promise: Promise<T>, ms: number, wake?: Wake): Promise<T | undefined> {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let offWake: (() => void) | undefined;
     try {
         return await Promise.race([
             promise,
@@ -470,9 +477,11 @@ async function withLimit<T>(promise: Promise<T>, ms: number): Promise<T | undefi
                 timer = setTimeout(() => resolve(undefined), ms);
                 timer.unref?.();
             }),
+            new Promise<undefined>((resolve) => { offWake = wake?.onWake(() => resolve(undefined)); }),
         ]);
     } finally {
         if (timer) clearTimeout(timer);
+        offWake?.();
     }
 }
 
