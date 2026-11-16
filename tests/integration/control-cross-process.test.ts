@@ -110,6 +110,9 @@ function createHost(sessionId: string) {
     };
     const control = new SessionControl({
         title: () => "parent",
+        instanceId: "test-instance",
+        getSessionDelegation: async () => undefined,
+        holdsSession: () => true,
         isBusy: () => false,
         accept: () => ({ status: "accepted" as const }),
         onOutbound: () => {},
