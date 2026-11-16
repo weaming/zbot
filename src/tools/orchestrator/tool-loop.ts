@@ -11,6 +11,7 @@
 
 import type { ToolCall } from "../../types/tool-call.js";
 import {
+    capToolOutput,
     compactJsonToolOutput,
     type ToolExecutionOutput,
     type ToolExecutionResponse,
@@ -84,7 +85,8 @@ async function processToolCall(
             toolImageContent = executionOutput.imageContent;
             toolAudioContent = executionOutput.audioContent;
 
-            toolOutput = compactJsonToolOutput(toolOutput, toolCall.name);
+            // 顺序固定：先紧凑化（结构化查询无损），再兜住体积（去 NUL + 头尾截断）
+            toolOutput = capToolOutput(compactJsonToolOutput(toolOutput, toolCall.name));
         } catch (error: any) {
             if (error?.name === "AbortError") throw error;
             toolFailed = true;
@@ -97,7 +99,7 @@ async function processToolCall(
             args,
             timestamp: new Date().toISOString(),
         });
-        toolOutput = compactJsonToolOutput(toolOutput, toolCall.name);
+        toolOutput = capToolOutput(compactJsonToolOutput(toolOutput, toolCall.name));
     }
 
     // 耗时随工具消息落盘（本地渲染元数据，上行前会被剥离），会话重开后仍能显示

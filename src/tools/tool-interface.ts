@@ -257,6 +257,31 @@ export function compactJsonToolOutput(text: string, toolName: string): string {
     }
 }
 
+/** 单条工具输出上限：一条消息就能把会话日志撑到几十 MB，这里兜住。 */
+export const MAX_TOOL_OUTPUT_CHARS = 1_000_000;
+/** 截断时头部/尾部各占的比例：开头是结构或错误信息，结尾常是结论，中间最可丢。 */
+const TOOL_OUTPUT_HEAD_RATIO = 0.7;
+const TOOL_OUTPUT_TAIL_RATIO = 0.2;
+
+/**
+ * 工具输出的落盘/上送护栏：
+ * - 去掉 NUL：二进制垃圾（cat 到图片、日志里的 \0）会被 JSON 转义成 6 字节，
+ *   一条 60 MB 的输出里绝大部分都是这种转义，对模型也毫无意义；
+ * - 超长则保留头尾 + 省略说明，绝不整条塞进会话日志与下一次请求。
+ */
+export function capToolOutput(text: string, maxChars = MAX_TOOL_OUTPUT_CHARS): string {
+    const cleaned = text.includes("\u0000") ? text.replace(/\u0000/g, "") : text;
+    if (cleaned.length <= maxChars) return cleaned;
+
+    const headChars = Math.floor(maxChars * TOOL_OUTPUT_HEAD_RATIO);
+    const tailChars = Math.floor(maxChars * TOOL_OUTPUT_TAIL_RATIO);
+    const omitted = cleaned.length - headChars - tailChars;
+    return `${cleaned.slice(0, headChars)}`
+        + `\n\n…[工具输出过长，已省略中间 ${omitted} 个字符（原长 ${cleaned.length}）；`
+        + "需要完整内容请重跑并缩小范围]\n\n"
+        + `${cleaned.slice(-tailChars)}`;
+}
+
 /** 音频无法上行时的原因，用于选择说明文案。 */
 export type AudioDropReason = "responses" | "endpoint";
 

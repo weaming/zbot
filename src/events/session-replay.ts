@@ -315,6 +315,15 @@ export class SessionReplay {
     }
 }
 
+/**
+ * 删除会话的重放快照。快照只是重放缓存：删掉后下次打开该会话会全量重放一次，
+ * 之后按间隔重新写回。归档时与归档清理都走这里（`sessions/events/<id>.snapshot.json`）。
+ */
+export async function deleteReplaySnapshot(sessionId: string): Promise<void> {
+    const filePath = path.join(getSessionsDir("events"), `${sanitizeSessionId(sessionId)}.snapshot.json`);
+    await fs.promises.rm(filePath, { force: true });
+}
+
 function getPendingTurn(pendingTurns: Map<string, PendingTurn>, turnId: string): PendingTurn {
     let unit = pendingTurns.get(turnId);
     if (!unit) {

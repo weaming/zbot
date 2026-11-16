@@ -157,6 +157,71 @@ describe("cleanupArchivedSessions", () => {
         expect(fs.existsSync(getSessionsDir("events", "recent-archived.jsonl"))).toBe(true);
     });
 
+    it("归档未满保留期：会话留着，但重放快照被删（可重建）", async () => {
+        await makeSession("recent-archived", [{ type: "session_archived", ts: daysAgo(3).toISOString() }], daysAgo(3));
+        const snapshot = getSessionsDir("events", "recent-archived.snapshot.json");
+        expect(fs.existsSync(snapshot)).toBe(true);
+
+        const result = await cleanupArchivedSessions({ retentionDays: 14 });
+
+        expect(fs.existsSync(snapshot)).toBe(false);
+        expect(result.snapshotsDropped).toBe(1);
+        expect(result.snapshotBytes).toBe(1);
+        expect(fs.existsSync(getSessionsDir("events", "recent-archived.jsonl"))).toBe(true);
+    });
+
+    it("未归档会话的重放快照不动", async () => {
+        await makeSession("active-snapshot", [{ type: "user_message", ts: daysAgo(1).toISOString() }], daysAgo(1));
+        const snapshot = getSessionsDir("events", "active-snapshot.snapshot.json");
+
+        const result = await cleanupArchivedSessions({ retentionDays: 14 });
+
+        expect(fs.existsSync(snapshot)).toBe(true);
+        expect(result.snapshotsDropped).toBe(0);
+    });
+
+    it("尾部有大量注入事件也能判定归档（尾部窗口按需放大）", async () => {
+        const events: Array<{ type: "session_archived" | "standalone_turn"; ts: string; injected?: boolean }> = [
+            { type: "session_archived", ts: daysAgo(30).toISOString() },
+        ];
+        // 1000 条注入事件把归档标记推出 64KB 初始窗口
+        for (let index = 0; index < 1000; index += 1) {
+            events.push({ type: "standalone_turn", ts: daysAgo(29).toISOString(), injected: true });
+        }
+        await makeSession("archived-behind-noise", events, daysAgo(30));
+
+        const result = await cleanupArchivedSessions({ retentionDays: 14 });
+
+        expect(result.removed).toEqual(["archived-behind-noise"]);
+    });
+
+    it("尾部窗口耗到上限仍找不到有效事件时保守不删", async () => {
+        const events: Array<{ type: "session_archived" | "standalone_turn"; ts: string; injected?: boolean }> = [
+            { type: "session_archived", ts: daysAgo(30).toISOString() },
+        ];
+        // 8MB 以上的注入事件把归档标记彻底埋在窗口之外
+        for (let index = 0; index < 40; index += 1) {
+            events.push({ type: "standalone_turn", ts: daysAgo(29).toISOString(), injected: true });
+        }
+        await makeSession("buried", events, daysAgo(30));
+        const logFile = getSessionsDir("events", "buried.jsonl");
+        // 再追加 10 条 1MB 的注入事件：总量超过 8MB 窗口上限，归档标记就找不到了
+        for (let index = 0; index < 10; index += 1) {
+            fs.appendFileSync(logFile, `${JSON.stringify({
+                ts: daysAgo(29).toISOString(),
+                seq: 100_000 + index,
+                sessionId: "buried",
+                type: "standalone_turn",
+                payload: { injected: true, messages: [{ role: "system", content: "x".repeat(1024 * 1024) }] },
+            })}\n`, "utf8");
+        }
+
+        const result = await cleanupArchivedSessions({ retentionDays: 14 });
+
+        expect(result.removed).toEqual([]);
+        expect(fs.existsSync(logFile)).toBe(true);
+    });
+
     it("归档后又继续对话的会话不删（归档失效）", async () => {
         await makeSession(
             "reopened",

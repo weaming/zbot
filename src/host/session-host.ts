@@ -13,7 +13,13 @@
 
 import path from "node:path";
 import { buildSystemPrompt, closeChatSessionTransport, deleteResponsesBaseline, steerChatSession } from "../services/chat-runtime.js";
-import { createEmptySession, eventCwd, sessionCreatedPayload, SessionReplay } from "../events/session-replay.js";
+import {
+    createEmptySession,
+    deleteReplaySnapshot,
+    eventCwd,
+    sessionCreatedPayload,
+    SessionReplay,
+} from "../events/session-replay.js";
 import type { SessionDelegation } from "../types/session.js";
 import { isEmptySession } from "../events/session-emptiness.js";
 import { EventLog } from "../events/event-log.js";
@@ -1267,6 +1273,8 @@ export class LocalSessionHost implements SessionHost {
                 await this.eventLog.append(sessionId, "session_archived", {});
             }
             this.activeSessions.delete(sessionId);
+            // 归档后重放快照只会占磁盘（会话不会再跑回合）：删掉，重新打开时重放一次重建。
+            await deleteReplaySnapshot(sessionId).catch(() => undefined);
         } finally {
             try {
                 await this.releaseSessionLockSafely(lock);

@@ -25,7 +25,7 @@ export function sessionArtifactPaths(sessionId: string): string[] {
     const safeId = sanitizeSessionId(sessionId);
     return [
         getSessionsDir("events", `${safeId}.jsonl`),
-        getSessionsDir("events", `${safeId}.snapshot.json`),
+        replaySnapshotPath(sessionId),
         getSessionsDir("events", `${safeId}.stream.jsonl`),
         getSessionsDir("http", `${safeId}.jsonl`),
         getSessionsDir("log", `${safeId}.log`),
@@ -35,6 +35,11 @@ export function sessionArtifactPaths(sessionId: string): string[] {
         getSessionsDir("locks", `${safeId}.lock`),
         getSessionsDir("assets", safeId),
     ];
+}
+
+/** 会话的重放快照文件：只是缓存（删掉后下次打开全量重放），归档后就不必再留。 */
+function replaySnapshotPath(sessionId: string): string {
+    return getSessionsDir("events", `${sanitizeSessionId(sessionId)}.snapshot.json`);
 }
 
 /**
@@ -81,21 +86,60 @@ interface ArchiveMark {
  * 它们不代表用户回来用过这个会话，不能因此让归档失效（否则归档会话永远清不掉）。
  * 归档后若真的继续对话或取消归档，末条有效事件就不是 session_archived，计时自然重置。
  */
-function readArchiveMark(sessionId: string, events: AgentEvent[], fileMtimeMs: number): ArchiveMark {
-    const last = lastMeaningfulEvent(events);
+function readArchiveMark(sessionId: string, last: AgentEvent | undefined, fileMtimeMs: number): ArchiveMark {
     const archived = last?.type === "session_archived";
     const at = last ? Date.parse(last.ts) : Number.NaN;
     const archiveAt = Number.isFinite(at) ? at : fileMtimeMs;
     return { sessionId, archived, activeAt: archived ? archiveAt : fileMtimeMs };
 }
 
-/** 最后一个不是自动注入的事件（即真实的用户/模型活动）。 */
-function lastMeaningfulEvent(events: AgentEvent[]): AgentEvent | undefined {
-    for (let index = events.length - 1; index >= 0; index--) {
-        const event = events[index] as AgentEvent;
-        if (!isInjectedContext(event)) return event;
+/** 尾部扫描的初始窗口与上限：归档判定只需要最后一条有效事件。 */
+const TAIL_WINDOW_BYTES = 64 * 1024;
+const TAIL_WINDOW_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * 从文件尾找最后一个**非注入**事件（真实的用户/模型活动）。
+ *
+ * 早前这里把整个日志读进来逐行 JSON.parse：154 个会话、200 MB 日志意味着每次
+ * TUI 启动都要解析全部事件（其中还有 60 MB 级的单条工具输出）。归档判定只关心
+ * 最后一条有效事件，窗口从 64 KB 起按 ×4 放大、封顶 8 MB 就够。
+ * 窗口内实在找不到（尾部全是注入事件，或最后一条是超长行）时返回 undefined ——
+ * 按未归档处理，宁可不删。
+ */
+async function readLastMeaningfulEvent(filePath: string): Promise<AgentEvent | undefined> {
+    const size = (await fs.promises.stat(filePath)).size;
+    let win = Math.min(size, TAIL_WINDOW_BYTES);
+    const handle = await fs.promises.open(filePath, "r");
+    try {
+        while (true) {
+            const from = Math.max(0, size - win);
+            const length = size - from;
+            const buffer = Buffer.alloc(length);
+            await handle.read(buffer, 0, length, from);
+            const lines = buffer.toString("utf8").split("\n");
+            // 窗口起点不在行首时首段是半行，丢弃。
+            const start = from === 0 ? 0 : 1;
+            for (let index = lines.length - 1; index >= start; index--) {
+                const line = lines[index]!;
+                if (!line.trim()) continue;
+                const event = parseEvent(line);
+                if (!event || isInjectedContext(event)) continue;
+                return event;
+            }
+            if (from === 0 || win >= TAIL_WINDOW_MAX_BYTES) return undefined;
+            win = Math.min(size, TAIL_WINDOW_MAX_BYTES, win * 4);
+        }
+    } finally {
+        await handle.close();
     }
-    return undefined;
+}
+
+function parseEvent(line: string): AgentEvent | undefined {
+    try {
+        return JSON.parse(line) as AgentEvent;
+    } catch {
+        return undefined;
+    }
 }
 
 export interface CleanupResult {
@@ -104,6 +148,9 @@ export interface CleanupResult {
     /** 删除失败（含权限问题）的会话 id 与原因。 */
     failed: Array<{ sessionId: string; error: string }>;
     retentionDays: number;
+    /** 归档仍留存的会话：被删掉的重放快照数量与回收字节数（快照可重建）。 */
+    snapshotsDropped: number;
+    snapshotBytes: number;
 }
 
 /**
@@ -128,7 +175,8 @@ export async function cleanupArchivedSessions(
     const protectedIds = new Set(options.protectedIds ?? []);
     const skipAssets = options.skipAssets ?? false;
     const onRemoved = options.onRemoved;
-    if (retentionDays <= 0) return { removed: [], failed: [], retentionDays };
+    const emptyResult = { removed: [], failed: [], retentionDays, snapshotsDropped: 0, snapshotBytes: 0 };
+    if (retentionDays <= 0) return emptyResult;
 
     const cutoff = now.getTime() - retentionDays * 24 * 60 * 60 * 1000;
     const eventsDir = getSessionsDir("events");
@@ -136,12 +184,14 @@ export async function cleanupArchivedSessions(
     try {
         fileNames = await fs.promises.readdir(eventsDir);
     } catch (error: any) {
-        if (error?.code === "ENOENT") return { removed: [], failed: [], retentionDays };
+        if (error?.code === "ENOENT") return emptyResult;
         throw error;
     }
 
     const removed: string[] = [];
     const failed: Array<{ sessionId: string; error: string }> = [];
+    let snapshotsDropped = 0;
+    let snapshotBytes = 0;
 
     for (const fileName of fileNames) {
         // 流式片段旁路文件不是独立会话，跳过免得白读
@@ -154,9 +204,17 @@ export async function cleanupArchivedSessions(
             const stat = await fs.promises.stat(filePath);
             // 不能用 mtime 粗筛：归档会话群里仍有自动注入事件落盘，mtime 会一直新鲜，
             // 粗筛会把它们整批跳过（归档态与时间只能从事件内容判定）。
-            const events = await readEvents(filePath);
-            const mark = readArchiveMark(sessionId, events, stat.mtimeMs);
-            if (!mark.archived || mark.activeAt > cutoff) continue;
+            const mark = readArchiveMark(sessionId, await readLastMeaningfulEvent(filePath), stat.mtimeMs);
+            if (!mark.archived) continue;
+            if (mark.activeAt > cutoff) {
+                // 归档但未过期：会话本身留着，重放快照没必要留（随时可重建，且有会话日志那么大）
+                const dropped = await dropSnapshot(sessionId);
+                if (dropped > 0) {
+                    snapshotsDropped += 1;
+                    snapshotBytes += dropped;
+                }
+                continue;
+            }
 
             await removeSessionArtifacts(sessionId, { skipAssets });
             removed.push(sessionId);
@@ -167,24 +225,26 @@ export async function cleanupArchivedSessions(
         }
     }
 
-    if (removed.length > 0 || failed.length > 0) {
+    if (removed.length > 0 || failed.length > 0 || snapshotsDropped > 0) {
         const note = `归档会话保留 ${retentionDays} 天：清理 ${removed.length} 个`;
+        const snapshotNote = snapshotsDropped > 0
+            ? `，另删 ${snapshotsDropped} 份重放快照（${(snapshotBytes / 1e6).toFixed(1)}MB）`
+            : "";
         if (failed.length > 0) console.warn(`🧹 [cleanup] ${note}，失败 ${failed.length} 个`);
-        else console.log(`🧹 [cleanup] ${note}`);
+        else console.log(`🧹 [cleanup] ${note}${snapshotNote}`);
     }
-    return { removed, failed, retentionDays };
+    return { removed, failed, retentionDays, snapshotsDropped, snapshotBytes };
 }
 
-async function readEvents(filePath: string): Promise<AgentEvent[]> {
-    const text = await fs.promises.readFile(filePath, "utf8");
-    const events: AgentEvent[] = [];
-    for (const line of text.split("\n")) {
-        if (!line.trim()) continue;
-        try {
-            events.push(JSON.parse(line) as AgentEvent);
-        } catch {
-            // 损坏行跳过，不影响其余事件的判定
-        }
+/** 删掉归档会话的重放快照，返回回收的字节数（没有则 0）。 */
+async function dropSnapshot(sessionId: string): Promise<number> {
+    const filePath = replaySnapshotPath(sessionId);
+    let size = 0;
+    try {
+        size = (await fs.promises.stat(filePath)).size;
+    } catch {
+        return 0;
     }
-    return events;
+    await fs.promises.rm(filePath, { force: true });
+    return size;
 }

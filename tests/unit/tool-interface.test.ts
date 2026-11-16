@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { canCompactJsonToolOutput, compactJsonToolOutput } from '../../src/tools/tool-interface.js';
+import { canCompactJsonToolOutput, capToolOutput, compactJsonToolOutput } from '../../src/tools/tool-interface.js';
 
 describe('tool output JSON compaction', () => {
     test('minifies a complete JSON object without changing its value', () => {
@@ -31,5 +31,28 @@ describe('tool output JSON compaction', () => {
         expect(canCompactJsonToolOutput('LongPortPrivate__stock_positions')).toBe(true);
         expect(canCompactJsonToolOutput('google_news_search')).toBe(true);
         expect(canCompactJsonToolOutput('cat')).toBe(false);
+    });
+});
+
+describe('tool output size guard', () => {
+    test('strips NUL bytes that would otherwise balloon the escaped log', () => {
+        // 二进制输出（cat 到图片/日志）里的 \0 会变成 6 字节的 \u0000 转义
+        expect(capToolOutput('a\u0000b\u0000c')).toBe('abc');
+    });
+
+    test('keeps short output untouched', () => {
+        expect(capToolOutput('hello')).toBe('hello');
+    });
+
+    test('keeps head and tail with an explicit omission note', () => {
+        const text = `${'A'.repeat(800)}${'B'.repeat(800)}`;
+
+        const capped = capToolOutput(text, 1000);
+
+        expect(capped.length).toBeLessThan(text.length);
+        expect(capped.startsWith('AAA')).toBe(true);
+        expect(capped.endsWith('BBB')).toBe(true);
+        expect(capped).toContain('已省略中间 700 个字符');
+        expect(capped).toContain('原长 1600');
     });
 });
