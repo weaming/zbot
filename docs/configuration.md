@@ -93,7 +93,7 @@ DeepSeek 思维模式还有一条回传约束：声明了工具时，历史里�
 | `providers.<name>.textOnlyModels` | 纯文本模型名关键词（小写子串匹配）；命中的模型在发请求前把图片块换成文字说明，避免整轮 404。同一张卡上的其他模型不受影响 |
 | `providers.<name>.contextWindowTokens` | 该服务的上下文窗口，压过内置模型表 |
 | `runtime.contextWindowTokens` | 全局上下文窗口，压过内置模型表 |
-| `runtime.reservedOutputTokens` / `autocompactBufferTokens` / `retainTailTokens` / `autocompactRatio` | 压缩与尾部保留预算 |
+| `runtime.reservedOutputTokens` / `autocompactBufferTokens` / `retainTailTokens` / `autocompactRatio` | 压缩与尾部保留预算；`retainTailTokens` 只用于自动压缩，手动 `/compact` 整段折叠不留尾 |
 | `runtime.toolResultSummary` | 工具结果头尾截取阈值（`thresholdTokens` / `headTokens` / `tailTokens`） |
 | `runtime.tokenizer` | 是否用真分词（`false` 回退估算，诊断用） |
 | `runtime.memoryUserId` | 记忆用户标识，默认 `0` |

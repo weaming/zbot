@@ -178,26 +178,16 @@ function turnBeforeKeepFrom(session: Session, keepFromMessageId: string): string
 }
 
 /**
- * 手动 /compact 的切分：默认整段折叠；候选历史超过窗口预算时，
- * 把「装不下的尾部」原样保留，而不是在压缩请求里丢掉最老的内容。
- * 下次请求 = 摘要 + 保留段 + 新输入，内容一点不丢。
+ * 手动 /compact 的切分：整段折叠，不留尾。
+ *
+ * 保留尾段（`retainTailTokens`）只服务自动压缩：那里「装不下的部分先原样留下」是为了
+ * 让一次压缩请求塞得下。手动压缩是用户明确要收掉历史，留尾等于只做了一半——摘要之后
+ * 还挂着一段原文，下次请求仍会带着它。
+ * 代价：待压缩历史自己超过窗口时，`prepareCompactionHistory` 只能把最老的头部裁掉，
+ * 那部分进不了摘要；「一点不丢」需要分批多轮压缩，不在手动压缩的承诺范围内。
  */
-export async function planManualCompaction(
-    session: Session,
-    options: { model?: string; systemPromptTokens?: number; toolsTokens?: number } = {},
-): Promise<{ turnsToCompact: ConversationTurn[]; keepFromMessageId?: string }> {
-    const candidates = compactionCandidates(session);
-    const budget = Math.max(
-        1_000,
-        getEffectiveContextWindowSize(options.model)
-            - (options.systemPromptTokens ?? 0)
-            - (options.toolsTokens ?? 0),
-    );
-    const candidateTokens = await countTurnsTokens(candidates, options.model);
-    return splitTurnsForCompaction(candidates, {
-        model: options.model,
-        retainedTailTokens: Math.max(0, candidateTokens - budget),
-    });
+export function planManualCompaction(session: Session): ConversationTurn[] {
+    return compactionCandidates(session);
 }
 
 /** 压缩请求的输入历史：已有摘要前缀 + 指定回合（保留原 turn 分组与工具结果投影规则）。 */
@@ -246,8 +236,8 @@ export function applyCompaction(
     });
 }
 
-/** 将内存消息 id 转为可跨重启重放的回合位置。 */
-export function findCompactionKeepFromPosition(
+/** 将内存消息 id 转为可跨重启重放的回合位置（自动压缩的保留段边界）。 */
+function findCompactionKeepFromPosition(
     session: Session,
     keepFromMessageId?: string,
 ): { turnIndex: number; messageIndex: number } | undefined {

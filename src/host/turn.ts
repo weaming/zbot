@@ -17,7 +17,6 @@ import {
     applyCompaction,
     autoCompactIfNeeded,
     buildCompactionHistory,
-    findCompactionKeepFromPosition,
     planManualCompaction,
     prepareCompactionHistory,
 } from "../services/auto-compact.js";
@@ -287,12 +286,8 @@ export async function compactSessionContext(
             model,
             ...(session.modelSelection ? { modelSelection: session.modelSelection } : {}),
         });
-        // 默认整段折叠；历史超窗时把装不下的尾部原样留下，不在压缩请求里丢最老的内容
-        const { turnsToCompact, keepFromMessageId } = await planManualCompaction(session, {
-            model,
-            systemPromptTokens,
-            toolsTokens,
-        });
+        // 手动压缩整段折叠、不留尾：摘要之后不再挂原文，压缩一步到位
+        const turnsToCompact = planManualCompaction(session);
         if (turnsToCompact.length === 0) throw new Error("当前没有可压缩的对话历史");
         // 压缩请求自己也是上游请求：历史已超窗时原样发送只会再吃一个 400，
         // 先裁到「窗口 - 系统提示 - 工具定义」的预算内（工具保留，缓存前缀不能换）
@@ -332,15 +327,12 @@ export async function compactSessionContext(
         if (abortController.signal.aborted) throw new DOMException("User terminated the request", "AbortError");
         const compactedContext = response.content.trim();
         if (!compactedContext) throw new Error("压缩结果为空");
-        const keepFromPosition = findCompactionKeepFromPosition(session, keepFromMessageId);
         const event = await host.eventLog.append(sessionId, "context_compacted", {
             compactedContext,
             instruction,
-            ...(keepFromMessageId ? { keepFromMessageId } : {}),
-            ...(keepFromPosition ? { keepFromPosition } : {}),
             usage: usage.requestCount ? usage : undefined,
         });
-        applyCompaction(session, compactedContext, { instruction, keepFromMessageId });
+        applyCompaction(session, compactedContext, { instruction });
         host.updateActiveSeq(sessionId, event.seq);
     } catch (error) {
         if (session && usage.requestCount) {

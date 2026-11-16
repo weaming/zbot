@@ -23,7 +23,7 @@ mock.module("../../src/services/chat-runtime.js", () => {
     };
 });
 
-const { autoCompactIfNeeded, compactActiveTurnMessagesIfNeeded, planManualCompaction } = await import("../../src/services/auto-compact.js");
+const { applyCompaction, autoCompactIfNeeded, compactActiveTurnMessagesIfNeeded, planManualCompaction } = await import("../../src/services/auto-compact.js");
 const { runTurnCore } = await import("../../src/services/run-turn.js");
 const { createEmptySession } = await import("../../src/events/session-replay.js");
 const { appendCompletedTurn, getSessionContextHistory, replaceWithCompactedContext } = await import(
@@ -355,21 +355,23 @@ describe("autoCompactIfNeeded 单次原子压缩", () => {
         expect(JSON.stringify(messages)).toContain("<active_turn_summary>");
     });
 
-    test("手动 /compact：不超窗时整段折叠，超窗时把装不下的尾部原样保留", async () => {
+    test("手动 /compact：整段折叠，超窗也不留尾", () => {
         const small = createEmptySession("sess-manual-small");
         appendCompletedTurn(small, ["问题"], [{ role: "assistant", content: "回答" }], true);
-        const whole = await planManualCompaction(small, { model: "deepseek-chat" });
-        expect(whole.keepFromMessageId).toBeUndefined();
-        expect(whole.turnsToCompact).toHaveLength(1);
+        expect(planManualCompaction(small)).toHaveLength(1);
 
-        // 三个 20k token 的回合：窗口 40k，装不下的部分必须留成保留段，而不是被裁掉
+        // 三个 20k token 的回合：窗口 40k 也照样全折进摘要（裁的是压缩请求自己的输入）
         const big = createEmptySession("sess-manual-big");
         for (let index = 1; index <= 3; index++) {
             appendCompletedTurn(big, [`问题 ${index}`], [{ role: "assistant", content: longText(20_000) }], true);
         }
-        const split = await planManualCompaction(big, { model: "deepseek-chat" });
-        expect(split.keepFromMessageId).toBe(big.turns[1]!.messages[0]!.id);
-        expect(split.turnsToCompact).toHaveLength(1);
+        expect(planManualCompaction(big)).toHaveLength(3);
+
+        // 写回后上下文只剩摘要：原文不再作为保留段挂在下次请求里
+        applyCompaction(big, "整段摘要");
+        expect(big.compactedThroughTurnId).toBe(big.turns.at(-1)!.id);
+        expect(big.compactedKeepFromMessageId).toBeUndefined();
+        expect(getSessionContextHistory(big).some(message => message.role === "tool")).toBe(false);
     });
 
     test("取消后不落压缩事件，不修改会话", async () => {
