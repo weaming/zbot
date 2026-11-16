@@ -25,6 +25,7 @@ mock.module("../../src/tui/herdr-reporter.js", () => ({
         supported: true,
         report: (state: string, message?: string) => herdrEvents.push({ kind: "state", args: [state, message] }),
         reportMetadata: (metadata: unknown) => herdrEvents.push({ kind: "metadata", args: [metadata] }),
+        refreshMetadata: () => herdrEvents.push({ kind: "refresh", args: [] }),
         release: () => herdrEvents.push({ kind: "release", args: [] }),
     },
 }));
