@@ -31,6 +31,8 @@ import type { ChatApiProtocol, ChatModelSelection } from "../types/chat-model.js
 import { getModelPreferencesFile } from "../utils/state-paths.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { countTextTokens } from "../utils/tokenizer.js";
+import { isRequestBodyTooLargeError } from "../utils/provider-context-limit.js";
+import { runCompactionRequest } from "./compaction-request.js";
 import { createHash } from "node:crypto";
 import {
     getDefaultModelTarget,
@@ -411,6 +413,16 @@ export function buildConversationHistory(
 }
 
 export async function runChatQuery(options: ChatRunOptions) {
+    if (options.initialRequestKind !== "context_compaction") return runChatQueryOnce(options);
+    return runCompactionRequest({
+        history: options.history ?? [],
+        signal: options.signal,
+        onProgress: options.onProgress,
+        run: history => runChatQueryOnce({ ...options, history }),
+    });
+}
+
+async function runChatQueryOnce(options: ChatRunOptions) {
     const settings = getChatApiSettings(options.modelSelection);
     if (options.modelOverride?.trim()) settings.model = options.modelOverride.trim();
     const settingsError = validateChatApiSettings(settings);
@@ -492,8 +504,8 @@ export async function runChatQuery(options: ChatRunOptions) {
             onConsumePending: options.onConsumePending,
             onSteerUpdate: options.onSteerUpdate,
             compactMessagesIfNeeded: options.autoCompactActiveTurn || options.compactOnProviderOverflow
-                ? async (messages, lastPromptTokens, providerMaxTokens) => {
-                    if (!options.autoCompactActiveTurn && providerMaxTokens === undefined) return undefined;
+                ? async (messages, lastPromptTokens, providerMaxTokens, providerBodyTooLarge) => {
+                    if (!options.autoCompactActiveTurn && providerMaxTokens === undefined && !providerBodyTooLarge) return undefined;
                     if (activeTurnCompactionFailed) return undefined;
                     const { compactActiveTurnMessagesIfNeeded } = await import("./auto-compact.js");
                     // 预算要扣掉工具定义：它随请求上行占窗口，但不在历史里
@@ -513,6 +525,7 @@ export async function runChatQuery(options: ChatRunOptions) {
                         contextEpochId: options.contextEpochId,
                         lastPromptTokens,
                         providerMaxTokens,
+                        providerBodyTooLarge,
                         ...(options.onTurnCompact ? { onCompacted: options.onTurnCompact } : {}),
                         onUsage: usage => options.onEvent?.({ type: "usage", usage }),
                         onProgress: message => {
@@ -535,6 +548,7 @@ export async function runChatQuery(options: ChatRunOptions) {
             pendingToolCalls: options.pendingToolCalls,
             onEvent: event => {
                 if (event.type === "error") {
+                    if (options.initialRequestKind === "context_compaction" && isRequestBodyTooLargeError(event.message)) return;
                     options.onEvent?.({ ...event, message: formatChatProviderError(event.message, settings) });
                     return;
                 }

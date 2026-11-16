@@ -20,7 +20,7 @@ import { buildUsageStats, toUsageInfo } from "./usage.js";
 import { isDeepSeekStyle, prepareRequest } from "./turn-request.js";
 import type { ImageInputCapability } from "./image-input.js";
 import type { LLMRequestKind } from "../../utils/logger.js";
-import { getPromptTooLongLimit, isInvalidAssistantMessageError } from "../../utils/provider-context-limit.js";
+import { getPromptTooLongLimit, isInvalidAssistantMessageError, isRequestBodyTooLargeError } from "../../utils/provider-context-limit.js";
 import { filterEmptyAssistantMessages } from "../../utils/conversation-history-repair.js";
 import { extractCitations } from "./citations.js";
 import { cleanGptText } from "./gpt-text.js";
@@ -65,7 +65,7 @@ export interface TurnContext {
   persistMessage(message: ChatMessage): void;
   consumePendingMessages?(): Array<string | UserMessageInput> | undefined;
   onConsumePending?(text: string, messages: Array<string | UserMessageInput>): void | Promise<void>;
-  compactMessagesIfNeeded?(messages: ChatMessage[], lastPromptTokens?: number, providerMaxTokens?: number): Promise<ChatMessage[] | undefined>;
+  compactMessagesIfNeeded?(messages: ChatMessage[], lastPromptTokens?: number, providerMaxTokens?: number, providerBodyTooLarge?: boolean): Promise<ChatMessage[] | undefined>;
   getToolDefinitions?(): any[];
   getContextReminders?(): string[] | undefined;
   onAssistantToolCallContent?(content: string): Promise<void> | void;
@@ -199,9 +199,12 @@ export async function runTurnLoop(ctx: TurnContext): Promise<TurnLoopResult> {
             }
           }
           const providerMaxTokens = getPromptTooLongLimit(error);
-          if (!providerMaxTokens || hasCompactedAfterOverflow || !ctx.compactMessagesIfNeeded) throw error;
+          const providerBodyTooLarge = isRequestBodyTooLargeError(error);
+          if ((!providerMaxTokens && !providerBodyTooLarge) || hasCompactedAfterOverflow || !ctx.compactMessagesIfNeeded) throw error;
           hasCompactedAfterOverflow = true;
-          const compacted = await ctx.compactMessagesIfNeeded(ctx.messages, lastUsageInfo?.promptTokens, providerMaxTokens);
+          const compacted = await ctx.compactMessagesIfNeeded(
+            ctx.messages, lastUsageInfo?.promptTokens, providerMaxTokens, providerBodyTooLarge,
+          );
           if (!compacted) throw error;
           if (ctx.signal?.aborted) throw new DOMException("User terminated the request", "AbortError");
           ctx.messages = compacted;

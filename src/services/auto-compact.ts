@@ -78,6 +78,7 @@ interface ActiveTurnCompactOptions {
     contextEpochId?: string;
     lastPromptTokens?: number;
     providerMaxTokens?: number;
+    providerBodyTooLarge?: boolean;
     onUsage?: (usage: UsageInfo) => void;
     onFailure?: () => void;
 }
@@ -87,7 +88,7 @@ export async function compactActiveTurnMessagesIfNeeded(
     messages: any[],
     options: ActiveTurnCompactOptions,
 ): Promise<any[] | undefined> {
-    if (options.providerMaxTokens === undefined) {
+    if (options.providerMaxTokens === undefined && !options.providerBodyTooLarge) {
         // 上一轮 provider 上报的真实输入离阈值还远时无需再数一遍（工具结果这类内容启发式会低估，
         // 所以不用启发式做跳过判据）。
         if (canSkipPreciseCount(options.model, options.lastPromptTokens)) return undefined;

@@ -20,6 +20,17 @@ const PROMPT_TOO_LONG_PATTERNS: Array<{
     },
 ];
 
+/** 请求体字节限制独立于模型 token 窗口，不能按 token 超窗文案判断。 */
+export function isRequestBodyTooLargeError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    const status = typeof error === "object" && error !== null && "status" in error
+        ? Number((error as { status?: unknown }).status)
+        : undefined;
+    return Number.isFinite(status)
+        ? status === 413
+        : /(?:^\s*413\b|\bHTTP\s+413\b)/i.test(message);
+}
+
 /** 识别 provider 明确返回的 HTTP 400 输入超窗错误，并读取实际窗口上限。 */
 export function getPromptTooLongLimit(error: unknown): number | undefined {
     const message = error instanceof Error ? error.message : String(error);

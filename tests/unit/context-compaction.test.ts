@@ -92,6 +92,25 @@ describe("shouldAutoCompact 与 lastPromptTokens 的关系", () => {
 });
 
 describe("provider 超窗后的本轮原子压缩", () => {
+    test("413 强制压缩，不受小历史及上一请求低 token 水位阻止", async () => {
+        let requests = 0;
+        runChatQueryImpl = async () => {
+            requests++;
+            return { content: "请求体压缩摘要", toolCalls: 0, messages: [] };
+        };
+        const result = await compactActiveTurnMessagesIfNeeded([
+            { role: "user", content: "继续" },
+        ], {
+            model: "deepseek-chat",
+            systemPrompt: "系统提示",
+            userId: 1,
+            lastPromptTokens: 10,
+            providerBodyTooLarge: true,
+        });
+        expect(requests).toBe(1);
+        expect(result?.[0]?.content).toContain("请求体压缩摘要");
+    });
+
     test("主请求超窗后先尝试一次禁止工具调用的完整摘要", async () => {
         const histories: string[] = [];
         runChatQueryImpl = async options => {

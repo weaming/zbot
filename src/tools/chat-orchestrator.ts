@@ -183,7 +183,7 @@ export interface OrchestratorOptions {
   onConsumePending?: (text: string, messages: Array<string | UserMessageInput>) => void | Promise<void>;
   onSteerUpdate?: (update: SteerUpdate) => Promise<void>;
   /** 后续工具轮次发请求前，可替换仅用于请求的上下文；完整本轮消息仍单独保留。 */
-  compactMessagesIfNeeded?: (messages: ChatMessage[], lastPromptTokens?: number, providerMaxTokens?: number) => Promise<ChatMessage[] | undefined>;
+  compactMessagesIfNeeded?: (messages: ChatMessage[], lastPromptTokens?: number, providerMaxTokens?: number, providerBodyTooLarge?: boolean) => Promise<ChatMessage[] | undefined>;
   /** 每轮请求前返回仅用于本次请求的提醒消息（不落盘、不进历史），用于任务清单等状态回环。 */
   getContextReminders?: () => string[] | undefined;
   /** 回合内每条完整消息定稿时的落盘回调（串行调用）。 */

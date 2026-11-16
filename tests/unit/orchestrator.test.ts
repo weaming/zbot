@@ -772,6 +772,31 @@ describe("Chat Orchestrator", () => {
     expect(requests[1].messages).toEqual([{ role: "user", content: "压缩后的上下文" }]);
   });
 
+  test.each(["chat_completions", "responses"] as const)("HTTP 413 强制压缩且最多重试一次（%s）", async protocol => {
+    const { executeWithChat } = await import('../../src/tools/chat-orchestrator.js');
+    const requests: any[] = [];
+    let compactions = 0;
+    const create = async (request: any) => {
+      requests.push(request);
+      throw Object.assign(new Error("413 Failed to buffer the request body: length limit exceeded"), { status: 413 });
+    };
+
+    await expect(executeWithChat({
+      query: "继续",
+      client: { baseURL: "http://test.invalid", protocol, create, createResponse: create },
+      model: "test-model",
+      compactMessagesIfNeeded: async (_messages, _lastPromptTokens, maxTokens, bodyTooLarge) => {
+        expect(maxTokens).toBeUndefined();
+        expect(bodyTooLarge).toBe(true);
+        compactions++;
+        return [{ role: "user", content: "摘要" }];
+      },
+    })).rejects.toThrow("length limit exceeded");
+
+    expect(requests).toHaveLength(2);
+    expect(compactions).toBe(1);
+  });
+
   test("压缩后再次超窗时保留第二次 provider 错误", async () => {
     const { executeWithChat } = await import('../../src/tools/chat-orchestrator.js');
     const error = Object.assign(new Error("400 WorkBuddy AI: prompt is too long: 1048783 tokens > 1048576 maximum"), { status: 400 });

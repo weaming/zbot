@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { getPromptTooLongLimit, isInvalidAssistantMessageError } from "../../src/utils/provider-context-limit.js";
+import { getPromptTooLongLimit, isInvalidAssistantMessageError, isRequestBodyTooLargeError } from "../../src/utils/provider-context-limit.js";
 
 const deepseekOverflow = new Error(
     "LLM provider 请求失败（HTTP 400）：400 This model's maximum context length is 1048576 tokens. "
@@ -13,6 +13,16 @@ const deepseekOverflow = new Error(
 );
 
 describe("getPromptTooLongLimit", () => {
+    test("413 字节限制与 token 超窗独立识别，显式状态码优先", () => {
+        expect(isRequestBodyTooLargeError(Object.assign(new Error("request too large"), { status: 413 }))).toBe(true);
+        expect(isRequestBodyTooLargeError(new Error("413 Failed to buffer the request body: length limit exceeded"))).toBe(true);
+        expect(isRequestBodyTooLargeError("LLM provider 请求失败（HTTP 413）：length limit exceeded")).toBe(true);
+        expect(isRequestBodyTooLargeError(Object.assign(new Error("413 upstream text"), { status: 500 }))).toBe(false);
+        expect(isRequestBodyTooLargeError(new Error("4130 tokens"))).toBe(false);
+        expect(isRequestBodyTooLargeError(deepseekOverflow)).toBe(false);
+        expect(getPromptTooLongLimit(new Error("413 request too large"))).toBeUndefined();
+    });
+
     test("OpenAI / DeepSeek 文案返回模型窗口上限", () => {
         expect(getPromptTooLongLimit(deepseekOverflow)).toBe(1_048_576);
     });
