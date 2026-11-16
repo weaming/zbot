@@ -29,7 +29,8 @@ interface SessionDirectoryEntry {
 export interface SessionDirectory {
     list(options?: { includeArchived?: boolean }): Promise<SessionDirectoryEntry[]>;
     /** 重新认领并取消归档一个已关闭会话。 */
-    wake?(sessionId: string): Promise<void>;
+    /** callerSessionId 是发起唤醒的会话：工作子会话只能由它的直接父会话唤醒。 */
+    wake?(sessionId: string, options?: { callerSessionId?: string }): Promise<void>;
 }
 
 /** 一条会话间结果记录：对方回合的产出回传（读自事件日志，供工具回查）。 */
@@ -67,6 +68,8 @@ export interface SessionRuntimeCapabilities {
     control?: SessionControl;
     /** 会话目录（列出/唤醒）。 */
     directory?: SessionDirectory;
+    /** 该会话是否是工作子会话（由父会话派生）：子会话不下发派生/管理类工具。 */
+    isChildSession?(sessionId: string): boolean;
     /** 最近会话间结果回查。 */
     recentPeerResults?(sessionId: string, limit: number): Promise<PeerResultRecord[]>;
     /** 会话 cwd 落盘（cwd 工具 / 命令共用）。 */
@@ -145,6 +148,12 @@ export function getSessionControl(sessionId?: string): SessionControl | undefine
 
 export function getSessionDirectory(sessionId?: string): SessionDirectory | undefined {
     return pick("directory", sessionId);
+}
+
+/** 工作子会话判定；找不到注册项时按普通会话处理（执行层仍会拒绝非法管理动作）。 */
+export function isChildSession(sessionId?: string): boolean {
+    if (!sessionId) return false;
+    return pick("isChildSession", sessionId)?.(sessionId) ?? false;
 }
 
 export function getPeerResultHistory(sessionId?: string): PeerResultHistory | undefined {

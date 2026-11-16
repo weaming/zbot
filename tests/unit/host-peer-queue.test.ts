@@ -275,7 +275,10 @@ describe("排队投递", () => {
             queueIfBusy: true,
         });
 
-        const cancelPromise = agent.sessionControl.cancelSpawnedSession(child, { close: false });
+        const cancelPromise = agent.sessionControl.cancelSpawnedSession(child, {
+            close: false,
+            callerSessionId: sessionA,
+        });
         release();
         expect(await cancelPromise).toEqual({ ok: true, closed: false });
 

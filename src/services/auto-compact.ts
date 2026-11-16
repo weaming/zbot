@@ -270,7 +270,7 @@ export async function autoCompactIfNeeded(
 ): Promise<AutoCompactResult> {
     const userId = normalizeMemoryUserId(options.userId);
     // 判定要带上系统提示的占用：只有历史估算会低估真实请求量，漏判就直接涨到 provider 400
-    const systemPrompt = buildSystemPrompt(session.cwd);
+    const systemPrompt = buildSystemPrompt(session.cwd, session);
 
     // 上一回合 provider 上报的真实输入离阈值还远时直接放行：精确计数要对整段历史分词，
     // 长会话单次数百毫秒。

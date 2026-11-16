@@ -7,7 +7,7 @@ import type { UIEvent } from "../events/ui-events.js";
 import type { AgentEvent, AgentEventPayloads } from "../events/agent-events.js";
 import type { ClaimResult } from "../control/channel.js";
 import type { PeerOwnership } from "../control/registry.js";
-import type { Session, SessionOrigin } from "../types/session.js";
+import type { Session, SessionDelegation, SessionOrigin } from "../types/session.js";
 import type { ToolCall } from "../types/tool-call.js";
 import type { LLMRequestKind } from "../utils/logger.js";
 import type { ImageAssetRef, UserMessageInput } from "../types/image.js";
@@ -48,6 +48,8 @@ export interface SessionHostOptions {
 
 export interface SessionSummary {
     sessionId: string;
+    /** 由父会话派生的子会话才有；列表据此标注「谁的工作子会话」。 */
+    delegation?: SessionDelegation;
     /** 会话来源（谁建的）；老会话缺失时按 user 理解。 */
     origin?: SessionOrigin;
     /** 会话绑定的工作目录（取自 session_created 事件），面板用于区分同名会话。 */
@@ -94,6 +96,8 @@ export interface SessionCreateInit {
     origin?: SessionOrigin;
     /** 建会话时即固化标题（不依赖前端回调，无 UI 宿主也能带上标题）。 */
     title?: string;
+    /** 父会话派生时写入的创建关系；普通会话不传。 */
+    delegation?: SessionDelegation;
 }
 
 /**
@@ -150,6 +154,8 @@ export interface SessionLifecycle {
     createSession(cwd?: string, init?: SessionCreateInit): Promise<{ sessionId: string }>;
     /** 丢弃该会话的进程内缓存（磁盘上的日志已删除时调用）。 */
     forgetSession(sessionId: string): void;
+    /** 保证会话在磁盘上有一条 session_created：空会话也能在重启后被恢复。 */
+    ensureSessionCreated?(sessionId: string): Promise<void>;
     clearSession(sessionId: string): Promise<void>;
     deleteSession(sessionId: string): Promise<void>;
     /**
@@ -167,7 +173,18 @@ export interface SessionLifecycle {
      * 被其他实例持有时发起协商式转移，持有者忙或无应答则失败（绝不夺权）。
      * noNegotiate：被其他实例持有时直接失败，不发起协商式转移（编程化入口用）。
      */
-    claimSession(sessionId: string, options?: { noNegotiate?: boolean }): Promise<ClaimResult>;
+    /**
+     * 认领会话：本实例成为该会话的唯一持有者。
+     * 子会话必须带 parentSessionId（真实调用方），且父会话已由本实例持有；子会话不参与协商转移。
+     */
+    claimSession(
+        sessionId: string,
+        options?: { noNegotiate?: boolean; parentSessionId?: string },
+    ): Promise<ClaimResult>;
+    /** 本宿主实例的稳定标识（同进程多宿主各自不同）：写入创建事实，仅用于诊断。 */
+    readonly instanceId: string;
+    /** 持久化的创建关系：子会话返回父会话，根会话返回 undefined（不猜旧数据）。 */
+    getSessionDelegation(sessionId: string): Promise<SessionDelegation | undefined>;
     /**
      * 放弃会话持有：关闭监听、释放 socket 文件，并摘掉本实例的内存视图。
      * 事件日志不动，别的实例（或本实例面板）随后可重新认领。

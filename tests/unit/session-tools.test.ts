@@ -42,6 +42,9 @@ const ARCHIVED_SESSION = { sessionId: "01JAAAAAAAAAAAAAAAAAAAAAA4", title: "å·²å
 function makeHost(): SessionControlHost {
     return {
         title: (sessionId) => SESSIONS.find(item => item.sessionId === sessionId)?.title,
+        instanceId: "test-instance",
+        getSessionDelegation: async () => undefined,
+        holdsSession: () => true,
         isBusy: (sessionId) => busy.has(sessionId),
         createSession: async () => ({ sessionId: `01JSPAWN${String(spawned.length + 1).padStart(18, "0")}` }),
         sessionCwd: async (sessionId) => `/tmp/cwd-${sessionId.slice(-1)}`,

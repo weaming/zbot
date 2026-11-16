@@ -27,6 +27,7 @@ import { listOwnership, probeOwnership, type PeerOwnership } from "./registry.js
 import { PeerServer } from "./server.js";
 import type { SessionOrigin } from "../types/session.js";
 import { isSameSession } from "../utils/session-id.js";
+import type { SessionDelegation } from "../types/session.js";
 
 /** `session_send` 的失败原因：只有 unreachable 表示目标不在线，busy 由调用方决定是否重试。 */
 export type PeerSendError = "unreachable" | "busy" | "queue_full" | "internal";
@@ -50,6 +51,8 @@ export interface PeerSendOutcome {
 
 export type ClaimResult =
     | { ok: true }
+    /** 工作子会话只允许其直接父会话恢复或管理；请求者不是父会话，或父会话不在本实例。 */
+    | { ok: false; reason: "ownership_denied"; message: string }
     /** 持有者忙，拒绝释放。 */
     | { ok: false; reason: "busy"; pid?: number }
     /** 持有者无应答（进程卡死/通道异常），无法确认状态。 */
@@ -65,6 +68,12 @@ export type { WaitOutcome };
 
 /** 通道层需要宿主（agent/UI）提供的会话能力。 */
 export interface SessionControlHost {
+    /** 本宿主实例标识：写入子会话创建事实，不参与持有权判断。 */
+    readonly instanceId: string;
+    /** 持久化的创建关系：子会话返回父会话，根会话返回 undefined。 */
+    getSessionDelegation(sessionId: string): Promise<SessionDelegation | undefined>;
+    /** 该会话是否由本宿主实例实际持有（活跃或已认领）：子会话只跟着父会话走。 */
+    holdsSession(sessionId: string): boolean;
     /** 会话展示名（who 握手用）。 */
     title(sessionId: string): string | undefined;
     /** 是否正在跑 turn。 */
@@ -72,7 +81,7 @@ export interface SessionControlHost {
     /** 新建一个空会话（只进内存，不落盘）；cwd 缺省用宿主默认目录。 */
     createSession(
         cwd?: string,
-        init?: { origin?: SessionOrigin; title?: string },
+        init?: { origin?: SessionOrigin; title?: string; delegation?: SessionDelegation },
     ): Promise<{ sessionId: string }>;
     /** 会话绑定的工作目录（派生新会话时继承父会话）。 */
     sessionCwd(sessionId: string): Promise<string>;
@@ -180,8 +189,37 @@ export class SessionControl {
      * noNegotiate：被其他实例持有时直接失败，不发起协商式转移 ——
      * 编程化入口（HTTP）不该把会话从正在运行的 TUI 里抢走。
      */
-    async claim(sessionId: string, options: { noNegotiate?: boolean } = {}): Promise<ClaimResult> {
+    async claim(
+        sessionId: string,
+        options: { noNegotiate?: boolean; parentSessionId?: string } = {},
+    ): Promise<ClaimResult> {
         if (this.servers.has(sessionId)) return { ok: true };
+
+        // 工作子会话：只能由直接父会话在本实例恢复；不参与任何协商转移。
+        const delegation = await this.host.getSessionDelegation(sessionId);
+        if (delegation) {
+            if (options.parentSessionId !== delegation.parentSessionId) {
+                return {
+                    ok: false,
+                    reason: "ownership_denied",
+                    message: `会话 ${sessionId} 是会话 ${delegation.parentSessionId} 的工作子会话，只能由该父会话恢复或管理`,
+                };
+            }
+            if (!this.host.holdsSession(delegation.parentSessionId)) {
+                return {
+                    ok: false,
+                    reason: "ownership_denied",
+                    message: `父会话 ${delegation.parentSessionId} 未由本实例持有，不能恢复或管理其工作子会话`,
+                };
+            }
+            if (await this.host.getSessionDelegation(delegation.parentSessionId)) {
+                return {
+                    ok: false,
+                    reason: "ownership_denied",
+                    message: "父会话本身是工作子会话：zbot 只允许一层子会话",
+                };
+            }
+        }
 
         const server = new PeerServer(
             sessionId,
@@ -197,6 +235,8 @@ export class SessionControl {
                     ? { rename: (title: string) => this.host.rename!(sessionId, title) }
                     : {}),
                 release: () => {
+                    // 子会话的创建关系不可转移：外部实例的 release 协商一律拒绝。
+                    if (delegation) return false;
                     if (this.host.isBusy(sessionId)) return false;
                     this.servers.delete(sessionId);
                     this.spawned.delete(sessionId);
@@ -218,6 +258,13 @@ export class SessionControl {
             return { ok: true };
         }
         if (first.reason === "error") return { ok: false, reason: "error", message: first.message };
+
+        // 子会话不做协商：被别人持有就是不可用，等父会话处理。
+        if (delegation) {
+            return first.pid !== undefined
+                ? { ok: false, reason: "busy", pid: first.pid }
+                : { ok: false, reason: "busy" };
+        }
 
         // 被其他实例持有：协商式转移，持有者忙则放弃
         if (first.pid === process.pid) return { ok: false, reason: "error", message: "会话已被本实例持有" };
@@ -287,10 +334,22 @@ export class SessionControl {
             };
         }
 
-        const cwd = await this.host.sessionCwd(parentSessionId);
-        const { sessionId } = await this.host.createSession(cwd, { origin: "tool", title });
+        // zbot 只允许一层：工作子会话不能再派生，父会话必须是本实例持有的根会话。
+        if (await this.host.getSessionDelegation(parentSessionId)) {
+            return { ok: false, error: "工作子会话不能再创建子会话（zbot 只允许一层）" };
+        }
+        if (!this.host.holdsSession(parentSessionId)) {
+            return { ok: false, error: "父会话未由本实例持有，不能创建子会话" };
+        }
 
-        const claimed = await this.claim(sessionId);
+        const cwd = await this.host.sessionCwd(parentSessionId);
+        const { sessionId } = await this.host.createSession(cwd, {
+            origin: "tool",
+            title,
+            delegation: { parentSessionId, creatorInstanceId: this.host.instanceId },
+        });
+
+        const claimed = await this.claim(sessionId, { parentSessionId });
         if (!claimed.ok) {
             // 认领失败（极端情况）：把它从宿主会话列表摘掉，不留一个谁都用不了的会话
             this.host.onReleased(sessionId);
@@ -306,8 +365,16 @@ export class SessionControl {
     /** 归档本实例派生且当前空闲的子会话；不允许工具关闭任意用户会话。 */
     async closeSpawnedSession(
         sessionId: string,
-        options: { automatic?: boolean } = {},
+        options: { automatic?: boolean; callerSessionId?: string } = {},
     ): Promise<{ ok: true } | { ok: false; error: string }> {
+        const delegation = await this.host.getSessionDelegation(sessionId);
+        if (
+            delegation
+            && options.callerSessionId !== delegation.parentSessionId
+            && options.automatic !== true
+        ) {
+            return { ok: false, error: `只能由父会话 ${delegation.parentSessionId} 关闭这个工作子会话` };
+        }
         if (!this.spawned.has(sessionId)) {
             return { ok: false, error: "只能关闭本实例派生或唤醒后接管且仍由本实例持有的子会话" };
         }
@@ -333,8 +400,12 @@ export class SessionControl {
     /** 中止本实例管理的子会话；可选等 turn 收尾后归档。 */
     async cancelSpawnedSession(
         sessionId: string,
-        options: { close?: boolean } = {},
+        options: { close?: boolean; callerSessionId?: string } = {},
     ): Promise<{ ok: true; closed: boolean } | { ok: false; error: string }> {
+        const delegation = await this.host.getSessionDelegation(sessionId);
+        if (delegation && options.callerSessionId !== delegation.parentSessionId) {
+            return { ok: false, error: `只能由父会话 ${delegation.parentSessionId} 取消这个工作子会话` };
+        }
         if (!this.spawned.has(sessionId)) {
             return { ok: false, error: "只能取消本实例派生或唤醒后接管的子会话" };
         }
@@ -362,7 +433,9 @@ export class SessionControl {
     }
 
     /** 唤醒已归档会话后，将其纳入本实例可安全关闭的子会话集合。 */
-    adoptSpawnedSession(sessionId: string): boolean {
+    async adoptSpawnedSession(sessionId: string, callerSessionId?: string): Promise<boolean> {
+        const delegation = await this.host.getSessionDelegation(sessionId);
+        if (delegation && callerSessionId !== delegation.parentSessionId) return false;
         if (!this.servers.has(sessionId)) return false;
         if (this.spawned.has(sessionId)) return true;
         if (this.spawned.size >= MAX_SPAWNED_SESSIONS) return false;
@@ -412,6 +485,19 @@ export class SessionControl {
         if (isSameSession(from, to)) throw new PeerSendFailure("internal", "不能给自己发消息");
         if (this.closingSpawned.has(to)) {
             throw new PeerSendFailure("busy", `会话 ${to} 正在取消/关闭，请稍后重试`);
+        }
+
+        // 工作子会话只与直接父会话通信：外部会话、兄弟会话都不能直接派活。
+        const targetDelegation = await this.host.getSessionDelegation(to);
+        if (targetDelegation && from !== targetDelegation.parentSessionId) {
+            throw new PeerSendFailure(
+                "internal",
+                `会话 ${to} 是会话 ${targetDelegation.parentSessionId} 的工作子会话，只接受父会话的消息`,
+            );
+        }
+        const callerDelegation = await this.host.getSessionDelegation(from);
+        if (callerDelegation && to !== callerDelegation.parentSessionId) {
+            throw new PeerSendFailure("internal", "工作子会话只能与父会话通信");
         }
 
         const message = createPeerMessage({
@@ -745,6 +831,7 @@ export function describeClaimFailure(result: ClaimResult): string {
             : "会话正由其他实例执行中，turn 结束后才能接管";
     }
     if (result.reason === "unresponsive") return "无法确认持有者状态（未应答），暂不能接管";
+    if (result.reason === "ownership_denied") return result.message;
     if (result.reason === "raced") {
         return result.winnerPid
             ? `持有权被其他实例（PID ${result.winnerPid}）抢先取得，请稍后重试`

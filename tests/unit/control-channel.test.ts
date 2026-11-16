@@ -145,6 +145,9 @@ function makeHost(): RecordingHost {
         renamed: [],
         busy: new Set<string>(),
         title: (sessionId) => `会话 ${sessionId}`,
+        instanceId: "test-instance",
+        getSessionDelegation: async () => undefined,
+        holdsSession: () => true,
         isBusy: (sessionId) => host.busy.has(sessionId),
         createSession: async (cwd) => {
             host.createdCwds.push(cwd ?? "");

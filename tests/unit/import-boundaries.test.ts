@@ -60,3 +60,15 @@ test("web 入口按 web 层校验，不得依赖 tui/", () => {
         fs.rmSync(root, { recursive: true, force: true });
     }
 });
+
+
+test("stdio 入口和协议不能引入 TUI/web", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "zbot-boundary-stdio-"));
+    try {
+        fs.mkdirSync(path.join(root, "cli"));
+        fs.writeFileSync(path.join(root, "cli", "stdio.ts"), 'import "../tui/app.js";\n');
+        fs.writeFileSync(path.join(root, "cli", "stdio-protocol.ts"), 'import "../web/http-server.js";\n');
+        const violations = checkImportBoundaries(root);
+        expect(violations.map(item => `${item.from}:${item.to}`).sort()).toEqual(["stdio:tui", "stdio:web"]);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

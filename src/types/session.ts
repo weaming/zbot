@@ -9,6 +9,17 @@ export const MAX_SESSION_TITLE_LENGTH = 200;
  */
 export type SessionOrigin = "user" | "web" | "job" | "tool";
 
+/**
+ * 会话的创建关系：由谁派生的。子会话只有一层，父必然是根会话。
+ *
+ * 这是持久化的创建事实，不是运行期持有权：归档、清空、重放、换实例恢复都不能改写它。
+ * creatorInstanceId 只用于诊断「哪个宿主实例建的」，判断能否恢复一律看 parentSessionId。
+ */
+export interface SessionDelegation {
+    parentSessionId: string;
+    creatorInstanceId: string;
+}
+
 export interface ToolResultPolicy {
     mode: ToolResultMode;
 }
@@ -76,6 +87,8 @@ interface ContextState {
 
 export interface Session {
     sessionId: string; // ULID，会话唯一标识
+    /** 由父会话派生的子会话才有；普通用户会话没有该字段。 */
+    delegation?: SessionDelegation;
     /** 会话来源（建会话的一方）；老会话缺省视为 user。 */
     origin?: SessionOrigin;
     /** 会话绑定的工作目录：新会话取创建时当前工具目录；旧数据无记录时回退当前工具目录。恢复/切换会话时作为工具执行与路径渲染基准。 */

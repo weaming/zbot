@@ -130,9 +130,59 @@ describe("会话间生命周期命令", () => {
         expect(agent.isSessionClaimed(newId!)).toBe(true);
         expect((await agent.listSessions()).find(item => item.sessionId === newId)?.title).toBe("临时子会话");
 
-        const reply = await agent.sessionControl.send(sessionA, newId!, "你好", { expectResult: true });
-        await waitFor(() => readEvents(sessionA).some(event =>
+        // 子会话属于创建它的会话 B：兄弟/其他会话不能直接派活。
+        await expect(agent.sessionControl.send(sessionA, newId!, "你好")).rejects.toThrow(
+            /只接受父会话/,
+        );
+        const reply = await agent.sessionControl.send(sessionB, newId!, "你好", { expectResult: true });
+        await waitFor(() => readEvents(sessionB).some(event =>
             event.type === "peer_result" && event.payload.msgId === reply.message.id && event.payload.ok === true));
+    });
+
+    test("无标题子会话也持久化创建关系：释放后父会话仍能重新认领", async () => {
+        const spawned = await agent.sessionControl.spawnSession(sessionA);
+        expect(spawned.ok).toBe(true);
+        if (!spawned.ok) return;
+
+        await agent.closeSession(spawned.sessionId);
+        agent.releaseSession(spawned.sessionId, { cause: "tool" });
+
+        // 已不在内存：从落盘的 session_created 读回创建关系。
+        expect(await agent.getSessionDelegation(spawned.sessionId)).toEqual({
+            parentSessionId: sessionA,
+            creatorInstanceId: agent.instanceId,
+        });
+        expect((await agent.claimSession(spawned.sessionId, { parentSessionId: sessionB })).ok).toBe(false);
+        expect((await agent.claimSession(spawned.sessionId, { parentSessionId: sessionA })).ok).toBe(true);
+    });
+
+    test("父会话换实例恢复后，仍可控制此前创建的子会话", async () => {
+        const spawned = await agent.sessionControl.spawnSession(sessionA, "旧子会话");
+        if (!spawned.ok) throw new Error(spawned.error);
+        await agent.closeSession(spawned.sessionId);
+        agent.releaseSession(spawned.sessionId, { cause: "tool" });
+        await agent.closeSession(sessionA);
+        agent.releaseSession(sessionA, { cause: "tool" });
+
+        // 新实例只按会话 ID 恢复父会话：不依赖旧进程的 PID 或内存归属。
+        const resumed = new LocalSessionHost();
+        try {
+            expect((await resumed.claimSession(sessionA)).ok).toBe(true);
+            expect(
+                (await resumed.claimSession(spawned.sessionId, { parentSessionId: sessionA })).ok,
+            ).toBe(true);
+            // 未恢复父会话的实例不能认领这个子会话。
+            const stranger = new LocalSessionHost();
+            try {
+                expect(
+                    (await stranger.claimSession(spawned.sessionId, { parentSessionId: sessionA })).ok,
+                ).toBe(false);
+            } finally {
+                await stranger.close();
+            }
+        } finally {
+            await resumed.close();
+        }
     });
 
     test("/close 先把结果送达，再释放持有；数据保留", async () => {

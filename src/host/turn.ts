@@ -25,7 +25,7 @@ import { acquireSessionLock, type SessionLockHandle } from "../utils/session-loc
 import { getDefaultMemoryUserId } from "../utils/runtime-paths.js";
 import { emptyUsage, mergeUsage, type UIEvent } from "../events/ui-events.js";
 import type { EventLog } from "../events/event-log.js";
-import type { SessionReplay } from "../events/session-replay.js";
+import { sessionCreatedPayload, type SessionReplay } from "../events/session-replay.js";
 import type { UsageInfo } from "../types/chat.js";
 import type { Session } from "../types/session.js";
 import type { ActiveSession, TurnSpec } from "./session-host-types.js";
@@ -95,7 +95,7 @@ export async function runSessionTurn(
             userMessages,
             query: spec.query,
             queryContent: userMessages.at(-1) ? toUserContent(userMessages.at(-1)!) : undefined,
-            systemPrompt: buildSystemPrompt(activeSession.cwd),
+            systemPrompt: buildSystemPrompt(activeSession.cwd, activeSession),
             model: getChatApiSettings(activeSession.modelSelection).model,
             buildHistory: () =>
                 buildConversationHistory(activeSession, userMessages, { skipToolCallIds: spec.skipToolCallIds }),
@@ -113,7 +113,11 @@ export async function runSessionTurn(
         }, {
             persistUserMessages: async (texts, tid) => {
                 if ((await host.eventLog.lastSeq(sessionId)) === 0) {
-                    const created = await host.eventLog.append(sessionId, "session_created", { cwd: activeSession.cwd });
+                    const created = await host.eventLog.append(
+                        sessionId,
+                        "session_created",
+                        sessionCreatedPayload(activeSession.cwd, activeSession.origin, activeSession.delegation),
+                    );
                     host.updateActiveSeq(sessionId, created.seq);
                 }
                 for (const [index, input] of texts.entries()) {
@@ -276,7 +280,7 @@ export async function compactSessionContext(
         lock = await acquireSessionLock(sessionId);
         session = await host.requireActiveSession(sessionId);
         const model = getChatApiSettings(session.modelSelection).model;
-        const systemPrompt = buildSystemPrompt(session.cwd);
+        const systemPrompt = buildSystemPrompt(session.cwd, session);
         const systemPromptTokens = await countTextTokens(systemPrompt, model);
         const toolsTokens = await getToolDefinitionsTokens({
             sessionId,

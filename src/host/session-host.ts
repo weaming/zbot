@@ -13,7 +13,8 @@
 
 import path from "node:path";
 import { buildSystemPrompt, closeChatSessionTransport, deleteResponsesBaseline, steerChatSession } from "../services/chat-runtime.js";
-import { createEmptySession, eventCwd, SessionReplay } from "../events/session-replay.js";
+import { createEmptySession, eventCwd, sessionCreatedPayload, SessionReplay } from "../events/session-replay.js";
+import type { SessionDelegation } from "../types/session.js";
 import { isEmptySession } from "../events/session-emptiness.js";
 import { EventLog } from "../events/event-log.js";
 import { removeSessionArtifacts } from "../events/session-cleanup.js";
@@ -99,6 +100,8 @@ interface RuntimeReloadResult {
 }
 
 export class LocalSessionHost implements SessionHost {
+    /** 本宿主实例标识：同进程多宿主各自不同；写入子会话创建事实，不参与持有权判断。 */
+    readonly instanceId = createUlid();
     // TUI 会话数据直接使用 sessions/ 根目录。
     private readonly eventLog = new EventLog();
     private readonly replay = new SessionReplay(this.eventLog);
@@ -177,6 +180,10 @@ export class LocalSessionHost implements SessionHost {
     ) {
         this.startupCwd = options.startupCwd ?? process.cwd();
         const host: SessionControlHost = {
+            instanceId: this.instanceId,
+            getSessionDelegation: (sessionId) => this.getSessionDelegation(sessionId),
+            holdsSession: (sessionId) =>
+                this.activeSessions.has(sessionId) || this.control.isClaimed(sessionId),
             title: (sessionId) => this.activeSessions.get(sessionId)?.session.title,
             isBusy: (sessionId) => this.isSessionBusy(sessionId),
             createSession: (cwd, init) => this.createSession(cwd, init),
@@ -225,6 +232,7 @@ export class LocalSessionHost implements SessionHost {
             // 会话间工具由"正在跑回合的宿主"处理：活跃会话与已认领会话都算自己的
             ownsSession: sessionId => this.activeSessions.has(sessionId) || this.control.isClaimed(sessionId),
             control: this.control,
+            isChildSession: sessionId => Boolean(this.activeSessions.get(sessionId)?.session.delegation),
             setSessionCwd: (sessionId, cwd) => this.setSessionCwd(sessionId, cwd),
             directory: {
                 list: async (options = {}) => {
@@ -237,7 +245,7 @@ export class LocalSessionHost implements SessionHost {
                             ...(session.archived ? { archived: true } : {}),
                         }));
                 },
-                wake: sessionId => this.wakeArchivedSession(sessionId),
+                wake: (sessionId, options) => this.wakeArchivedSession(sessionId, options?.callerSessionId),
             },
             recentPeerResults: (sessionId, limit) => this.recentPeerResults(sessionId, limit),
         });
@@ -262,8 +270,12 @@ export class LocalSessionHost implements SessionHost {
         payload: AgentEventPayloads[T],
     ): Promise<void> {
         if ((await this.eventLog.lastSeq(sessionId)) === 0) {
-            const cwd = this.activeSessions.get(sessionId)?.session.cwd ?? this.startupCwd;
-            const created = await this.eventLog.append(sessionId, "session_created", { cwd });
+            const active = this.activeSessions.get(sessionId)?.session;
+            const created = await this.eventLog.append(
+                sessionId,
+                "session_created",
+                sessionCreatedPayload(active?.cwd ?? this.startupCwd, active?.origin, active?.delegation),
+            );
             this.updateActiveSeq(sessionId, created.seq);
         }
         const event = await this.eventLog.append(sessionId, type, payload);
@@ -275,12 +287,23 @@ export class LocalSessionHost implements SessionHost {
         return this.control;
     }
 
-    async claimSession(sessionId: string, options: { noNegotiate?: boolean } = {}): Promise<ClaimResult> {
+    async claimSession(
+        sessionId: string,
+        options: { noNegotiate?: boolean; parentSessionId?: string } = {},
+    ): Promise<ClaimResult> {
         return this.control.claim(sessionId, options);
     }
 
+    /** 持久化的创建关系：优先内存状态，未加载的会话经摘要读取（不猜旧数据）。 */
+    async getSessionDelegation(sessionId: string): Promise<SessionDelegation | undefined> {
+        const active = this.activeSessions.get(sessionId);
+        if (active) return active.session.delegation;
+        const digest = await this.digests.read(sessionId);
+        return digest?.summary.delegation;
+    }
+
     /** 唤醒已归档会话并由当前实例认领，以便后续 session_send 继续工作。 */
-    private async wakeArchivedSession(sessionId: string): Promise<void> {
+    private async wakeArchivedSession(sessionId: string, callerSessionId?: string): Promise<void> {
         const digest = await this.digests.read(sessionId);
         if (!digest) throw new Error(`会话不存在：${sessionId}`);
         const summary = digest.summary;
@@ -293,10 +316,12 @@ export class LocalSessionHost implements SessionHost {
         let didClaim = false;
         let didAdopt = false;
         try {
-            const claim = await this.claimSession(sessionId);
+            const claim = await this.claimSession(sessionId, {
+                ...(callerSessionId ? { parentSessionId: callerSessionId } : {}),
+            });
             if (!claim.ok) throw new Error(describeClaimFailure(claim));
             didClaim = !wasClaimed;
-            if (!this.control.adoptSpawnedSession(sessionId)) {
+            if (!await this.control.adoptSpawnedSession(sessionId, callerSessionId)) {
                 throw new Error(`本实例管理的子会话已达上限（${MAX_SPAWNED_SESSIONS} 个）`);
             }
             didAdopt = !wasManaged;
@@ -358,6 +383,11 @@ export class LocalSessionHost implements SessionHost {
      */
     private async acceptPeerMessage(message: PeerMessage): Promise<PeerAcceptOutcome> {
         const sessionId = message.to;
+        // 子会话只接受直接父会话的投递；远程 socket 来的发送方不可能是它的父会话。
+        const delegation = await this.getSessionDelegation(sessionId);
+        if (delegation && message.from !== delegation.parentSessionId) {
+            return { status: "busy" };
+        }
         const decision = this.peerInbox.begin(message);
         if (decision.kind === "queued") return { status: "queued", position: decision.position };
         if (decision.kind === "accepted") return { status: "accepted" };
@@ -792,16 +822,39 @@ export class LocalSessionHost implements SessionHost {
     async createSession(cwd?: string, init?: SessionCreateInit): Promise<{ sessionId: string }> {
         const sessionId = createUlid();
         // 缺省 cwd 固定为宿主启动目录；会话 cwd 会随后续切换变化，不能作为新建会话默认值。
-        const session = createEmptySession(sessionId, cwd ?? this.startupCwd, init?.origin);
+        const session = createEmptySession(sessionId, cwd ?? this.startupCwd, init?.origin, init?.delegation);
         this.activeSessions.set(sessionId, { session, lastSeq: 0 });
         // MCP 选中集必须在会话交出去之前写好：先建后设会留下一个"工具还不全"的窗口，
         // 无人的任务会话可能正好在这个窗口里发出第一轮请求。
         if (init?.selectedServers !== undefined) {
             await this.setSessionLazyMcpServers(sessionId, init.selectedServers);
         }
+        // 创建关系必须在子会话发布前落盘：否则“无标题、无内容”的子会话一旦释放或换实例，
+        // 父会话就再也认不回来了（创建事实不能只活在内存里）。
+        if (init?.delegation) {
+            const created = await this.eventLog.append(
+                sessionId,
+                "session_created",
+                sessionCreatedPayload(session.cwd, session.origin, session.delegation),
+            );
+            this.updateActiveSeq(sessionId, created.seq);
+        }
         // 标题在这里固化：前端回调只负责展示，无 UI 宿主（peer /new、web）也不会丢标题
         if (init?.title?.trim()) await this.renameSession(sessionId, init.title);
         return { sessionId };
+    }
+
+    /** 只补一条 session_created；已有事件时不做任何事。 */
+    async ensureSessionCreated(sessionId: string): Promise<void> {
+        const active = this.activeSessions.get(sessionId);
+        const session = active?.session ?? (await this.requireActiveSession(sessionId));
+        if ((await this.eventLog.lastSeq(sessionId, { forceRefresh: true })) > 0) return;
+        const created = await this.eventLog.append(
+            sessionId,
+            "session_created",
+            sessionCreatedPayload(session.cwd, session.origin, session.delegation),
+        );
+        this.updateActiveSeq(sessionId, created.seq);
     }
 
     async listSessions(): Promise<SessionSummary[]> {
@@ -909,7 +962,11 @@ export class LocalSessionHost implements SessionHost {
         if (session.cwd === resolved) return;
 
         if ((await this.eventLog.lastSeq(sessionId, { forceRefresh: true })) === 0) {
-            const created = await this.eventLog.append(sessionId, "session_created", { cwd: resolved });
+            const created = await this.eventLog.append(
+                sessionId,
+                "session_created",
+                sessionCreatedPayload(resolved, session.origin, session.delegation),
+            );
             this.updateActiveSeq(sessionId, created.seq);
         }
 
@@ -935,7 +992,11 @@ export class LocalSessionHost implements SessionHost {
             closeChatSessionTransport(sessionId);
             await deleteResponsesBaseline(sessionId);
             // 用会话自己的 cwd：远程 /clear 不该把目标会话的工作目录改成持有者/CLI 的目录
-            await this.eventLog.append(sessionId, "session_created", { cwd: session.cwd });
+            await this.eventLog.append(
+                sessionId,
+                "session_created",
+                sessionCreatedPayload(session.cwd, session.origin, session.delegation),
+            );
             if (session.modelSelection) {
                 await this.eventLog.append(sessionId, "model_selected", session.modelSelection);
             }
@@ -976,7 +1037,11 @@ export class LocalSessionHost implements SessionHost {
             if (lastSeq === 0) {
                 // 空临时会话未落盘：先补 session_created（cwd 取绑定目录），让改名后的会话可持久化
                 const created = await this.eventLog.append(sessionId, "session_created", {
-                    cwd: active?.session.cwd ?? getStartupToolCwd(),
+                    ...sessionCreatedPayload(
+                        active?.session.cwd ?? getStartupToolCwd(),
+                        active?.session.origin,
+                        active?.session.delegation,
+                    ),
                 });
                 lastSeq = created.seq;
             }
@@ -1043,7 +1108,11 @@ export class LocalSessionHost implements SessionHost {
             if (current.length === next.length && current.every((name, index) => name === next[index])) return;
 
             if ((await this.eventLog.lastSeq(sessionId, { forceRefresh: true })) === 0) {
-                const created = await this.eventLog.append(sessionId, "session_created", { cwd: session.cwd });
+                const created = await this.eventLog.append(
+                    sessionId,
+                    "session_created",
+                    sessionCreatedPayload(session.cwd, session.origin, session.delegation),
+                );
                 this.updateActiveSeq(sessionId, created.seq);
             }
             const event = await this.eventLog.append(sessionId, "lazy_mcp_changed", { servers: next });
@@ -1096,7 +1165,11 @@ export class LocalSessionHost implements SessionHost {
 
         const lastSeq = await this.eventLog.lastSeq(sessionId, { forceRefresh: true });
         if (lastSeq === 0) {
-            const created = await this.eventLog.append(sessionId, "session_created", { cwd: session.cwd });
+            const created = await this.eventLog.append(
+                sessionId,
+                "session_created",
+                sessionCreatedPayload(session.cwd, session.origin, session.delegation),
+            );
             this.updateActiveSeq(sessionId, created.seq);
         }
         const event = await this.eventLog.append(sessionId, "model_selected", selection);
@@ -1166,11 +1239,11 @@ export class LocalSessionHost implements SessionHost {
         const diskSeq = await this.eventLog.lastSeq(sessionId, { forceRefresh: true });
         const active = this.activeSessions.get(sessionId);
         if (active && active.lastSeq >= diskSeq) {
-            return buildSystemPrompt(active.session.cwd);
+            return buildSystemPrompt(active.session.cwd, active.session);
         }
 
         if (diskSeq === 0) {
-            if (active) return buildSystemPrompt(active.session.cwd);
+            if (active) return buildSystemPrompt(active.session.cwd, active.session);
             throw new Error(`会话不存在: ${sessionId}`);
         }
 
@@ -1180,7 +1253,7 @@ export class LocalSessionHost implements SessionHost {
             lastSeq: replayed.lastSeq,
             abortController: active?.abortController,
         });
-        return buildSystemPrompt(replayed.session.cwd);
+        return buildSystemPrompt(replayed.session.cwd, replayed.session);
     }
 
     async closeSession(sessionId: string): Promise<void> {

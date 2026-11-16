@@ -17,7 +17,7 @@ import {
 import { isToolSearchEnabled, supportsAudioInput } from "../tools/orchestrator/turn-request.js";
 import type { ImageInputCapability } from "../tools/orchestrator/image-input.js";
 import { resolveProtocol } from "../tools/orchestrator/request-builder.js";
-import type { ChatMessage, Session } from "../types/session.js";
+import type { ChatMessage, Session, SessionDelegation } from "../types/session.js";
 import type { SteerUpdate, StreamDelta } from "../types/chat.js";
 import { toUserContent, type UserContent, type UserMessageInput } from "../types/image.js";
 import type { ToolCall } from "../types/tool-call.js";
@@ -386,7 +386,10 @@ export function getChatModelOptions(): ChatModelOption[] {
  * 组装 system prompt：身份文件 + 技能清单。
  * 每次调用都现读磁盘，不缓存；cwd 用于身份文件里 {{TUI_CWD}} 的插值。
  */
-export function buildSystemPrompt(cwd?: string): string {
+export function buildSystemPrompt(
+    cwd?: string,
+    session?: { sessionId: string; delegation?: SessionDelegation },
+): string {
     const sections: string[] = [];
     const identity = loadIdentityContext(cwd ? { TUI_CWD: cwd } : undefined).trim();
     if (identity) {
@@ -394,6 +397,14 @@ export function buildSystemPrompt(cwd?: string): string {
     }
 
     sections.push(skillRegistry.buildSkillListing());
+    if (session?.delegation) {
+        sections.push([
+            "## 会话层级",
+            `当前会话 ${session.sessionId} 是会话 ${session.delegation.parentSessionId} 的工作子会话。`,
+            "你只能与该父会话通信；不能创建新的子会话，也不能管理其他会话。",
+            "需要更多并行工作时，把任务交回父会话，由它创建新的工作子会话。",
+        ].join("\n"));
+    }
     return sections.join("\n\n");
 }
 

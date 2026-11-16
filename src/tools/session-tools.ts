@@ -23,6 +23,7 @@ import {
     getSessionControl,
     getSessionDirectory,
     hasSessionCapabilityProvider,
+    isChildSession,
 } from "../control/runtime.js";
 import { err, ok, type ExecutableTool, type ToolExecutionResult } from "./tool-interface.js";
 import { toolCatalog } from "./tool-catalog.js";
@@ -38,6 +39,12 @@ function requireControl(sessionId?: string): { control: SessionControl } | { err
 }
 
 const SESSION_TOOL_NAMES = ["session_spawn", "session_send", "session_status", "session_close", "session_cancel", "session_wake"];
+
+/**
+ * 工作子会话能用哪些会话间工具：只保留与父会话通信/查看状态。
+ * 派生、唤醒、关闭、取消都需要"管理别的会话"，执行层也会再拒绝一次。
+ */
+const CHILD_SESSION_TOOL_NAMES = ["session_send", "session_status"];
 
 /** `wait_seconds` 的上限：别让一次工具调用把回合占死太久。 */
 const MAX_WAIT_SECONDS = 600;
@@ -317,7 +324,9 @@ const sessionCloseTool: ExecutableTool = {
         const resolved = await resolveSessionId(target, {}, args.__sessionId);
         if (!resolved.ok) return err(resolved.error);
 
-        const result = await control.closeSpawnedSession(resolved.sessionId);
+        const result = await control.closeSpawnedSession(resolved.sessionId, {
+            callerSessionId: args.__sessionId,
+        });
         if (!result.ok) return err(result.error);
         return ok(`已归档并关闭子会话 ${shortSessionId(resolved.sessionId)}；历史保留，可从会话面板重新打开。`);
     },
@@ -351,7 +360,10 @@ const sessionCancelTool: ExecutableTool = {
         const resolved = await resolveSessionId(target, {}, args.__sessionId);
         if (!resolved.ok) return err(resolved.error);
 
-        const result = await control.cancelSpawnedSession(resolved.sessionId, { close: args.close === true });
+        const result = await control.cancelSpawnedSession(resolved.sessionId, {
+            close: args.close === true,
+            callerSessionId: args.__sessionId,
+        });
         if (!result.ok) return err(result.error);
         return ok(result.closed
             ? `已取消并归档子会话 ${shortSessionId(resolved.sessionId)}；历史保留。`
@@ -398,7 +410,7 @@ const sessionWakeTool: ExecutableTool = {
         }
 
         try {
-            await directory.wake(resolved.sessionId);
+            await directory.wake(resolved.sessionId, { callerSessionId: args.__sessionId });
         } catch (error) {
             return err(`唤醒会话失败：${(error as Error)?.message ?? error}`);
         }
@@ -556,5 +568,13 @@ toolCatalog.registerLocalTools(SESSION_TOOLS);
  */
 export function getSessionToolNames(sessionId?: string): string[] {
     if (!sessionId) return [];
-    return getSessionControl(sessionId) ? [...SESSION_TOOL_NAMES] : [];
+    return sessionToolNamesFor(getSessionControl(sessionId) !== undefined, isChildSession(sessionId));
+}
+
+/** 工具可见性：根会话拿到全部会话间工具，工作子会话只拿到通信与状态。 */
+export function sessionToolNamesFor(hasControl: boolean, isChild: boolean): string[] {
+    if (!hasControl) return [];
+    return isChild
+        ? SESSION_TOOL_NAMES.filter(name => CHILD_SESSION_TOOL_NAMES.includes(name))
+        : [...SESSION_TOOL_NAMES];
 }

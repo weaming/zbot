@@ -25,7 +25,7 @@ export interface SessionDigest {
 export const SUMMARY_PAYLOAD_FIELDS: Record<AgentEventType, readonly string[]> = {
     // updatedAt 判定会读 injected / messages
     standalone_turn: ["injected", "messages"],
-    session_created: ["cwd", "origin"],
+    session_created: ["cwd", "origin", "delegation"],
     session_cwd_changed: ["cwd"],
     session_renamed: ["title"],
     model_selected: ["(整个对象)"],
@@ -128,6 +128,7 @@ export function summarizeEvents(sessionId: string, events: AgentEvent[]): Sessio
     let archived = false;
     let modelSelection: SessionSummary["modelSelection"];
     let origin: SessionSummary["origin"];
+    let delegation: SessionSummary["delegation"];
     let cwd: string | undefined;
 
     for (const event of events) {
@@ -147,12 +148,14 @@ export function summarizeEvents(sessionId: string, events: AgentEvent[]): Sessio
         if (event.type === "model_selected") modelSelection = event.payload;
         if (event.type === "session_created") cwd = event.payload.cwd;
         if (event.type === "session_created" && event.payload.origin) origin = event.payload.origin;
+        if (event.type === "session_created" && event.payload.delegation) delegation = event.payload.delegation;
         if (event.type === "session_cwd_changed") cwd = event.payload.cwd;
     }
 
     return {
         sessionId,
         ...(origin ? { origin } : {}),
+        ...(delegation ? { delegation } : {}),
         ...(cwd ? { cwd } : {}),
         updatedAt,
         messageCount,

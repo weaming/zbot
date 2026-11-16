@@ -33,6 +33,7 @@ const LAYER_RULES: Record<string, string[]> = {
     jobs: ["tui", "web", "cli"],
     tui: ["web"],
     web: ["tui", "cli"],
+    stdio: ["tui", "web"],
 };
 
 export interface BoundaryViolation {
@@ -51,6 +52,8 @@ export interface BoundaryViolation {
  */
 const FRONTEND_ENTRY_LAYERS: Record<string, string> = {
     "cli/web.ts": "web",
+    "cli/stdio.ts": "stdio",
+    "cli/stdio-protocol.ts": "stdio",
 };
 
 /** 递归列出源文件，跳过 .d.ts 与测试文件。 */

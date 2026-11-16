@@ -374,7 +374,7 @@ describe("结果到达即驱动请求方", () => {
         // 目录是宿主级能力，按 caller 会话解析：spawned 已归档释放，不能拿它的 id 去问
         const directory = getSessionDirectory(sessionA);
         expect(directory?.wake).toBeDefined();
-        await directory!.wake!(spawned.sessionId);
+        await directory!.wake!(spawned.sessionId, { callerSessionId: sessionA });
 
         expect(wokenSession).toBe(spawned.sessionId);
         expect(agent.isSessionClaimed(spawned.sessionId)).toBe(true);
@@ -388,7 +388,7 @@ describe("结果到达即驱动请求方", () => {
         await waitFor(() => !agent.isSessionBusy(spawned.sessionId));
         await agent.closeSession(spawned.sessionId);
         agent.releaseSession(spawned.sessionId);
-        await directory!.wake!(spawned.sessionId);
+        await directory!.wake!(spawned.sessionId, { callerSessionId: sessionA });
         turnContent = "归档前的最终结果";
         await agent.sessionControl.send(sessionA, spawned.sessionId, "最后继续一次", {
             expectResult: true,
@@ -413,7 +413,10 @@ describe("结果到达即驱动请求方", () => {
             });
             await waitFor(() => startedSessions.includes(spawned.sessionId));
 
-            const cancelPromise = agent.sessionControl.cancelSpawnedSession(spawned.sessionId, { close });
+            const cancelPromise = agent.sessionControl.cancelSpawnedSession(spawned.sessionId, {
+                close,
+                callerSessionId: sessionA,
+            });
             await new Promise(resolve => setTimeout(resolve, 0));
             await expect(agent.sessionControl.send(sessionA, spawned.sessionId, "取消期间不应插入新任务"))
                 .rejects.toThrow(/取消\/关闭|正在执行中/);

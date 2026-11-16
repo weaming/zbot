@@ -10,7 +10,7 @@ import { getSessionsDir, getStartupToolCwd, getToolCwd } from "../utils/runtime-
 import { createUlid } from "../utils/ulid.js";
 import { appendCompletedTurn, appendInterruptedTurn, appendStandaloneTurn, replaceWithCompactedContext } from "../utils/conversation-history.js";
 import { repairEmptyAssistantHistory } from "../utils/conversation-history-repair.js";
-import type { ChatMessage, Session, SessionOrigin } from "../types/session.js";
+import type { ChatMessage, Session, SessionDelegation, SessionOrigin } from "../types/session.js";
 import type { AgentEvent, AgentEventPayloads } from "./agent-events.js";
 import type { UsageInfo } from "../types/chat.js";
 import type { UserMessageInput } from "../types/image.js";
@@ -177,8 +177,7 @@ export class SessionReplay {
     ): Promise<void> {
         if ((await this.eventLog.lastSeq(session.sessionId)) === 0) {
             await this.eventLog.append(session.sessionId, "session_created", {
-                cwd: session.cwd,
-                ...(session.origin ? { origin: session.origin } : {}),
+                ...sessionCreatedPayload(session.cwd, session.origin, session.delegation),
             });
         }
         if (writeUserMessages) {
@@ -270,7 +269,11 @@ export class SessionReplay {
         images?: UserMessageInput["images"],
     ): Promise<number> {
         if ((await this.eventLog.lastSeq(session.sessionId)) === 0) {
-            await this.eventLog.append(session.sessionId, "session_created", { cwd: session.cwd });
+            await this.eventLog.append(
+                session.sessionId,
+                "session_created",
+                sessionCreatedPayload(session.cwd, session.origin, session.delegation),
+            );
         }
         const event = await this.eventLog.append(session.sessionId, "user_message", {
             text,
@@ -381,6 +384,7 @@ function applyEvent(session: Session, event: AgentEvent): void {
     switch (event.type) {
         case "session_created":
             if (event.payload.origin) session.origin = event.payload.origin;
+            if (event.payload.delegation) session.delegation = event.payload.delegation;
             // 事件为事实源；旧事件无 cwd 字段时归一到启动目录（不能继承当前选中会话的 cwd）
             session.cwd = eventCwd(event) ?? getStartupToolCwd();
             break;
@@ -436,11 +440,17 @@ function rememberPromptTokens(session: Session, usage?: UsageInfo): void {
 }
 
 /** 新会话工厂：cwd 默认当前工具目录。 */
-export function createEmptySession(sessionId: string, cwd = getToolCwd(), origin?: SessionOrigin): Session {
+export function createEmptySession(
+    sessionId: string,
+    cwd = getToolCwd(),
+    origin?: SessionOrigin,
+    delegation?: SessionDelegation,
+): Session {
     const timestamp = new Date().toISOString();
     return {
         sessionId,
         ...(origin ? { origin } : {}),
+        ...(delegation ? { delegation } : {}),
         cwd,
         contextEpochId: createUlid(),
         turns: [],
@@ -463,8 +473,24 @@ export function createEmptySession(sessionId: string, cwd = getToolCwd(), origin
  * system prompt 与工具定义都只在请求期构造，既不缓存也不写快照，
  * 重启后必定按当前技能/记忆/MCP 状态重建；旧版本快照里的缓存字段在读入时被丢弃。
  */
+/**
+ * session_created 的统一载荷：新建、补首事件、清空重建都用它，避免所有权字段在某个路径被漏写。
+ */
+export function sessionCreatedPayload(
+    cwd: string,
+    origin?: SessionOrigin,
+    delegation?: SessionDelegation,
+): AgentEventPayloads["session_created"] {
+    return {
+        cwd,
+        ...(origin ? { origin } : {}),
+        ...(delegation ? { delegation } : {}),
+    };
+}
+
 const SNAPSHOT_SESSION_FIELDS = [
     "sessionId",
+    "delegation",
     "cwd",
     "title",
     "contextEpochId",

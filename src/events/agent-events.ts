@@ -8,7 +8,7 @@
  * seq 列表指向它们，避免把同一份内容在终态事件里再存一遍。
  */
 
-import type { ChatMessage, SessionOrigin } from "../types/session.js";
+import type { ChatMessage, SessionDelegation, SessionOrigin } from "../types/session.js";
 import type { SteerUpdate, StreamDelta, UsageInfo } from "../types/chat.js";
 import type { ImageInputRef, UserMessageInput } from "../types/image.js";
 import type { ChatModelSelection } from "../types/chat-model.js";
@@ -40,7 +40,7 @@ type UserImageRef = ImageInputRef;
 
 export interface AgentEventPayloads {
     /** origin 缺省视为 user（老日志没有该字段）。 */
-    session_created: { cwd: string; origin?: SessionOrigin };
+    session_created: { cwd: string; origin?: SessionOrigin; delegation?: SessionDelegation };
     /**
      * 用户消息事实源。turnId 把同一回合的增量消息归组；trigger 区分用户输入与执行中
      * 并入的 pending 消息。
