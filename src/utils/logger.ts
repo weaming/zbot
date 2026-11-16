@@ -155,6 +155,12 @@ interface SessionChainState {
 
 /** 尾部续链的初始读取窗口：只需最后一条 REQUEST，避免启动时解析整个文件。 */
 const CHAIN_TAIL_BYTES = 4 * 1024 * 1024;
+/**
+ * 尾部续链的窗口上限。找可复用的 tools 全量只是省一次几十 KB 的写入，
+ * 不值得为它回读整个文件 —— 日志可能已被历史全量重写撑到上 GB，
+ * 放开上限会让重启后的第一条消息卡住几十秒并吃掉 GB 级内存。
+ */
+const CHAIN_TAIL_MAX_BYTES = 8 * 1024 * 1024;
 
 /** RESPONSE 中与 REQUEST 重复的回显字段（上游原样返回全套 tools，单条可达数百 KB）。 */
 const RESPONSE_ECHO_FIELDS = ["tools", "instructions"];
@@ -206,8 +212,9 @@ function parseChainEntry(line: string): SessionChainState | null {
 }
 
 /**
- * 从尾部反向找最后一条可解析的 REQUEST，并继续向前找最近一份 tools 全量作为引用目标；
- * 窗口不够（单行超窗口）时按倍数放大。
+ * 从尾部反向找最后一条可解析的 REQUEST，并继续向前找最近一份 tools 全量作为引用目标。
+ * 窗口不够（单行超窗口）时按倍数放大，但封顶在 `CHAIN_TAIL_MAX_BYTES`：
+ * 找不到 tools 全量就放弃引用（下次只多写一份 tools），绝不把整个文件读进来。
  */
 function readChainFromTail(fd: number, size: number): SessionChainState | null {
     let win = Math.min(size, CHAIN_TAIL_BYTES);
@@ -221,7 +228,11 @@ function readChainFromTail(fd: number, size: number): SessionChainState | null {
         const start = from === 0 ? 0 : 1;
         let latest: SessionChainState | null = null;
         for (let i = lines.length - 1; i >= start; i--) {
-            const state = parseChainEntry(lines[i]);
+            const line = lines[i];
+            // 已经有最后一条 REQUEST 时，向前只为找 tools 全量：先按子串筛掉，
+            // 不解析每一条历史请求（单条可达数 MB，全量 parse 是纯浪费）。
+            if (latest && !line.includes('"tools":[')) continue;
+            const state = parseChainEntry(line);
             if (!state) continue;
             if (!latest) {
                 latest = state;
@@ -232,10 +243,10 @@ function readChainFromTail(fd: number, size: number): SessionChainState | null {
             if (state.toolsRef && state.toolsRef.hash === latest.toolsHash) latest.toolsRef = state.toolsRef;
             if (latest.toolsRef) break;
         }
-        // 窗口内没找到可引用的 tools 全量时继续放大窗口
-        if (latest && (latest.toolsRef || from === 0)) return latest;
+        // 窗口内没找到可引用的 tools 全量时继续放大窗口（直到封顶）
+        if (latest && (latest.toolsRef || from === 0 || win >= CHAIN_TAIL_MAX_BYTES)) return latest;
         if (from === 0) return null;
-        win = Math.min(size, win * 4);
+        win = Math.min(size, CHAIN_TAIL_MAX_BYTES, win * 4);
     }
 }
 
@@ -345,6 +356,19 @@ function isIncrementalDelta(type: LLMExchangeType, content: any): boolean {
 }
 
 /**
+ * 协议日志（`sessions/http/<会话>.jsonl`）默认**不写**。
+ *
+ * 它是排查上游协议问题用的完整请求/响应原文，正常运行没有任何读者：
+ * 会话事实源在事件日志，用量在 `usage_recorded`。而单条请求可达 MB 级，
+ * 一轮长会话就能写出几百 MB 到 GB（还含完整对话与工具输出的明文）。
+ * 需要现场时用 `ZBOT_DEBUG=1` 打开。
+ */
+function isExchangeLogEnabled(): boolean {
+    const flag = process.env.ZBOT_DEBUG?.trim().toLowerCase();
+    return flag === "1" || flag === "true" || flag === "yes";
+}
+
+/**
  * 记录一次 LLM 协议交换。REQUEST 为链式增量记录：
  *  - requestId + parentRequestId 形成会话内的请求链（同轮重试也成链）；
  *  - 历史（input 或 messages）只写相对上一请求新增的部分，另记 historyCount 供尾部续链；
@@ -353,12 +377,14 @@ function isIncrementalDelta(type: LLMExchangeType, content: any): boolean {
  * 旧式 RESPONSE 丢弃上游回显的 tools/instructions；HTTP_RESPONSE、HTTP_SSE_EVENT 和 WS 消息其余字段保留原始内容。
  * 增量态事件（*.delta）默认丢弃，只保留终态与控制事件；`runtime.llmLogDeltas` 打开时全量记录。
  * 主路径写失败时兜底到 fallback 文件，避免数据丢失。
+ * 整个日志默认关闭（见 `isExchangeLogEnabled`），`ZBOT_DEBUG=1` 时才落盘。
  */
 export function recordLLMExchange(
     type: LLMExchangeType,
     content: any,
     meta: LLMExchangeMeta = {},
 ): void {
+    if (!isExchangeLogEnabled()) return;
     if (isIncrementalDelta(type, content)) return;
 
     if (type === "REQUEST" || type === "HTTP_REQUEST") {
@@ -431,107 +457,4 @@ export function recordLLMExchange(
                 + ` and fallback (${(fallbackError as Error).message}); entry dropped.`);
         }
     }
-}
-
-interface UsageTotals {
-    requestCount: number;
-    promptTokens: number;
-    cacheHitTokens: number;
-    cacheMissTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-}
-
-function hongKongDate(timestamp: string): string {
-    const dateParts = new Intl.DateTimeFormat('en-CA', {
-        timeZone: 'Asia/Hong_Kong',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-    }).formatToParts(new Date(timestamp));
-    const values = Object.fromEntries(dateParts.map((part) => [part.type, part.value]));
-    return `${values.year}-${values.month}-${values.day}`;
-}
-
-function previousHongKongDate(date: string): string {
-    const [year, month, day] = date.split('-').map(Number);
-    return new Date(Date.UTC(year, month - 1, day - 1)).toISOString().slice(0, 10);
-}
-
-function readUsageTotals(date: string): UsageTotals {
-    const totals: UsageTotals = {
-        requestCount: 0,
-        promptTokens: 0,
-        cacheHitTokens: 0,
-        cacheMissTokens: 0,
-        completionTokens: 0,
-        totalTokens: 0,
-    };
-
-    // usage 统计已合并进 exchange 的 RESPONSE 记录：扫全局日志 + 各 session 文件。
-    const exchangeFiles: string[] = [];
-    const globalFile = resolveLogFiles().exchangeFile;
-    if (fs.existsSync(globalFile)) exchangeFiles.push(globalFile);
-    exchangeFiles.push(...collectExchangeFiles());
-
-    for (const file of exchangeFiles) {
-        for (const line of fs.readFileSync(file, 'utf-8').split('\n')) {
-            if (!line) continue;
-
-            try {
-                const entry = JSON.parse(line);
-                const usage = entry?.content?.usage;
-                if (entry?.type !== 'RESPONSE' || !usage || !usage.timestamp) continue;
-                if (hongKongDate(usage.timestamp) !== date) continue;
-
-                totals.requestCount += 1;
-                totals.promptTokens += usage.prompt_tokens || 0;
-                totals.cacheHitTokens += usage.cache_hit_tokens || 0;
-                totals.cacheMissTokens += usage.cache_miss_tokens || 0;
-                totals.completionTokens += usage.completion_tokens || 0;
-                totals.totalTokens += usage.total_tokens || 0;
-            } catch {
-                // 损坏行跳过。
-            }
-        }
-    }
-
-    return totals;
-}
-
-/** exchange 文件按会话隔离保存。 */
-function collectExchangeFiles(): string[] {
-    const files: string[] = [];
-    const pushJsonl = (dir: string): void => {
-        try {
-            for (const name of fs.readdirSync(dir)) {
-                if (name.endsWith('.jsonl')) files.push(path.join(dir, name));
-            }
-        } catch {
-            // 目录不存在时跳过。
-        }
-    };
-
-    const sessionsDir = resolveSessionsDir();
-    pushJsonl(path.join(sessionsDir, 'http'));
-    try {
-        for (const entry of fs.readdirSync(sessionsDir, { withFileTypes: true })) {
-            if (entry.isDirectory() && entry.name !== 'http') {
-                pushJsonl(path.join(sessionsDir, entry.name, 'http'));
-            }
-        }
-    } catch {
-        // sessions 目录不存在时仅统计全局日志。
-    }
-    return files;
-}
-
-function logUsageTotals(scope: 'hourly' | 'daily', date: string): void {
-    const totals = readUsageTotals(date);
-    console.log(
-        `[LLM_USAGE] scope=${scope} date=${date} requests=${totals.requestCount}`
-        + ` prompt_tokens=${totals.promptTokens} cache_hit_tokens=${totals.cacheHitTokens}`
-        + ` cache_miss_tokens=${totals.cacheMissTokens} completion_tokens=${totals.completionTokens}`
-        + ` total_tokens=${totals.totalTokens}`,
-    );
 }

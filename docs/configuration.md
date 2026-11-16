@@ -122,7 +122,11 @@ WS 模式的取消依赖 `response.interrupt`：上游对带托管工具（如 `
 
 同一 provider（以 `baseUrl` 区分）连续 5 次重试链最终失败即熔断 60s：期间请求直接报「已熔断，N s 后再试」，不再打上游；冷却结束只放一次半开探测，成功则关闭熔断，失败则重新计时。熔断状态在进程内，重启即清空。退避起点可用 `ZBOT_RETRY_BASE_DELAY_MS` 覆盖（测试用，`0` 表示不等待）。
 
-会话的协议日志位于 `sessions/http/<会话 ID>.jsonl`：HTTP 记录实际请求、响应或 SSE 事件，WS 记录请求、收到的消息及错误。同一次请求只记一份：请求统一按请求链记录（`requestId`/`parentRequestId` 与输入增量），其余字段与真实网络请求一致；使用 `previous_response_id` 时保留实际发送的增量 `input`，未变化的工具定义只写 `toolsHash`。响应里回显的 `tools` 与请求一致时只写 `toolsRef`（指向写入该份工具定义的请求 `requestId`），不再逐条重复；工具定义变化时仍保留全量。流式增量事件（`response.output_text.delta` 等 `*.delta`）默认不落盘，只保留 `*.done`、`response.completed` 等终态与错误事件；需要逐帧复刻时打开 `runtime.llmLogDeltas`。WS 的控制消息（steer/interrupt）原样记录为 `WS_SEND`。
+会话的协议日志位于 `sessions/http/<会话 ID>.jsonl`，**默认不写**：它是排查上游协议问题用的完整请求/响应原文，正常运行没有任何读者（会话事实源在事件日志，用量在 `usage_recorded`），而单条请求可达 MB 级且含完整对话与工具输出的明文。需要现场时用 `ZBOT_DEBUG=1` 打开。
+
+打开后：HTTP 记录实际请求、响应或 SSE 事件，WS 记录请求、收到的消息及错误。同一次请求只记一份：请求统一按请求链记录（`requestId`/`parentRequestId` 与输入增量），其余字段与真实网络请求一致；使用 `previous_response_id` 时保留实际发送的增量 `input`，未变化的工具定义只写 `toolsHash`。响应里回显的 `tools` 与请求一致时只写 `toolsRef`（指向写入该份工具定义的请求 `requestId`），不再逐条重复；工具定义变化时仍保留全量。流式增量事件（`response.output_text.delta` 等 `*.delta`）默认不落盘，只保留 `*.done`、`response.completed` 等终态与错误事件；需要逐帧复刻时打开 `runtime.llmLogDeltas`。WS 的控制消息（steer/interrupt）原样记录为 `WS_SEND`。
+
+早期版本因工具调用 item ID 每次请求随机生成，请求前缀永远在变，日志会退化成「每条请求重写整段历史」（单会话可达 GB 级）。存量文件可用 `bun src/scripts/convert-exchange-logs.ts`（默认只统计，`--apply` 写盘）折叠成链式增量。
 
 TUI 的 MCP 服务列表由 `~/.zbot/mcp-servers.yaml` 管理。详见 [MCP 服务配置](mcp.md)。
 

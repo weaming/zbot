@@ -16,6 +16,8 @@ let tmpDir: string;
 beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zbot-logger-"));
     process.env.ZBOT_STATE_DIR = tmpDir;
+    // 协议日志默认关闭，这里统一打开；关闭行为由专门用例覆盖
+    process.env.ZBOT_DEBUG = "1";
 });
 
 afterEach(() => {
@@ -486,4 +488,85 @@ describe("LLM exchange 链式增量记录", () => {
         expect(requests[1].parentRequestId).toBe("old-big");
     });
 
+});
+
+describe("协议日志开关与尾部续链", () => {
+    const TOOL = { type: "function", name: "sample", parameters: { type: "object" } };
+
+    function logFile(sessionId: string): string {
+        return path.join(tmpDir, "sessions", "http", `${sessionId}.jsonl`);
+    }
+
+    function readLast(sessionId: string): any {
+        return JSON.parse(fs.readFileSync(logFile(sessionId), "utf8").trim().split("\n").at(-1)!);
+    }
+
+    /** 直接拼一条没有 tools 全量的历史请求：撑大文件，模拟被历史全量重写撑肥的日志。 */
+    function fillerLine(index: number, bytes: number, toolsHash: string): string {
+        return `${JSON.stringify({
+            timestamp: new Date().toISOString(),
+            type: "HTTP_REQUEST",
+            content: {
+                model: "filler",
+                requestId: `filler-${index}`,
+                historyField: "input",
+                historyBase: 0,
+                historyCount: 3,
+                historyHash: `stale-${index}`,
+                toolsHash,
+                input: [{ role: "user", content: "x".repeat(bytes) }],
+            },
+        })}\n`;
+    }
+
+    /**
+     * 造一份「tools 全量在最前、后面跟着若干条无 tools 的历史请求」的日志。
+     * 运行时的链状态只从文件尾恢复，所以必须先把日志写好再记录。
+     */
+    function prepareLog(sessionId: string, fillerBytes: number[]): void {
+        const sourceId = `source-${sessionId}`;
+        recordLLMExchange("HTTP_REQUEST", { input: [], tools: [TOOL] }, { sessionId: sourceId, requestId: "with-tools" });
+        const head = fs.readFileSync(logFile(sourceId), "utf8");
+        // filler 与 tools 行同源，后面才能按 toolsHash 认出那份全量
+        const toolsHash = JSON.parse(head.trim()).content.toolsHash as string;
+        const filler = fillerBytes.map((bytes, index) => fillerLine(index, bytes, toolsHash)).join("");
+        fs.writeFileSync(logFile(sessionId), `${head}${filler}`);
+        // 同进程内换到新会话 id 才会真的从文件尾续链（内存里没有链状态）
+        expect(logFile(sessionId)).not.toBe(logFile(sourceId));
+    }
+
+    test("默认不落盘，ZBOT_DEBUG 打开后才写", () => {
+        delete process.env.ZBOT_DEBUG;
+
+        recordLLMExchange("HTTP_REQUEST", { model: "m", input: [] }, { sessionId: "quiet" });
+        expect(fs.existsSync(logFile("quiet"))).toBe(false);
+
+        process.env.ZBOT_DEBUG = "1";
+        recordLLMExchange("HTTP_REQUEST", { model: "m", input: [] }, { sessionId: "quiet" });
+        expect(fs.existsSync(logFile("quiet"))).toBe(true);
+    });
+
+    test("窗口内能找到 tools 全量时只引用，不重写", () => {
+        const sessionId = "chain-hit";
+        prepareLog(sessionId, [1024]);
+
+        recordLLMExchange("HTTP_REQUEST", { input: [{ role: "user", content: "hi" }], tools: [TOOL] }, { sessionId });
+
+        const last = readLast(sessionId);
+        expect(last.content.tools).toBeUndefined();
+        expect(last.content.toolsHash).toBeTruthy();
+    });
+
+    test("tools 全量埋得太远时放弃引用，只多写一次 tools，不回读整个文件", () => {
+        const sessionId = "chain-miss";
+        // 10 条 1MB filler ⇒ tools 全量距文件尾超过 8MB 的窗口上限
+        prepareLog(sessionId, Array.from({ length: 10 }, () => 1024 * 1024));
+
+        const startedAt = performance.now();
+        recordLLMExchange("HTTP_REQUEST", { input: [{ role: "user", content: "hi" }], tools: [TOOL] }, { sessionId });
+        const elapsed = performance.now() - startedAt;
+
+        expect(readLast(sessionId).content.tools).toEqual([TOOL]);
+        expect(elapsed).toBeLessThan(2000);
+    });
 });

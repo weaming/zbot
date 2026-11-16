@@ -76,6 +76,10 @@ reloadConfig();
 const testStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "zbot-test-state-"));
 process.env.ZBOT_STATE_DIR = testStateDir;
 
+// 协议日志（sessions/http）默认关闭；logger 相关用例要覆盖写入与链式增量，统一打开。
+// 需要验证「关闭时不落盘」的用例自行 delete 本变量。
+process.env.ZBOT_DEBUG = "1";
+
 // 兜底：若某测试文件把隔离变量删掉（afterEach 未还原 preload 值），同进程后续用例
 // 就会回退到真实 ~/.zbot；每个用例前仅在缺失时补回，不覆盖用例自设的临时目录。
 beforeEach(() => {
