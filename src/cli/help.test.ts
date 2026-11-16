@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, test } from "bun:test";
 import {
     MAIN_CLI_USAGE,
+    STDIO_CLI_USAGE,
     PRINT_CLI_USAGE,
     RESUME_CLI_USAGE,
     WEB_CLI_USAGE,
@@ -31,6 +32,29 @@ function capture(run: () => boolean): { printed: boolean; output: string } {
 }
 
 describe("printCliHelp", () => {
+    test("stdio 帮助在配置和宿主初始化之前分流", () => {
+        expect(capture(() => printCliHelp(["stdio", "--help"])).output.trim()).toBe(STDIO_CLI_USAGE);
+        expect(capture(() => printCliHelp(["help", "stdio"])).output.trim()).toBe(STDIO_CLI_USAGE);
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), "zbot-stdio-help-"));
+        try {
+            const result = Bun.spawnSync([process.execPath, "src/tui/main.ts", "stdio", "--help"], {
+                cwd: path.resolve(import.meta.dir, "../.."), env: { ...process.env, HOME: home }, stdout: "pipe", stderr: "pipe",
+            });
+            expect(result.exitCode).toBe(0);
+            expect(result.stdout.toString().trim()).toBe(STDIO_CLI_USAGE);
+            expect(result.stderr.toString()).toBe("");
+            expect(fs.existsSync(path.join(home, ".zbot"))).toBe(false);
+        } finally { fs.rmSync(home, { recursive: true, force: true }); }
+    });
+
+    test("stdio 无效参数直接退出，不落回 TUI", () => {
+        const result = Bun.spawnSync([process.execPath, "src/tui/main.ts", "stdio", "--invalid"], {
+            cwd: path.resolve(import.meta.dir, "../.."), stdout: "pipe", stderr: "pipe",
+        });
+        expect(result.exitCode).toBe(1);
+        expect(result.stdout.toString()).toBe("");
+        expect(result.stderr.toString()).toContain("用法：zbot stdio");
+    });
     test("顶层 -h / --help / help 输出总览", () => {
         for (const argv of [["-h"], ["--help"], ["help"]]) {
             const { printed, output } = capture(() => printCliHelp(argv));

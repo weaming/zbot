@@ -15,11 +15,24 @@ export const MAIN_CLI_USAGE = [
     "  zbot -p <文本>             已禁用：模型回合必须由 TUI 或后台实例执行",
     "  zbot resume <id>           载入旧会话并进入 TUI（无 UI 续聊已禁用）",
     "  zbot session <子命令>      会话管理：list/show/new/run/rename/archive/send/wait/queue/delete",
+    "  zbot stdio [--cwd <目录>]   启动独立 JSONL 会话宿主（协议 version 1）",
     "  zbot herdr <子命令>        在 herdr 里开新标签页并启动新会话：spawn",
     "  zbot mcp <子命令>          配置 MCP 服务：list/add/remove",
     "  zbot help [子命令]         查看用法",
     "",
     "每个子命令都支持 -h / --help，例如 `zbot session --help`。",
+].join("\n");
+
+export const STDIO_CLI_USAGE = [
+    "用法：zbot stdio [--cwd <目录>]",
+    "",
+    "stdin/stdout 使用逐行 JSON；日志不写 stdout。先 initialize {version:1}，再 session/create {}。",
+    "请求：{id:string|number,method,params}；响应：{id,result} 或 {id,error:{code:number,message}}。",
+    "方法：initialize、session/create、session/send {text}、session/cancel {}、session/status {}、shutdown {}。",
+    "单进程只创建一个自有会话，不接受外部 sessionId；模型沿用默认配置。",
+    "握手返回随机 instanceId；create/status 带本进程 instanceId、sessionId，状态检查实际持有权。",
+    "通知均带 instanceId/sessionId；session/record 的 record 字段为原持久化事件。",
+    "当前没有交互作答入口，ask_user 明确取消，不自动批准；EOF 或 SIGTERM 清理宿主。",
 ].join("\n");
 
 export const WEB_CLI_USAGE = [
@@ -117,6 +130,8 @@ const HELP_FLAGS = new Set(["-h", "--help"]);
 
 function usageFor(topic: string): string {
     switch (topic) {
+        case "stdio":
+            return STDIO_CLI_USAGE;
         case "web":
             return WEB_CLI_USAGE;
         case "-p":
