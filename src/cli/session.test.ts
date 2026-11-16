@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -8,6 +8,7 @@ import { getSocketPath } from "../control/paths.js";
 import { encodeFrame, splitFrames, type PeerFrame } from "../control/protocol.js";
 import { listSavedSessionIds } from "../events/session-files.js";
 import { getResponsesBaselineFile } from "../utils/state-paths.js";
+import { eventLog, replay } from "./session/store.js";
 import {
     formatTable,
     parseSessionArgs,
@@ -477,6 +478,25 @@ describe("会话命令行端到端", () => {
             expect(Object.prototype.hasOwnProperty.call(shown, key)).toBe(true);
         }
         expect(shown).toMatchObject({ status: "idle", holderPid: null, modelSelection: null });
+    });
+
+    test("show 的 lastSeq 只覆盖本次历史快照，不越过并发追加的事件", async () => {
+        const { sessionId } = JSON.parse(await run(["new", "--json"])) as { sessionId: string };
+        const replayTo = replay.replayTo.bind(replay);
+        let snapshotSeq = 0;
+        const replaySpy = spyOn(replay, "replayTo").mockImplementation(async (id, upToSeq) => {
+            const snapshot = await replayTo(id, upToSeq);
+            snapshotSeq = snapshot.lastSeq;
+            await eventLog.append(id, "session_renamed", { title: "并发改名" });
+            return snapshot;
+        });
+        try {
+            const shown = JSON.parse(await run(["show", sessionId, "--json"])) as { lastSeq: number };
+            expect(await eventLog.lastSeq(sessionId)).toBeGreaterThan(snapshotSeq);
+            expect(shown.lastSeq).toBe(snapshotSeq);
+        } finally {
+            replaySpy.mockRestore();
+        }
     });
 
     test("show 增量读取：--since 事件视图、--lite 精简回合、lastSeq 游标", async () => {

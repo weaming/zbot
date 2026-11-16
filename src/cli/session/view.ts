@@ -134,12 +134,12 @@ export async function runShow(command: ShowCommand, write: (text: string) => voi
         return;
     }
 
-    const [meta, replayed, ownership, lastSeq] = await Promise.all([
+    const [meta, replayed, ownership] = await Promise.all([
         readSessionMeta(sessionId),
         replay.replayTo(sessionId),
         probeOwnership(sessionId),
-        eventLog.lastSeq(sessionId),
     ]);
+    const lastSeq = replayed.lastSeq;
     const summary = meta?.summary;
     // 事件日志读不出有效事件（损坏/半行）：明确标出来，别让它看起来只是"空会话"
     const corrupted = meta === null;
