@@ -118,6 +118,23 @@ function normalizeText(value: string, maxLen = MAX_TEXT_LEN): string | undefined
     return normalized || undefined;
 }
 
+/** metadata 里 tabs token 最多列几个 tab：8 位后缀 + 逗号留有余量，不会被截断。 */
+export const MAX_TAB_TOKENS = 8;
+
+/**
+ * 本实例开着的会话编成一个 token 值：各会话 id 的后缀、按 tab 条顺序、逗号分隔。
+ *
+ * 单个面板只上报一个 agent，外部据此只能看到当前会话；列出整条 tab 条，
+ * 外部才能把同一个 zbot 实例的多会话分别列出来。超量截断而不是截半个 id。
+ */
+export function tabSessionToken(sessionIds: string[]): string | undefined {
+    const suffixes = sessionIds
+        .map(id => id.trim().slice(-8))
+        .filter(suffix => suffix.length > 0)
+        .slice(0, MAX_TAB_TOKENS);
+    return suffixes.length > 0 ? suffixes.join(",") : undefined;
+}
+
 export class HerdrReporter {
     private readonly runner: HerdrRunner;
     private readonly syncRunner: HerdrSyncRunner;

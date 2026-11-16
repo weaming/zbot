@@ -91,11 +91,16 @@ zbot herdr teardown <id> --json             # 不给 --tab 时按 pane 元数据
 
 - `title`：当前会话标题；
 - `display_agent`：`zbot`；
-- token：`model`（当前会话模型）、`session`（会话 id 后 8 位）。
+- token：`model`（当前会话模型）、`session`（当前会话 id 后 8 位）、
+  `tabs`（本实例 tab 条上全部会话 id 的后 8 位，逗号分隔、按 tab 条顺序，最多 8 个）。
 
 Herdr 的展示字段按 source 整组替换，所以每次上报都带全量 title/display_agent；
 token 是逐键 patch，清理由 `--clear-token` 完成。字段内容会去掉控制字符并截断到 80 字符。
 不使用 `--ttl-ms`：metadata 常驻到下次替换或退出清理。
+
+`tabs` 是为「单实例多 tab」准备的口子：Herdr 一个 pane 只认一个 agent，`session` 只能
+说明当前会话；列出整条 tab 条，外部（如 Anywhere）才能把同一实例的多个会话分别列出来，
+各自读历史。tab 条变化（新开、关闭、切换）时就地重报一次，没变化的上报按内容去重。
 
 ## 交互
 

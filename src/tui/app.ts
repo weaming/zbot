@@ -98,7 +98,7 @@ import { editorTheme, theme } from "./theme.js";
 import { setLogSession } from "../host/runtime-context.js";
 import { DraftStore, loadRichDrafts, persistRichDrafts } from "./draft-store.js";
 import { isCmdDown, isCmdGateSupported } from "./cmd-modifier.js";
-import { herdrReporter } from "./herdr-reporter.js";
+import { herdrReporter, tabSessionToken } from "./herdr-reporter.js";
 import { notifyTurnResult } from "./notifier.js";
 import {
     getChatApiSettings,
@@ -253,6 +253,8 @@ export class ChatApp {
     /** 官方 DeepSeek 峰谷倒计时刷新（分钟精度，30s 心跳） */
     private peakCountdownTimer: ReturnType<typeof setInterval> | null = null;
     private spinnerIndex = 0;
+    /** 上次同步给 herdr 的 tab 条（当前会话 + 全部会话）：没变就不重复上报。 */
+    private herdrTabKey: string | undefined;
     private readonly messageComponents = new Map<number, MessageComponents>();
     /** 待执行的运行时重载请求按会话去重；运行时本身是进程级的，执行时会合并它们。 */
     private readonly pendingRuntimeReloads = new Set<string>();
@@ -630,7 +632,7 @@ export class ChatApp {
         herdrReporter.report(this.hasActiveTurn() ? "working" : "idle");
     }
 
-    /** 当前会话的展示元数据：标题 + 显示名 + model/session token。 */
+    /** 展示元数据：标题 + 显示名 + model/session/tabs token。 */
     private syncHerdrMetadata(): void {
         const sessionId = this.store.currentSessionId;
         const session = sessionId
@@ -644,6 +646,8 @@ export class ChatApp {
             tokens: {
                 model: model || null,
                 session: sessionId ? sessionId.slice(-8) : null,
+                // 整条 tab 条：单实例多会话时，外部靠它把每个会话分别列出来。
+                tabs: tabSessionToken(this.claimedSessions().map(item => item.sessionId)) ?? null,
             },
         });
     }
@@ -2931,6 +2935,13 @@ export class ChatApp {
     /** 会话条：单行等宽，超宽时以 ‹N / N› 折叠，归档会话不进 tab 条（只出现在面板）。 */
     private renderTabBar(): void {
         const tabs = this.buildSessionBarTabs();
+        // tab 条变了（新开、关闭、切换）就是 tabs/session token 变了：对外同步一次。
+        // spinner 每 120ms 也会重绘，内容没变就不重复算。
+        const tabKey = `${tabs.find(tab => tab.active)?.sessionId ?? ""}|${tabs.map(tab => tab.sessionId).join(",")}`;
+        if (tabKey !== this.herdrTabKey) {
+            this.herdrTabKey = tabKey;
+            this.syncHerdrMetadata();
+        }
         // Text 左右各留 1 列内边距，预算要先扣掉，否则最后一段会被换行。
         const width = Math.max(1, (this.tui.terminal.columns || 80) - 2);
         const spinner = SPINNER_FRAMES[this.spinnerIndex % SPINNER_FRAMES.length];

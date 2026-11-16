@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { HerdrReporter, type HerdrContext } from "./herdr-reporter.js";
+import { HerdrReporter, MAX_TAB_TOKENS, type HerdrContext, tabSessionToken } from "./herdr-reporter.js";
 
 const context: HerdrContext = { binPath: "herdr", paneId: "w1:p1" };
 
@@ -70,5 +70,24 @@ describe("herdr 元数据上报", () => {
         f.reporter.refreshMetadata();
         await settle();
         expect(metadataCalls(f.calls)).toHaveLength(before);
+    });
+});
+
+describe("tabs token", () => {
+    test("按 tab 条顺序写各会话的 8 位后缀", () => {
+        expect(tabSessionToken(["01M7JAF4E3TZHKKPF0GWKTPM37", "01M7H06AWVKPDBC5YMDC3RSX27"]))
+            .toBe("GWKTPM37,DC3RSX27");
+    });
+
+    test("空列表与空 id 不当成一个 tab", () => {
+        expect(tabSessionToken([])).toBeUndefined();
+        expect(tabSessionToken(["", "   "])).toBeUndefined();
+    });
+
+    test("tab 太多就截断，不落到 herdr 的 80 字符截断里", () => {
+        const many = Array.from({ length: MAX_TAB_TOKENS + 4 }, (_, index) => `01M7JAF4E3TZHKKPF0GWKTPM3${index}`);
+        const token = tabSessionToken(many)!;
+        expect(token.split(",")).toHaveLength(MAX_TAB_TOKENS);
+        expect(token.length).toBeLessThanOrEqual(80);
     });
 });
