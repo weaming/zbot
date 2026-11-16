@@ -150,9 +150,9 @@ export async function prepareRequest(options: PrepareRequestOptions): Promise<Pr
     // 历史里的消息 id 只服务于本地 token 缓存，构造请求体前必须剥掉
     const projected = stripInternalPromptIds(projectChatMessagesForPrompt(options.messages));
     // 不下发工具时（纯生成请求）DeepSeek 不需要、也不会拼接历史思维链，剥掉省请求体
-    const promptMessages = currentTools.length === 0 && isDeepSeekStyle(model, client.baseURL)
-      ? stripReasoningContent(projected)
-      : projected;
+    const isDeepSeek = isDeepSeekStyle(model, client.baseURL);
+    const stripsReasoning = currentTools.length === 0 && isDeepSeek;
+    const promptMessages = stripsReasoning ? stripReasoningContent(projected) : projected;
     const reminders = options.isFirstIteration ? [] : options.getContextReminders?.() ?? [];
     const sourceMessages: ChatMessage[] = reminders.length > 0
         ? [...promptMessages, ...reminders.map((content) => ({ role: "user" as const, content }))]
@@ -179,7 +179,12 @@ export async function prepareRequest(options: PrepareRequestOptions): Promise<Pr
         )
         : materializeImageMessages;
     const materializedMessages = useResponses
-        ? await materializeResponsesInput(requestMessages, materializeImages)
+        ? await materializeResponsesInput(requestMessages, {
+            materializeImages,
+            // 带工具时 DeepSeek 思维模式要求每个助手轮都带回明文 reasoning_text，
+            // 缺了就整请求 400（中断续跑、换过 provider 的老历史最容易缺）
+            ensurePlaintextReasoning: isDeepSeek && !stripsReasoning,
+        })
         : await materializeImages(requestMessages);
 
     const normalizedTools = options.normalizedTools(currentTools);

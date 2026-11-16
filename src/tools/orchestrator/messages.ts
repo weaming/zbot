@@ -112,6 +112,38 @@ export function normalizeToolCallShapes(
   });
 }
 
+/** 没有 response_output 的助手轮：正文与工具调用按协议形态重建。 */
+function assistantItemsWithoutOutput(
+  message: Extract<ChatMessage, { role: "assistant" }>,
+): any[] {
+  const items: any[] = [];
+  if (message.content) {
+    items.push({
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: message.content }],
+    });
+  }
+  for (const toolCall of message.tool_calls ?? []) {
+    if (toolCall?.type === "custom") {
+      items.push({
+        type: "custom_tool_call",
+        call_id: toolCall.id,
+        name: toolCall.custom?.name,
+        input: typeof toolCall.custom?.input === "string" ? toolCall.custom.input : "",
+      });
+      continue;
+    }
+    items.push({
+      type: "function_call",
+      call_id: toolCall.id,
+      name: toolCall.function?.name,
+      arguments: toolCall.function?.arguments ?? "{}",
+    });
+  }
+  return items;
+}
+
 function responseImagePart(part: any): any {
   if (part.type === "file") return { type: "input_image", file_id: part.file_id };
   return {
@@ -121,10 +153,60 @@ function responseImagePart(part: any): any {
   };
 }
 
+/**
+ * 明文思维链缺失时的占位文本。
+ *
+ * DeepSeek 思维模式只认 `content` 里的明文 `reasoning_text`，`summary` / `encrypted_content`
+ * 一律不收：助手轮缺明文就整请求 400（「The reasoning_text in the thinking mode must be
+ * passed back to the API」）。历史里总会有拿不到明文的轮次（中断时从流式增量恢复的轮次、
+ * 换过 provider 的老消息），补一条占位比整轮失败划算。
+ */
+const REASONING_PLACEHOLDER = "(thinking unavailable)";
+
+/** 落盘的 reasoning_content 不是协议字段，只用来补 reasoning 项的明文。 */
+function reasoningTextOf(message: ChatMessage): string {
+  const reasoning = (message as ChatMessage & { reasoning_content?: unknown }).reasoning_content;
+  return typeof reasoning === "string" ? reasoning.trim() : "";
+}
+
+function hasPlaintextReasoning(items: any[]): boolean {
+  return items.some(item => item?.type === "reasoning"
+    && (Array.isArray(item.content) ? item.content : [])
+      .some((part: any) => typeof part?.text === "string" && part.text.trim().length > 0));
+}
+
+/**
+ * 补一条明文 reasoning 项（只在缺的时候补）。
+ *
+ * 有落盘思考就用它，没有就补占位：上游按「相邻助手消息」合并这些项，缺了直接拒绝请求。
+ * 补出来的项不带 id —— 上游不认客户端编的 id，省略即视为本次新项。
+ */
+function withReasoningBackfill(items: any[], message: ChatMessage): any[] {
+  if (items.length === 0 || hasPlaintextReasoning(items)) return items;
+  return [
+    {
+      type: "reasoning",
+      content: [{ type: "reasoning_text", text: reasoningTextOf(message) || REASONING_PLACEHOLDER }],
+    },
+    ...items,
+  ];
+}
+
+export interface ResponsesInputOptions {
+  /** 图片物化实现（DeepSeek 官方走 Files 上传）。 */
+  materializeImages?: typeof materializeImageMessages;
+  /**
+   * 每个助手轮都带回明文 reasoning 项：DeepSeek 思维模式的硬约束，只给它用。
+   * 其他上游（尤其官方 GPT）不接受凭空出现的推理项。
+   */
+  ensurePlaintextReasoning?: boolean;
+}
+
 export async function materializeResponsesInput(
   messages: ChatMessage[],
-  materializeImages: typeof materializeImageMessages = materializeImageMessages,
+  options: ResponsesInputOptions = {},
 ): Promise<any[]> {
+  const materializeImages = options.materializeImages ?? materializeImageMessages;
   const materializedUsers = await materializeImages(messages);
   const result: any[] = [];
 
@@ -168,36 +250,12 @@ export async function materializeResponsesInput(
       continue;
     }
 
-    if (message.role === "assistant" && Array.isArray(message.response_output)) {
-      result.push(...repairResponsesFunctionCallItemIds(message.response_output));
-      continue;
-    }
-
     if (message.role === "assistant") {
-      if (message.content) {
-        result.push({
-          type: "message",
-          role: "assistant",
-          content: [{ type: "output_text", text: message.content }],
-        });
-      }
-      for (const toolCall of message.tool_calls ?? []) {
-        if (toolCall?.type === "custom") {
-          result.push({
-            type: "custom_tool_call",
-            call_id: toolCall.id,
-            name: toolCall.custom?.name,
-            input: typeof toolCall.custom?.input === "string" ? toolCall.custom.input : "",
-          });
-          continue;
-        }
-        result.push({
-          type: "function_call",
-          call_id: toolCall.id,
-          name: toolCall.function?.name,
-          arguments: toolCall.function?.arguments ?? "{}",
-        });
-      }
+      const items = Array.isArray(message.response_output)
+        ? repairResponsesFunctionCallItemIds(message.response_output)
+        : assistantItemsWithoutOutput(message);
+      // 没有 response_output 的历史轮（中断恢复的轮次、换协议前的老消息）同样要补明文推理
+      result.push(...(options.ensurePlaintextReasoning ? withReasoningBackfill(items, message) : items));
       continue;
     }
 

@@ -78,6 +78,8 @@ providers:
 
 `auto` 不发送强度设置，由服务端使用默认值。DeepSeek 也为兼容旧客户端接受 `minimal`、`medium`、`xhigh`、`ultra` 等别名并在服务端映射；内置候选只展示原生值。字段格式和兼容行为见其 [思考模式文档](https://api-docs.deepseek.com/guides/thinking_mode/) 与 [Responses API 文档](https://api-docs.deepseek.com/api/create-response/)。OpenAI 的值也会因模型而异，详见 [Responses API](https://platform.openai.com/docs/api-reference/responses/create) 和 [Chat Completions](https://platform.openai.com/docs/api-reference/chat/create) 文档。兼容服务可能采用不同的字段或支持范围。
 
+DeepSeek 思维模式还有一条回传约束：声明了工具时，历史里每个助手轮都必须带回明文思维链（Responses 的 `reasoning` 项 / Chat Completions 的 `reasoning_content`），缺了整请求 400（`The reasoning_text in the thinking mode must be passed back to the API`）；`summary` 与 `encrypted_content` 不被接受。中断后从流式增量恢复的轮次、换 provider 前的老消息都可能缺明文：zbot 构造 Responses 请求时按落盘的 `reasoning_content` 补齐，仍拿不到就补占位文本，避免整轮失败；纯生成请求（不下发工具）不补。
+
 其余配置键（都在 `config.yaml` 里）：
 
 | 键 | 用途 |
