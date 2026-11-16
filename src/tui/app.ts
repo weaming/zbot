@@ -619,6 +619,9 @@ export class ChatApp {
      * herdr 的 agent 状态是 pane 级，多会话并行时必须看全体而不是刚结束的那个会话。
      */
     private syncHerdrState(): void {
+        // 同一 source 的 metadata 可能被别的进程 release 清掉：状态每次变化都
+        // 兜底补一次（内部按 5s 节流），否则 pane 会一直缺 session token。
+        herdrReporter.refreshMetadata();
         const block = this.herdrBlock ?? this.questions.blockedMessage();
         if (block) {
             herdrReporter.report("blocked", block);

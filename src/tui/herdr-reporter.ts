@@ -129,6 +129,8 @@ export class HerdrReporter {
     private lastState: HerdrState | undefined;
     private lastMessage: string | undefined;
     private lastMetadataKey: string | undefined;
+    /** 上次强制重发元数据的时间；状态变化时兜底补回可能被清掉的 session token。 */
+    private lastRefreshAt = 0;
     private lastErrorText: string | undefined;
     private released = false;
     private title: string | undefined;
@@ -244,6 +246,26 @@ export class HerdrReporter {
             }
         }
 
+        this.sendMetadata(false);
+    }
+
+    /**
+     * 强制把当前展示元数据再上报一次。herdr 侧同一 source 的 metadata 会被
+     * 其他进程的 release 清掉，而 reportMetadata 按内容去重；不主动重发就再也
+     * 补不回来（pane 因此失去 session token，外部无法识别当前会话）。
+     * 按最小间隔节流：状态变化可能很频繁，避免每次都 spawn herdr CLI。
+     */
+    refreshMetadata(minIntervalMs = 5_000): void {
+        if (!this.supported) return;
+        const now = this.now();
+        if (now - this.lastRefreshAt < minIntervalMs) return;
+        this.lastRefreshAt = now;
+        this.sendMetadata(true);
+    }
+
+    /** 组装并提交一次 metadata 上报；`force` 时跳过去重。 */
+    private sendMetadata(force: boolean): void {
+        if (!this.supported) return;
         const args = [
             "pane", "report-metadata", this.context!.paneId,
             "--source", SOURCE_ID,
@@ -259,10 +281,12 @@ export class HerdrReporter {
             return;
         }
 
+        const key = JSON.stringify(args);
+        if (!force) {
+            if (key === this.lastMetadataKey) return;
+            this.lastMetadataKey = key;
+        }
         args.push("--seq", String(this.nextSeq()));
-        const key = JSON.stringify(args.slice(0, -2));
-        if (key === this.lastMetadataKey) return;
-        this.lastMetadataKey = key;
         const cleared = [...this.pendingTokenClears];
         this.pendingTokenClears.clear();
         this.enqueue(args, undefined, () => {

@@ -25,6 +25,7 @@ const isHelpCli = printCliHelp(cliArgs);
  * 整条静态模块图拉进 TUI 进程，TUI 静态依赖里就会多出 HTTP 前端。
  */
 const isWebCli = cliArgs[0] === "web";
+const isStdioCli = cliArgs[0] === "stdio";
 /** herdr 分支同样用字面量判断：这条路径只调 herdr CLI 与事件日志，不该拉进 TUI 模块图。 */
 const isHerdrCli = cliArgs[0] === "herdr";
 /**
@@ -78,6 +79,14 @@ if (isHelpCli) {
         process.stderr.write(`${message}\n`);
     }
     process.exitCode = 2;
+} else if (isStdioCli) {
+    try {
+        const { runStdio } = await import("../cli/stdio.js");
+        await runStdio(cliArgs.slice(1));
+    } catch (error) {
+        process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+        process.exitCode = 1;
+    }
 } else if (isWebCli) {
     // 长驻宿主分支：与 TUI 并列，初始化同一套宿主环境后交给 web 入口，不再进入 TUI。
     loadConfigEarly();
@@ -293,6 +302,16 @@ async function main(): Promise<void> {
         return;
     }
 
+    // 顶层只接受上面这些子命令；其余参数（如 --version）必须报错退出。
+    // 否则会被当成"无子命令"直接起 TUI，并在 herdr pane 里抢走会话上报。
+    if (cliArgs.length > 0) {
+        process.stderr.write(
+            `未知参数：${cliArgs[0]}\n用法：zbot [resume <id> | session | herdr | mcp | web | stdio]\n`,
+        );
+        process.exitCode = 2;
+        return;
+    }
+
     // 启动失败（如 mcp-hub 偶发抖动）做一次重试，避免用户手动重启 TUI。
     try {
         await startChatApp();
@@ -306,7 +325,7 @@ async function main(): Promise<void> {
 // 末尾启动：模块级常量（SHUTDOWN_SIGNALS 等）此时已初始化，main() 不会在 TDZ 里跑。
 // web 分支自己跑完生命周期（长驻到收到终止信号），CLI 分支跑完就该退出，
 // 都不能再落回 TUI 的 main() —— 否则 `zbot herdr spawn` 会在调用方 pane 里起一个 TUI。
-if (!isHelpCli && !isSessionCli && !isHerdrCli && !isWebCli && !isRemovedCli) {
+if (!isHelpCli && !isSessionCli && !isHerdrCli && !isWebCli && !isStdioCli && !isRemovedCli) {
     main().catch((error) => {
         console.error(`💥 TUI main() rejected: ${error?.message ?? error}`);
         process.exit(1);
