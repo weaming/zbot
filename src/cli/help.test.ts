@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 import {
     MAIN_CLI_USAGE,
     STDIO_CLI_USAGE,
+    ACP_CLI_USAGE,
     PRINT_CLI_USAGE,
     RESUME_CLI_USAGE,
     WEB_CLI_USAGE,
@@ -32,6 +33,16 @@ function capture(run: () => boolean): { printed: boolean; output: string } {
 }
 
 describe("printCliHelp", () => {
+    test("ACP 帮助与无效参数在配置加载前分流", () => {
+        expect(capture(() => printCliHelp(["acp", "--help"])).output.trim()).toBe(ACP_CLI_USAGE);
+        expect(capture(() => printCliHelp(["help", "acp"])).output.trim()).toBe(ACP_CLI_USAGE);
+        const result = Bun.spawnSync([process.execPath, "src/tui/main.ts", "acp", "--invalid"], {
+            cwd: path.resolve(import.meta.dir, "../.."), stdout: "pipe", stderr: "pipe",
+        });
+        expect(result.exitCode).toBe(1);
+        expect(result.stdout.toString()).toBe("");
+        expect(result.stderr.toString()).toContain("用法：zbot acp");
+    });
     test("stdio 帮助在配置和宿主初始化之前分流", () => {
         expect(capture(() => printCliHelp(["stdio", "--help"])).output.trim()).toBe(STDIO_CLI_USAGE);
         expect(capture(() => printCliHelp(["help", "stdio"])).output.trim()).toBe(STDIO_CLI_USAGE);

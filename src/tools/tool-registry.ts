@@ -12,6 +12,7 @@ import { toolCatalog } from "./tool-catalog.js";
 import { formatToolDef } from "./tool-schema.js";
 import { readMcpSelection, readTurnMcpSelectionSnapshot } from "./session-mcp-selection.js";
 import { appendSessionToolLog } from "./session-log.js";
+import { getToolAuthorizer } from "../control/runtime.js";
 
 import type { ExecutableTool, ToolExecutionResult } from "./tool-interface.js";
 export type { ToolExecutionResult };
@@ -106,6 +107,11 @@ export const executeMcpTool = async (name: string, args: any, signal?: AbortSign
     }
 
     try {
+        const sessionId = typeof args?.__sessionId === "string" ? args.__sessionId : undefined;
+        const authorize = getToolAuthorizer(sessionId);
+        if (authorize && sessionId && !await authorize(name, args, sessionId, signal)) {
+            return { content: [{ type: "text", text: `用户未授权执行工具: ${name}` }], isError: true };
+        }
         const result = await tool.execute(args, signal);
         if (result.isError) {
             console.warn(`⚠️ [Tool] ${name} returned error`);

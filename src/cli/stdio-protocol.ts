@@ -38,6 +38,7 @@ interface ProtocolOptions {
     output: Writable;
     signal?: AbortSignal;
     onClosing?: () => void;
+    closeHost?: boolean;
     /** 读取恢复目标最近的事件；缺省时不重放历史。 */
     readHistory?: (sessionId: string, limit: number) => Promise<ReplayRecord[]>;
     registerRuntime?: (
@@ -439,7 +440,7 @@ export async function runStdioProtocol(options: ProtocolOptions): Promise<void> 
         if (!hasLostOwnership) notify("session/status", { state: "closing" });
         try {
             options.onClosing?.();
-            await host.close();
+            if (options.closeHost !== false) await host.close();
             await writer.flush();
         } finally {
             unregisterRuntime?.();

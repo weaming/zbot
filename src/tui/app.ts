@@ -99,6 +99,7 @@ import { setLogSession } from "../host/runtime-context.js";
 import { DraftStore, loadRichDrafts, persistRichDrafts } from "./draft-store.js";
 import { isCmdDown, isCmdGateSupported } from "./cmd-modifier.js";
 import { herdrReporter, tabSessionToken } from "./herdr-reporter.js";
+import { programStatus } from "./program-status.js";
 import { notifyTurnResult } from "./notifier.js";
 import {
     getChatApiSettings,
@@ -234,6 +235,7 @@ export class ChatApp {
     private readonly questions: QuestionCoordinator;
     /** 运行时能力注册的注销函数：退出时按身份注销，不留指向已退出前端的引用。 */
     private readonly unregisterRuntime: () => void;
+    private readonly unsubscribeProgramStatus: () => void;
     /**
      * 会话归属快照（探测/节流/在途去重/面板期间轮询 + 展示文案都在 tracker 内）。
      * 面板与切换入口必须让用户看得见归属，这里只负责把它接上宿主能力。
@@ -410,6 +412,15 @@ export class ChatApp {
         });
 
         // 终端前端提供的能力：提问通道 + MCP 通知（会话无关的通知按注册表广播）
+        this.unsubscribeProgramStatus = programStatus.supported ? this.agent.subscribeEvents((sessionId, event) => {
+            if (event?.type !== "turn_commit") return;
+            const { error, interrupted } = event.payload;
+            programStatus.session(sessionId, {
+                state: error ? "error" : interrupted ? "idle" : "done",
+                msg: error,
+            });
+            this.syncHerdrState();
+        }) : () => {};
         this.unregisterRuntime = registerSessionRuntime({
             ownsSession: sessionId => this.store.currentSessionId === sessionId
                 || this.store.hasSessionView(sessionId)
@@ -511,6 +522,7 @@ export class ChatApp {
                     }
                     break;
                 case "turn_start":
+                    programStatus.session(sessionId, { state: "working" });
                     this.setSessionPhase(sessionId, "waiting");
                     // 群消息/续跑等不经 send() 的回合也要让 herdr 立刻看到 working
                     this.syncHerdrState();
@@ -577,6 +589,7 @@ export class ChatApp {
         }
 
         this.agent.onSessionReleased = (sessionId, cause) => {
+            programStatus.remove(sessionId);
             void this.handleSessionReleased(sessionId, cause);
         };
         this.agent.onSessionSpawned = (sessionId, title) => {
@@ -621,6 +634,11 @@ export class ChatApp {
      * herdr 的 agent 状态是 pane 级，多会话并行时必须看全体而不是刚结束的那个会话。
      */
     private syncHerdrState(): void {
+        programStatus.sync(this.hasActiveTurn(), this.herdrBlock
+            ? { msg: this.herdrBlock, kind: "auth" }
+            : this.questions.blockedMessage()
+                ? { msg: this.questions.blockedMessage()!, kind: "question" }
+                : undefined);
         // 同一 source 的 metadata 可能被别的进程 release 清掉：状态每次变化都
         // 兜底补一次（内部按 5s 节流），否则 pane 会一直缺 session token。
         herdrReporter.refreshMetadata();
@@ -640,6 +658,8 @@ export class ChatApp {
             : undefined;
         const model = this.currentModelSelection?.model
             ?? getChatApiSettings(this.currentModelSelection).model;
+        programStatus.setTitle(session?.title);
+        this.syncHerdrState();
         herdrReporter.reportMetadata({
             title: session?.title ?? null,
             displayAgent: "zbot",
@@ -3242,6 +3262,8 @@ export class ChatApp {
     }
 
     forceShutdown(exitCode: number): void {
+        this.unsubscribeProgramStatus();
+        programStatus.release();
         this.unregisterRuntime();
         this.stopSpinnerTimer();
         // 强退前同步清状态：微任务队列没有机会在 process.exit 之后继续跑
@@ -3265,6 +3287,8 @@ export class ChatApp {
     private async exit(exitCode = 0): Promise<void> {
         if (this.exiting) return;
         this.exiting = true;
+        this.unsubscribeProgramStatus();
+        programStatus.release();
         // 前端能力先下线：退出过程中不该再有工具把提问/通知投给这个实例
         this.unregisterRuntime();
         this.unsubscribeBackgroundTaskCompletion();

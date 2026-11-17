@@ -77,6 +77,27 @@ async function appendTurn(
 }
 
 describe("EventLog", () => {
+    it("逐行重放跳过损坏内容，提前停止后仍可重新读取", async () => {
+        const log = new EventLog();
+        const sessionId = "iterate-history";
+        await log.append(sessionId, "user_message", { text: "第一条", turnId: "turn-1" });
+        const filename = path.join(getSessionsDir("events"), `${sanitizeSessionId(sessionId)}.jsonl`);
+        fs.appendFileSync(filename, "\n{broken\nnull\n{}\n");
+        await log.append(sessionId, "user_message", { text: "第二条", turnId: "turn-2" });
+        const events = [];
+        for await (const event of log.iterate(sessionId)) events.push(event);
+        expect(events.map(event => event.type)).toEqual(["user_message", "user_message"]);
+        let firstSeq: number | undefined;
+        for await (const event of log.iterate(sessionId)) {
+            firstSeq = event.seq;
+            break;
+        }
+        expect(firstSeq).toBe(events[0]!.seq);
+        const replayed = [];
+        for await (const event of log.iterate(sessionId)) replayed.push(event);
+        expect(replayed).toEqual(events);
+    });
+
     it("重放历史修复事件后移除空助手消息并保留有效工具调用", async () => {
         const log = new EventLog();
         const sessionId = "repair-empty-assistant";

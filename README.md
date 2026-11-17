@@ -54,7 +54,7 @@ vi ~/.zbot/config.yaml
 ~/.bun/bin/zbot herdr teardown <id> --tab=<tabId>              # 收尾：归档 + 关掉那个标签页
 ```
 
-CLI 只负责把消息投递给运行中的 TUI，不会在本地无 UI 启动模型回合。
-没有持有者时，请打开 TUI（或在 herdr 里 `zbot herdr spawn` 开一个）。
+会话 CLI 将消息投递给现有持有者；标准 ACP 客户端可通过 `acp` 入口启动独立宿主。
+TUI 支持 herdr-core 状态上报，三级能力与接入方式见 [Herdr 集成](docs/herdr.md)。
 
 文档：[会话命令行](docs/session-cli.md)、[MCP 多服务配置](docs/mcp.md)、[TUI 链接与终端交互](docs/tui-links.md)、[Herdr 集成](docs/herdr.md)。

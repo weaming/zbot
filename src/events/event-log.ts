@@ -5,6 +5,7 @@
 
 import fs from "fs";
 import path from "path";
+import { createInterface } from "node:readline";
 import { getSessionsDir } from "../utils/runtime-paths.js";
 import { sanitizeSessionId } from "../utils/session-id.js";
 import type { StreamDelta } from "../types/chat.js";
@@ -88,6 +89,27 @@ export class EventLog {
 
     private eventFilePath(sessionId: string): string {
         return path.join(getSessionsDir("events"), `${sanitizeSessionId(sessionId)}.jsonl`);
+    }
+
+    /** 顺序重放主日志，逐条消费，避免长会话重放时复制整份事件列表。 */
+    async *iterate(sessionId: string): AsyncGenerator<AgentEvent> {
+        const stream = fs.createReadStream(this.eventFilePath(sessionId), { encoding: "utf8" });
+        const lines = createInterface({ input: stream, crlfDelay: Infinity });
+        try {
+            for await (const line of lines) {
+                if (!line.trim()) continue;
+                let event: AgentEvent;
+                try { event = JSON.parse(line); }
+                catch {
+                    console.warn(`[EventLog] 跳过损坏事件行 (${sessionId})`);
+                    continue;
+                }
+                if (event && typeof event === "object" && Number.isSafeInteger(event.seq)) yield event;
+            }
+        } finally {
+            lines.close();
+            stream.destroy();
+        }
     }
 
     private streamFilePath(sessionId: string): string {

@@ -1,5 +1,61 @@
 # Herdr 集成
 
+## 标准 ACP 与 herdr-core
+
+提供两个独立入口：`zbot acp` 使用标准 Agent Client Protocol v1，在 stdin/stdout 上传输 JSON-RPC；
+TUI 在 herdr-core 终端内使用 OSC 7501 上报状态。两者可以分别使用，旧 Herdr pane CLI 集成也继续保留。
+协议依据为 [ACP SDK](https://github.com/agentclientprotocol/typescript-sdk) 与
+[herdr-core 状态契约](https://github.com/herdrdev/herdr-core/blob/master/crates/herdr-core/src/status.rs)。
+
+三级能力按累计范围分组，本次均已实现：
+
+| 分组 | 标准 ACP | herdr-core |
+| --- | --- | --- |
+| 最小实现 | initialize、session/new、session/prompt、文本流、session/cancel | 自动检测 HC_TERMINAL_ID 与 TTY，idle/working/done/error，退出 clear |
+| 扩展实现 | 工具状态、逐次权限确认、协商后的表单提问、图片和嵌入文本资源、模型配置切换 | blocked（提问/认证）、中文标题与说明、每会话子状态、根状态聚合 |
+| 完整实现 | 会话列表与分页、load 历史重放、resume、close、会话隔离的 stdio/HTTP/SSE MCP、断线与超时清理、有界队列 | 状态去重、子记录数量限制与回收、多会话并发聚合、真实 hc 联调 |
+
+这里的“完整”指本卡片定义的能力范围；未声明支持音频、附加工作目录、自定义 systemPrompt、
+会话模式、删除会话及实验性 ACP v2。客户端应以 initialize 返回的能力为准。
+
+### 接入标准 ACP
+
+```sh
+zbot acp --cwd ~/src/project
+```
+
+在客户端的 agent 配置中设置 executable 为 `zbot`，args 为 `["acp"]`；客户端通过
+session/new 的绝对 cwd 指定项目目录。provider、密钥及默认模型沿用 zbot 本地配置，
+stdout 专用于协议消息，运行日志写入日志文件。原有 `zbot stdio` 使用另一套协议，客户端应选择正确入口。
+
+- session/new 返回完整会话 ULID；load 在响应前通过 session/update 重放历史，resume 继续会话而不重放。
+- close 释放持有权并保留历史；已归档会话需先在原生管理入口取消归档，载入不会抢占其他持有者。
+- 每个工具调用通过 session/request_permission 获取 allow_once 或 reject_once，异常和取消均拒绝执行。
+  支持 form elicitation 的客户端可使用 ask_user，未声明该能力时不提供提问工具。
+- 客户端传入的 MCP 服务仅属于当前会话，关闭或断开连接即撤销工具与连接；连接失败整体回收。
+  MCP 断线返回工具错误，可关闭后重新载入；不会自动重试已执行的工具。
+- 每连接最多 32 个会话、128 个在途请求；单条协议消息上限 8 MiB，通知队列上限 4 MiB，
+  输出停滞 5 秒后关闭连接。重复请求 id 或超限会终止连接并清理资源。
+- 单次 prompt 最多 128 个内容块、2 MiB 文本及合计 4 MiB 图片；resource_link 作为引用文本传递，
+  不自动读取文件或抓取网络资源。支持 PNG/JPEG/WebP/GIF，拒绝音频及二进制嵌入资源。
+
+### 接入 herdr-core
+
+在 `hc run` 启动的终端中运行普通 zbot TUI 即自动生效，无需设置旧版 HERDR_ENV。
+根状态优先级为 blocked、working、error、done、idle；任一会话等待提问或启动认证都会显示 blocked。
+子会话状态不增加根回合计数，退出时同步发送 clear。标准 ACP 入口不输出 OSC 帧。
+
+已使用 hc 0.1.13 验证中文字段、根/子状态、blocked 与回合计数。集成测试使用独立 HC_SESSION、
+socket 与 XDG 目录，结束只清理自身终端和服务。
+
+```sh
+bun test tests/integration/acp.test.ts tests/integration/program-status.test.ts
+```
+
+ACP 集成测试启动真实 CLI、本地流式模型及 MCP 子进程，覆盖权限确认、工具调用与跨进程历史恢复。
+
+## 旧 Herdr pane 集成
+
 zbot TUI 在 [Herdr](https://herdr.dev) pane 内运行时，自动把自身发现为一个 agent，
 并上报生命周期状态与展示元数据。全部走官方 CLI（`$HERDR_BIN_PATH`），
 仅在 `HERDR_ENV=1` 且 `HERDR_PANE_ID` / `HERDR_BIN_PATH` 齐全时生效，否则完全 no-op。

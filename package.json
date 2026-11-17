@@ -21,6 +21,7 @@
     "test:integration": "bun test tests/integration"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "^2.7.0",
     "@earendil-works/pi-tui": "^0.85.1",
     "@modelcontextprotocol/client": "^2.0.0",
     "axios": "^1.15.0",

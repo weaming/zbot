@@ -16,6 +16,7 @@ export const MAIN_CLI_USAGE = [
     "  zbot resume <id>           载入旧会话并进入 TUI（无 UI 续聊已禁用）",
     "  zbot session <子命令>      会话管理：list/show/new/run/rename/archive/send/wait/queue/delete",
     "  zbot stdio [--cwd <目录>]   启动独立 JSONL 会话宿主（协议 version 1）",
+    "  zbot acp [--cwd <目录>]     启动标准 Agent Client Protocol v1 宿主",
     "  zbot herdr <子命令>        在 herdr 里开新标签页并启动新会话：spawn",
     "  zbot mcp <子命令>          配置 MCP 服务：list/add/remove",
     "  zbot help [子命令]         查看用法",
@@ -33,6 +34,18 @@ export const STDIO_CLI_USAGE = [
     "握手返回随机 instanceId；create/status 带本进程 instanceId、sessionId，状态检查实际持有权。",
     "通知均带 instanceId/sessionId；session/record 的 record 字段为原持久化事件。",
     "当前没有交互作答入口，ask_user 明确取消，不自动批准；EOF 或 SIGTERM 清理宿主。",
+].join("\n");
+
+export const ACP_CLI_USAGE = [
+    "用法：zbot acp [--cwd <目录>]",
+    "",
+    "stdin/stdout 使用标准 ACP v1 JSON-RPC 2.0，每行一个消息；日志不写 stdout。",
+    "支持 initialize、session/new、session/prompt、session/cancel、session/update。",
+    "支持 session/load（重放历史）、session/resume、session/list、session/close 和 session/set_config_option。",
+    "支持文本、资源链接、内嵌文本、图片及会话隔离的 MCP stdio/HTTP/SSE 服务。",
+    "工具执行经 session/request_permission 交互授权；支持客户端协商的 elicitation 表单提问。",
+    "模型与 provider 凭据沿用本地配置；关闭会话释放持有权，保留历史，不归档。",
+    "最多同时持有 32 个会话；EOF 或退出信号取消在途回合并清理连接。",
 ].join("\n");
 
 export const WEB_CLI_USAGE = [
@@ -130,6 +143,8 @@ const HELP_FLAGS = new Set(["-h", "--help"]);
 
 function usageFor(topic: string): string {
     switch (topic) {
+        case "acp":
+            return ACP_CLI_USAGE;
         case "stdio":
             return STDIO_CLI_USAGE;
         case "web":

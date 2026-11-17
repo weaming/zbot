@@ -76,6 +76,7 @@ export interface SessionRuntimeCapabilities {
     setSessionCwd?(sessionId: string, cwd: string): Promise<void>;
     /** 交互提问（只有终端前端有）。 */
     askUser?(request: UserQuestionRequest, signal?: AbortSignal): Promise<UserAnswer>;
+    authorizeTool?(name: string, args: unknown, sessionId: string, signal?: AbortSignal): Promise<boolean>;
     /** 会话无关的 MCP 授权/状态通知（广播给所有提供者）。 */
     notifyMcpNotice?(notice: McpNotice): void;
 }
@@ -173,6 +174,11 @@ export function getSessionCwdSetter(sessionId?: string): ((cwd: string) => Promi
 export function getUserQuestionChannel(sessionId?: string): UserQuestionChannel | undefined {
     const ask = pick("askUser", sessionId);
     return ask ? { ask: (request, signal) => ask(request, signal) } : undefined;
+}
+
+/** 前端可按会话提供工具权限交互；未装配时沿用宿主原有执行策略。 */
+export function getToolAuthorizer(sessionId?: string): SessionRuntimeCapabilities["authorizeTool"] {
+    return pick("authorizeTool", sessionId);
 }
 
 /**

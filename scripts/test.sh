@@ -25,7 +25,7 @@ fi
 # 每个 mock 文件独占进程（进程级 mock 不能混），但彼此无依赖，可并行缩短总时长
 if [ -n "$MOCKED" ]; then
     printf '%s\n' "$MOCKED" \
-        | xargs -P "${MOCK_JOBS:-4}" -o -I{} sh -c 'bun test "$1" || exit 1' _ {} \
+        | xargs -P "${MOCK_JOBS:-4}" -I{} sh -c 'bun test "$1" || exit 1' _ {} \
         || status=1
 fi
 

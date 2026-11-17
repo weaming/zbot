@@ -50,6 +50,7 @@ afterAll(() => {
 
 function makeFakeAgent() {
     return {
+        claimedSessionIds: () => [],
         listSessions: async () => [],
         readSessionEvents: async () => [],
         createSession: async () => ({ sessionId: "sess-firstframe" }),
