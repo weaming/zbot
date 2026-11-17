@@ -25,6 +25,9 @@ import {
 } from "./protocol.js";
 import { listOwnership, probeOwnership, type PeerOwnership } from "./registry.js";
 import { PeerServer } from "./server.js";
+import { subscribeLive } from "../events/live-stream.js";
+import type { SessionEventView } from "../events/session-event-view.js";
+import { ObserveServer, type ObserveSnapshot } from "../observe/server.js";
 import type { SessionOrigin } from "../types/session.js";
 import { isSameSession } from "../utils/session-id.js";
 import type { SessionDelegation } from "../types/session.js";
@@ -100,6 +103,12 @@ export interface SessionControlHost {
     cancelQueued?(sessionId: string, msgId: string): { ok: true } | { ok: false; reason: "not_found" | "running" };
     /** 指定会话的排队快照（who / queue_state 观测用）。 */
     queueState?(sessionId: string): PeerQueuedEntry[];
+    /** 观察通道：按 since 读一段界面视图事件（只读持久化事实）。 */
+    readSessionEvents?(sessionId: string, since: number, limit: number): Promise<ObserveSnapshot>;
+    /** 会话当前最后 seq。 */
+    sessionLastSeq?(sessionId: string): Promise<number>;
+    /** 订阅会话的持久化事件（已映射为界面视图），返回退订函数。 */
+    watchSessionEvents?(sessionId: string, listener: (view: SessionEventView) => void): () => void;
     /**
      * 改会话标题并返回真正生效的标题。标题是元数据：回合执行中也允许改，
      * 由持有者在本进程内落盘，避免命令行跨进程写同一份事件日志。
@@ -138,6 +147,11 @@ export const MAX_SPAWNED_SESSIONS = 8;
 
 export class SessionControl {
     private readonly servers = new Map<string, PeerServer>();
+    /**
+     * 观察通道：每个被持有的会话一条只读旁路 socket。
+     * 与控制 socket 同生共死，但**不参与归属判定**——绑不上只降级，不影响投递。
+     */
+    private readonly observers = new Map<string, ObserveServer>();
     /** 本实例派生或唤醒后接管的子会话；释放后移除。 */
     private readonly spawned = new Set<string>();
     /** 用户选择 auto_close 的子会话：首个期望结果的回合完成后归档。 */
@@ -239,6 +253,7 @@ export class SessionControl {
                     if (delegation) return false;
                     if (this.host.isBusy(sessionId)) return false;
                     this.servers.delete(sessionId);
+                    this.stopObserve(sessionId);
                     this.spawned.delete(sessionId);
                     this.autoCloseSpawned.delete(sessionId);
                     this.closingSpawned.delete(sessionId);
@@ -255,6 +270,7 @@ export class SessionControl {
         const first = await server.bind();
         if (first.ok) {
             this.servers.set(sessionId, server);
+            this.startObserve(sessionId);
             return { ok: true };
         }
         if (first.reason === "error") return { ok: false, reason: "error", message: first.message };
@@ -281,6 +297,7 @@ export class SessionControl {
         const second = await server.bind();
         if (second.ok) {
             this.servers.set(sessionId, server);
+            this.startObserve(sessionId);
             return { ok: true };
         }
         if (second.reason === "error") return { ok: false, reason: "error", message: second.message };
@@ -295,11 +312,48 @@ export class SessionControl {
         this.spawned.delete(sessionId);
         this.autoCloseSpawned.delete(sessionId);
         this.closingSpawned.delete(sessionId);
+        this.stopObserve(sessionId);
         const server = this.servers.get(sessionId);
         if (!server) return;
 
         this.servers.delete(sessionId);
         server.unbind();
+    }
+
+    /**
+     * 打开会话的观察旁路：只在宿主提供读/订阅能力时启用。
+     * 绑定失败只记一条警告——观察通道坏了不该影响投递、归属或回合执行。
+     */
+    private startObserve(sessionId: string): void {
+        if (this.observers.has(sessionId)) return;
+        const { readSessionEvents, sessionLastSeq, watchSessionEvents } = this.host;
+        if (!readSessionEvents || !sessionLastSeq || !watchSessionEvents) return;
+
+        const observer = new ObserveServer(sessionId, {
+            title: () => this.host.title(sessionId),
+            isBusy: () => this.closingSpawned.has(sessionId) || this.host.isBusy(sessionId),
+            lastSeq: () => sessionLastSeq(sessionId),
+            snapshot: (since, limit) => readSessionEvents(sessionId, since, limit),
+            watchEvents: listener => watchSessionEvents(sessionId, listener),
+            watchLive: listener => subscribeLive(sessionId, listener),
+        });
+        this.observers.set(sessionId, observer);
+        void observer.bind().then(result => {
+            if (result.ok) return;
+            // 已被别的进程占着：降级（不抢占），其余原因留一条警告即可
+            this.observers.delete(sessionId);
+            if (result.reason !== "owned") {
+                console.warn(`⚠️ [control] 观察通道未启用（${sessionId}）：${result.message ?? "未知原因"}`);
+            }
+        });
+    }
+
+    /** 关掉观察旁路：只释放观察 socket 文件，不触碰控制 socket。 */
+    private stopObserve(sessionId: string): void {
+        const observer = this.observers.get(sessionId);
+        if (!observer) return;
+        this.observers.delete(sessionId);
+        observer.unbind();
     }
 
     // ── 派生子会话 ──────────────────────────────────────────────
@@ -675,6 +729,8 @@ export class SessionControl {
     close(): void {
         for (const server of this.servers.values()) server.unbind();
         this.servers.clear();
+        for (const observer of this.observers.values()) observer.unbind();
+        this.observers.clear();
         this.spawned.clear();
         this.autoCloseSpawned.clear();
         this.closingSpawned.clear();

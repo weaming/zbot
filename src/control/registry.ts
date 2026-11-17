@@ -12,6 +12,7 @@ import { randomUUID } from "node:crypto";
 import { PeerConnectError, requestOnce } from "./client.js";
 import { getSocketPath, listSocketSessionIds } from "./paths.js";
 import type { PeerOwnerInfo } from "./protocol.js";
+import { cleanupStaleObserveSockets } from "../observe/cleanup.js";
 
 /** 归属探测与释放协商的默认超时。 */
 const DEFAULT_PROBE_TIMEOUT_MS = 500;
@@ -122,6 +123,9 @@ export async function cleanupStaleSockets(timeoutMs = DEFAULT_PROBE_TIMEOUT_MS):
             // 已被别的实例清理
         }
     }
+    // 观察 socket 不表达归属：它按「连不连得上」单独回收，绝不参与上面的归属判定。
+    // TUI 被抓包 kill、或会话正被切换时，控制 socket 会被清而观察文件留在原地，这里补上。
+    removed.push(...(await cleanupStaleObserveSockets(timeoutMs)));
     return removed;
 }
 

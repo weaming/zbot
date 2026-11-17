@@ -12,7 +12,6 @@ import { randomBytes } from "node:crypto";
 import { initializeSessionHostRuntime, LocalSessionHost } from "../host/session-host.js";
 import { JobRunner } from "../jobs/runner.js";
 import { JobStore } from "../jobs/store.js";
-import { pushLiveEnd, pushLiveText, pushLiveThinking } from "../web/live-stream.js";
 import { startHttpServer, type HttpServerHandle } from "../web/http-server.js";
 import { joinInputs, takeInputs } from "../web/pending-inputs.js";
 import { setJobCommentWriter } from "../tools/job-context.js";
@@ -255,30 +254,6 @@ export async function runWeb(argv: string[]): Promise<void> {
     process.stderr.write(`zbot web 已就绪 ${server.url}\n`);
     process.stderr.write(`任务队列：${jobsDbPath}（并发上限 ${resolveMaxConcurrent()}）\n`);
     process.stderr.write(`访问令牌：${token}\n`);
-    // 把宿主的事件流接到实时信号：只有界面要渲染的两类——正在生成的正文、是否在思考。
-    // 推理正文与工具参数增量都不推（前者不渲染，后者等消息定稿后随工具块一次给）。
-    host.onEvent = (_requestId, sessionId, event) => {
-        switch (event.type) {
-            case "text_delta":
-                pushLiveText(sessionId, event.delta);
-                break;
-            case "reasoning_delta":
-                pushLiveThinking(sessionId, true);
-                break;
-            case "message_end":
-            case "error":
-            case "aborted":
-                pushLiveEnd(sessionId);
-                break;
-            case "steer_update":
-                if (event.phase === "completed" || event.phase === "steered") pushLiveEnd(sessionId);
-                break;
-            default:
-                break;
-        }
-    };
-
-
     // 长驻服务：单次漏处理的 rejection 不该带走服务；未捕获异常则视为状态不可信，走收尾退出。
     // 处理器在 runtimeReady 之后注册：启动期没有需要清理的资源，此时收到信号直接退出即可。
     let stopping = false;

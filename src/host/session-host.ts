@@ -45,6 +45,8 @@ import { createUlid } from "../utils/ulid.js";
 import { getShanghaiISOString } from "../utils/time.js";
 import { acquireSessionLock, isSessionLockedByOtherSync, type SessionLockHandle } from "../utils/session-lock.js";
 import { mergeUsage, type UIEvent } from "../events/ui-events.js";
+import { toSessionEventView, toSessionEventViews } from "../events/session-event-view.js";
+import { publishUIEvent } from "../events/live-stream.js";
 import type { UsageInfo } from "../types/chat.js";
 import type { AgentEvent, AgentEventPayloads } from "../events/agent-events.js";
 import { MAX_SESSION_TITLE_LENGTH, type Session } from "../types/session.js";
@@ -207,6 +209,23 @@ export class LocalSessionHost implements SessionHost {
             accept: (message) => this.acceptPeerMessage(message),
             cancelQueued: (sessionId, msgId) => this.cancelQueuedPeerMessage(sessionId, msgId),
             queueState: (sessionId) => this.peerInbox.snapshot(sessionId),
+            // 观察通道：只读持久化事实（带 seq 的界面视图），不参与投递与归属。
+            readSessionEvents: async (sessionId, since, limit) => {
+                const events = await this.eventLog.read(sessionId, since + 1, limit, { persistedOnly: true });
+                const lastSeq = await this.eventLog.lastSeq(sessionId);
+                return {
+                    events: toSessionEventViews(events),
+                    lastSeq,
+                    more: events.length >= limit && lastSeq > (events[events.length - 1]?.seq ?? since),
+                };
+            },
+            sessionLastSeq: sessionId => this.eventLog.lastSeq(sessionId),
+            watchSessionEvents: (sessionId, listener) =>
+                this.eventLog.subscribe((session, event) => {
+                    if (session !== sessionId || !event) return;
+                    const view = toSessionEventView(event);
+                    if (view) listener(view);
+                }),
             onOutbound: (from, message) => {
                 void this.recordPeerMessage(from, message, "out").catch((error) => {
                     console.error("⚠️ [host] 会话间消息落盘失败:", error);
@@ -1765,5 +1784,7 @@ export class LocalSessionHost implements SessionHost {
 
     private notify(requestId: number, sessionId: string, event: UIEvent): void {
         this.onEvent?.(requestId, sessionId, event);
+        // 瞬态信号只喂一次：TUI 渲染、web 的 SSE 与 observe 通道共用同一份
+        publishUIEvent(sessionId, event);
     }
 }

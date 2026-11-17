@@ -57,4 +57,4 @@ vi ~/.zbot/config.yaml
 会话 CLI 将消息投递给现有持有者；标准 ACP 客户端可通过 `acp` 入口启动独立宿主。
 TUI 支持 herdr-core 状态上报，三级能力与接入方式见 [Herdr 集成](docs/herdr.md)。
 
-文档：[会话命令行](docs/session-cli.md)、[MCP 多服务配置](docs/mcp.md)、[TUI 链接与终端交互](docs/tui-links.md)、[Herdr 集成](docs/herdr.md)。
+文档：[会话命令行](docs/session-cli.md)、[观察通道](docs/observe-channel.md)、[MCP 多服务配置](docs/mcp.md)、[TUI 链接与终端交互](docs/tui-links.md)、[Herdr 集成](docs/herdr.md)。
