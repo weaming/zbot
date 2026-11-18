@@ -25,6 +25,9 @@ import {
 } from "./protocol.js";
 import { listOwnership, probeOwnership, type PeerOwnership } from "./registry.js";
 import { PeerServer } from "./server.js";
+import { answerPendingQuestion, pendingQuestion } from "./question-registry.js";
+import type { UserQuestionAnswer } from "../utils/user-question.js";
+import type { PeerQuestionAnswer } from "./protocol.js";
 import { subscribeLive } from "../events/live-stream.js";
 import type { SessionEventView } from "../events/session-event-view.js";
 import { ObserveServer, type ObserveSnapshot } from "../observe/server.js";
@@ -245,6 +248,7 @@ export class SessionControl {
                     : this.host.accept(message),
                 cancelQueued: (msgId) => this.host.cancelQueued?.(sessionId, msgId) ?? { ok: false, reason: "not_found" },
                 queueState: () => this.host.queueState?.(sessionId) ?? [],
+                answer: (requestId, answers, cancel) => this.answerQuestion(sessionId, requestId, answers, cancel),
                 ...(this.host.rename
                     ? { rename: (title: string) => this.host.rename!(sessionId, title) }
                     : {}),
@@ -354,6 +358,37 @@ export class SessionControl {
         if (!observer) return;
         this.observers.delete(sessionId);
         observer.unbind();
+    }
+
+    /**
+     * 外部作答：按题号把答案映射回 pending 的题干，交给注册表兑现。
+     * 没有对应提问、或一句都没答，都如实回原因，不假装成功。
+     */
+    private answerQuestion(
+        sessionId: string,
+        requestId: string,
+        answers: PeerQuestionAnswer[],
+        cancel: boolean,
+    ): { ok: true } | { ok: false; reason: "not_found" | "cancelled" | "empty" } {
+        const pending = pendingQuestion(sessionId);
+        if (!pending || pending.requestId !== requestId) return { ok: false, reason: "not_found" };
+        if (cancel) return answerPendingQuestion(sessionId, requestId, { cancelled: true });
+
+        const built: UserQuestionAnswer[] = pending.questions.map((question, index) => {
+            const id = `${requestId}:${index}`;
+            const given = answers.find(answer => answer.id === id || answer.id === String(index));
+            const selected = given?.selected ?? [];
+            return {
+                header: question.header,
+                question: question.question,
+                selected,
+                ...(given?.custom ? { custom: given.custom } : {}),
+            };
+        });
+        if (built.every(answer => answer.selected.length === 0 && !answer.custom)) {
+            return { ok: false, reason: "empty" };
+        }
+        return answerPendingQuestion(sessionId, requestId, { cancelled: false, answers: built });
     }
 
     // ── 派生子会话 ──────────────────────────────────────────────

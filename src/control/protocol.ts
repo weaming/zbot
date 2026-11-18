@@ -98,6 +98,8 @@ export type PeerAcceptOutcome =
 
 export type PeerReply =
     | PeerAck
+    /** 外部作答的结果：not_found 表示没有对应提问（或已被面板答过）。 */
+    | { type: "answer_result"; id: string; ok: boolean; reason?: "not_found" | "cancelled" | "empty" }
     | { type: "who"; id: string; info: PeerOwnerInfo }
     | { type: "release_result"; id: string; ok: boolean; reason?: "busy" }
     | { type: "pending_state"; id: string; done: PeerResult[]; pending: string[] }
@@ -112,6 +114,8 @@ type PeerPush = { type: "result"; result: PeerResult };
 
 export type PeerRequest =
     | { type: "deliver"; id: string; message: PeerMessage }
+    /** 作答一次提问：answers 按题给选项，cancel 表示整次撤销。 */
+    | { type: "answer"; id: string; requestId: string; answers?: PeerQuestionAnswer[]; cancel?: boolean }
     | { type: "who"; id: string }
     | { type: "release"; id: string }
     /** keep=true 只读查看暂存结果，不消费（命令行 wait 与并发轮询用）。 */
@@ -121,6 +125,13 @@ export type PeerRequest =
     /** 让持有者把会话标题改成 title（命令行的运行时改名走这条路）。 */
     | { type: "rename"; id: string; title: string }
     | { type: "ping"; id: string };
+
+/** 一道题的作答：selected 是选项 label，custom 是「其他（自己输入）」。 */
+export interface PeerQuestionAnswer {
+    id: string;
+    selected?: string[];
+    custom?: string;
+}
 
 export type PeerFrame = PeerRequest | PeerReply | PeerPush;
 

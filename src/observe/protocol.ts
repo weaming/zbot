@@ -56,8 +56,24 @@ export type ObservePush =
     | { type: "events"; events: SessionEventView[] }
     /** 瞬态信号（正在生成的正文、是否在思考、回合收尾），不带 seq，不参与游标。 */
     | { type: "live"; frame: LiveFrame }
+    /** 有提问在等作答：外部可以经控制通道的 `answer` 帧作答。 */
+    | { type: "question"; question: ObserveQuestion }
+    /** 那次提问已经结束（作答、取消或回合收尾）。 */
+    | { type: "question_closed"; requestId: string }
     /** 丢过帧：客户端应从 fromSeq 之后重新 snapshot，不要拿空隙当"没发生"。 */
     | { type: "gap"; fromSeq: number; toSeq: number };
+
+/** 一道待答题目：题干与选项，选项回给来源的是 label。 */
+export interface ObserveQuestion {
+    requestId: string;
+    sessionId: string;
+    questions: Array<{
+        header: string;
+        question: string;
+        options: Array<{ label: string; description?: string }>;
+        multiSelect?: boolean;
+    }>;
+}
 
 export type ObserveFrame = ObserveReply | ObservePush | { type: "bad_request"; message: string };
 

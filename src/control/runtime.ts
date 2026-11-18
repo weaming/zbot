@@ -17,6 +17,7 @@
 import type { SessionControl } from "./channel.js";
 import type { McpNotice } from "../types/mcp.js";
 import type { UserAnswer, UserQuestionRequest } from "../utils/user-question.js";
+import { askWithRegistry } from "./question-registry.js";
 
 /** 会话目录条目：只暴露工具与 UI 需要的字段。 */
 interface SessionDirectoryEntry {
@@ -173,7 +174,13 @@ export function getSessionCwdSetter(sessionId?: string): ((cwd: string) => Promi
 
 export function getUserQuestionChannel(sessionId?: string): UserQuestionChannel | undefined {
     const ask = pick("askUser", sessionId);
-    return ask ? { ask: (request, signal) => ask(request, signal) } : undefined;
+    // 登记到会话级注册表：外部（控制通道）也能作答，面板收到 abort 会让位。
+    return ask
+        ? {
+              ask: (request, signal) =>
+                  askWithRegistry(request.sessionId || sessionId || "", request, signal, ask),
+          }
+        : undefined;
 }
 
 /** 前端可按会话提供工具权限交互；未装配时沿用宿主原有执行策略。 */

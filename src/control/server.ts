@@ -18,6 +18,7 @@ import {
     type PeerFrame,
     type PeerMessage,
     type PeerOwnerInfo,
+    type PeerQuestionAnswer,
     type PeerQueuedEntry,
     type PeerResult,
 } from "./protocol.js";
@@ -37,6 +38,11 @@ export interface PeerServerHandlers {
     accept(message: PeerMessage): Promise<PeerAcceptOutcome> | PeerAcceptOutcome;
     /** 撤销排队中的消息（只对仍在队列里的生效）。 */
     cancelQueued?(msgId: string): { ok: true } | { ok: false; reason: "not_found" | "running" };
+    /**
+     * 外部作答：把答案交给等在前端面板里的提问。
+     * 没有对应提问（未在等、已被面板答过）时回 not_found，不伪造成功。
+     */
+    answer?(requestId: string, answers: PeerQuestionAnswer[], cancel: boolean): { ok: true } | { ok: false; reason: "not_found" | "cancelled" | "empty" };
     /** 当前排队快照（观测用）。 */
     queueState?(): PeerQueuedEntry[];
     /** 改会话标题：返回真正生效的标题（宿主按自己的上限截断）。忙时也允许。 */
@@ -222,6 +228,17 @@ export class PeerServer {
             case "cancel_queued":
                 this.handleCancelQueued(socket, frame.id, frame.msgId);
                 return;
+            case "answer": {
+                const result = this.handlers.answer?.(frame.requestId, frame.answers ?? [], frame.cancel === true)
+                    ?? { ok: false as const, reason: "not_found" as const };
+                writeFrame(socket, {
+                    type: "answer_result",
+                    id: frame.id,
+                    ok: result.ok,
+                    ...(result.ok ? {} : { reason: result.reason }),
+                });
+                return;
+            }
             case "rename":
                 await this.handleRename(socket, frame.id, frame.title);
                 return;

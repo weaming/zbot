@@ -14,6 +14,7 @@ import net from "net";
 import type { LiveFrame } from "../events/live-stream.js";
 import type { SessionEventView } from "../events/session-event-view.js";
 import { ensureObserveDir, getObserveSocketPath } from "./paths.js";
+import { pendingQuestion, subscribeQuestions, type PendingQuestion } from "../control/question-registry.js";
 import {
     encodeObserveFrame,
     MAX_SNAPSHOT_EVENTS,
@@ -277,6 +278,14 @@ export class ObserveServer {
             connection.detach.push(
                 this.handlers.watchEvents(view => this.onEvent(connection, view)),
                 this.handlers.watchLive(frame => this.onLive(connection, frame)),
+                subscribeQuestions(event => {
+                    if (event.question.sessionId !== this.sessionId) return;
+                    if (event.kind === "asked") {
+                        this.onQuestion(connection, event.question);
+                    } else {
+                        this.write(connection, { type: "question_closed", requestId: event.question.requestId });
+                    }
+                }),
             );
         }
         const lastSeq = await this.lastSeq();
@@ -294,6 +303,9 @@ export class ObserveServer {
         const buffered = connection.buffered;
         connection.buffered = [];
         for (const view of buffered) this.sendEvents(connection, [view]);
+        // 订阅瞬间已经有提问在等：先补一条，别让它等到下一次变化才出现。
+        const asked = pendingQuestion(this.sessionId);
+        if (asked) this.onQuestion(connection, asked);
     }
 
     /** 持久化事件：订阅回放期间先攒着，保证下发 seq 单调。 */
@@ -312,6 +324,19 @@ export class ObserveServer {
         if (connection.buffering || connection.socket.writableLength > MAX_BACKLOG_BYTES) return;
         const push: ObservePush = { type: "live", frame };
         this.write(connection, push);
+    }
+
+    /** 待答提问：外部界面据此显示可作答的选项。 */
+    private onQuestion(connection: Connection, question: PendingQuestion): void {
+        if (connection.buffering || connection.socket.writableLength > MAX_BACKLOG_BYTES) return;
+        this.write(connection, {
+            type: "question",
+            question: {
+                requestId: question.requestId,
+                sessionId: question.sessionId,
+                questions: question.questions,
+            },
+        });
     }
 
     private sendEvents(connection: Connection, views: SessionEventView[]): void {
