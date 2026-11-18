@@ -2,21 +2,26 @@
 import type { SessionRuntimeCapabilities } from "../control/runtime.js";
 import { runStdioProtocol } from "./stdio-protocol.js";
 import { parseHeadlessArgs, runHeadless } from "./headless.js";
+import type { UserAnswer, UserQuestionRequest } from "../utils/user-question.js";
 
 /** 解析宿主工作目录，不接受模型或外部会话参数。 */
 export function parseStdioArgs(argv: string[]): { cwd: string } {
     return parseHeadlessArgs(argv, "stdio");
 }
 
-/** 无交互界面时明确取消提问，同时通知客户端展示状态。 */
+/**
+ * stdio 宿主的提问通道：客户端能作答（`question/answer`）就交给它，
+ * 没有作答入口时明确取消，不批准任何待确认行为。
+ */
 export function createStdioCapabilities(
     notify: (method: string, params: unknown) => void,
     ownsSession: (id: string) => boolean,
+    ask?: (request: UserQuestionRequest) => Promise<UserAnswer>,
 ): SessionRuntimeCapabilities {
     return {
         ownsSession,
         askUser: async request => {
-            // 当前协议无回答入口：明确取消，不批准任何待确认行为。
+            if (ask) return ask(request);
             notify("session/status", { state: "question_cancelled", requestId: request.requestId });
             return { cancelled: true };
         },
@@ -37,7 +42,8 @@ export async function runStdio(argv: string[]): Promise<void> {
                 const events = await eventLog.readBefore(sessionId, last + 1, limit);
                 return events.map(event => ({ type: event.type, seq: event.seq, ts: event.ts, payload: event.payload }));
             },
-            registerRuntime: (notify, ownsSession) => registerSessionRuntime(createStdioCapabilities(notify, ownsSession)),
+            registerRuntime: (notify, ownsSession, ask) =>
+                registerSessionRuntime(createStdioCapabilities(notify, ownsSession, ask)),
         });
     });
 }

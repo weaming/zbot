@@ -8,6 +8,7 @@ import { describeClaimFailure } from "../control/channel.js";
 import type { UIEvent } from "../events/ui-events.js";
 import type { SessionHost } from "../host/session-host-types.js";
 import { isUlid } from "../utils/session-id.js";
+import type { UserAnswer, UserQuestionAnswer, UserQuestionRequest } from "../utils/user-question.js";
 
 export type StdioHost = Pick<SessionHost,
     "createSession" | "claimSession" | "releaseSession" | "closeSession" | "unarchiveSession" | "isSessionArchived"
@@ -44,6 +45,7 @@ interface ProtocolOptions {
     registerRuntime?: (
         notify: (method: string, params: unknown) => void,
         ownsSession: (id: string) => boolean,
+        askUser: (request: UserQuestionRequest) => Promise<UserAnswer>,
     ) => () => void;
     maxLineBytes?: number;
     maxOutputBytes?: number;
@@ -133,6 +135,7 @@ export async function runStdioProtocol(options: ProtocolOptions): Promise<void> 
     const stop = (error?: Error): void => {
         transportError ??= error;
         isStopping = true;
+        settleQuestions({ cancelled: true });
         input.destroy();
     };
     const writer = new JsonlWriter(output, options.maxOutputBytes ?? 4 * 1024 * 1024,
@@ -210,8 +213,26 @@ export async function runStdioProtocol(options: ProtocolOptions): Promise<void> 
     };
     const ownershipTimer = setInterval(checkOwnership, options.ownershipCheckMs ?? 1000);
     ownershipTimer.unref();
+    /**
+     * 等客户端作答的提问：通知一条 `session/question`，客户端用
+     * `question/answer` 回来。没有超时，出口和 TUI 一致——作答或取消。
+     */
+    const pendingQuestions = new Map<string, (answer: UserAnswer) => void>();
+    function askUser(request: UserQuestionRequest): Promise<UserAnswer> {
+        if (transportError || isStopping) return Promise.resolve({ cancelled: true });
+        return new Promise<UserAnswer>(resolve => {
+            pendingQuestions.set(request.requestId, resolve);
+            notify("session/question", { requestId: request.requestId, questions: request.questions });
+        });
+    }
+    function settleQuestions(answer: UserAnswer): void {
+        for (const resolve of pendingQuestions.values()) resolve(answer);
+        pendingQuestions.clear();
+    }
+
     const unregisterRuntime = options.registerRuntime?.(notify,
-        id => id === sessionId && !hasLostOwnership && host.isSessionClaimed(id));
+        id => id === sessionId && !hasLostOwnership && host.isSessionClaimed(id),
+        askUser);
 
     /** 自建会话并认领：失败后该进程不再持有顶层会话。 */
     async function createTopSession(): Promise<string> {
@@ -255,6 +276,7 @@ export async function runStdioProtocol(options: ProtocolOptions): Promise<void> 
         const allowedParams: Record<string, string[]> = {
             initialize: ["version"], "session/create": [], "session/resume": ["sessionId"], "session/send": ["text"],
             "session/cancel": [], "session/status": [], "session/archive": [], "session/unarchive": [], shutdown: [],
+            "question/answer": ["requestId", "answers", "cancel"],
         };
         const allowedKeys = Object.hasOwn(allowedParams, method) ? allowedParams[method] : undefined;
         if (!allowedKeys) throw new ProtocolError(-32601, `未知方法: ${method}`);
@@ -273,6 +295,23 @@ export async function runStdioProtocol(options: ProtocolOptions): Promise<void> 
         if (method === "session/status") return status();
         if (!hasOwnership) throw new ProtocolError(-32002, "当前实例已失去顶层会话持有权");
         if (method === "shutdown") {
+            return {};
+        }
+        // 客户端的作答：按 requestId 兑现给 ask_user 的等待，没有等待就如实报错。
+        if (method === "question/answer") {
+            const requestId = typeof params.requestId === "string" ? params.requestId : "";
+            const resolve = pendingQuestions.get(requestId);
+            if (!resolve) throw new ProtocolError(-32000, `没有等待作答的提问: ${requestId}`);
+            const answers = Array.isArray(params.answers) ? params.answers : [];
+            if (params.cancel !== true && answers.length === 0) {
+                throw new ProtocolError(-32602, "作答要么给 answers，要么 cancel: true");
+            }
+            pendingQuestions.delete(requestId);
+            if (params.cancel === true) {
+                resolve({ cancelled: true });
+                return {};
+            }
+            resolve({ cancelled: false, answers: answers as UserQuestionAnswer[] });
             return {};
         }
         if (method === "session/create" || method === "session/resume") {

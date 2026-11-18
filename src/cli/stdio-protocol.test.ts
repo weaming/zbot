@@ -4,6 +4,7 @@ import type { AgentEvent } from "../events/agent-events.js";
 import { emptyUsage } from "../events/ui-events.js";
 import { HISTORY_MAX_EVENTS, runStdioProtocol, type ReplayRecord, type StdioHost } from "./stdio-protocol.js";
 import { createStdioCapabilities, parseStdioArgs } from "./stdio.js";
+import type { UserAnswer, UserQuestionRequest } from "../utils/user-question.js";
 
 type Frame = { id?: string | number; result?: any; error?: { code: number; message: string }; method?: string; params?: any };
 const cleanups: Array<() => Promise<void>> = [];
@@ -383,6 +384,34 @@ describe("stdio JSONL", () => {
         expect(f.frames.find(frame => frame.method === "session/status" && frame.params.state === "question_cancelled")?.params.requestId).toBe("Q");
         expect(f.frames.find(frame => frame.method === "session/status" && frame.params.state === "closing")).toBeDefined();
         expect(isUnregistered).toBe(true);
+    });
+
+    test("提问走 session/question，客户端用 question/answer 作答", async () => {
+        let askUser!: (request: UserQuestionRequest) => Promise<UserAnswer>;
+        const f = fixture({ registerRuntime: (_notify, _ownsSession, ask) => {
+            askUser = ask;
+            return () => undefined;
+        } });
+        await f.ready();
+
+        const pending = askUser({
+            requestId: "Q1",
+            sessionId: "OWN",
+            questions: [{ header: "颜色", question: "选哪个？", options: [{ label: "红" }] }],
+        });
+        await waitFor(() => f.frames.some(frame => frame.method === "session/question"));
+        const asked = f.frames.find(frame => frame.method === "session/question")!;
+        expect(asked.params).toMatchObject({ requestId: "Q1", sessionId: "OWN" });
+        expect(asked.params.questions[0].question).toBe("选哪个？");
+
+        // 空作答被拒绝，等待仍然保留，可以继续作答。
+        expect((await f.request("question/answer", { requestId: "Q1", answers: [] })).error?.code).toBe(-32602);
+        const answers = [{ header: "颜色", question: "选哪个？", selected: ["红"] }];
+        expect((await f.request("question/answer", { requestId: "Q1", answers })).error).toBeUndefined();
+        expect(await pending).toEqual({ cancelled: false, answers });
+
+        // 已经作答过的 requestId 不再等待：如实报错而不是假装成功。
+        expect((await f.request("question/answer", { requestId: "Q1", answers })).error?.code).toBe(-32000);
     });
 
     test("ask_user 立即明确取消并发通知；CLI 参数不接受未知选项", async () => {
