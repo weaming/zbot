@@ -62,6 +62,15 @@ function makeAgent(overrides: Record<string, unknown> = {}) {
         loadInputHistory: () => [],
         appendInputHistory: async () => {},
         getSessionCwd: async () => process.cwd(),
+        getInstanceNetworkStats: () => ({
+            sessionCount: 0,
+            requestCount: 0,
+            promptTokens: 0,
+            completionTokens: 0,
+            reasoningTokens: 0,
+            cacheHitTokens: 0,
+            cacheMissTokens: 0,
+        }),
         ...overrides,
     };
     return agent;
