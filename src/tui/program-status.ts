@@ -98,6 +98,11 @@ export class ProgramStatusReporter {
         if (frame !== this.lastRoot && this.send(frame)) this.lastRoot = frame;
     }
 
+    /** 强制重发最近一次根状态帧。 */
+    reassert(): void {
+        if (this.lastRoot) this.send(this.lastRoot);
+    }
+
     release(): void {
         if (this.isReleased) return;
         this.send(encodeProgramStatus({ state: "clear" }));

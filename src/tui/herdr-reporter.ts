@@ -107,8 +107,8 @@ function defaultSyncRunner(binPath: string, args: string[]): void {
     spawnSync(binPath, args, { stdio: "ignore", timeout: CALL_TIMEOUT_MS });
 }
 
-/** 单行展示文本：去掉控制字符并截断，避免换行破坏 herdr 侧边栏排版。 */
-function normalizeText(value: string, maxLen = MAX_TEXT_LEN): string | undefined {
+/** 单行展示文本：去掉控制字符并截断，避免换行破坏终端宿主侧边栏排版。 */
+export function normalizeDisplayText(value: string, maxLen = MAX_TEXT_LEN): string | undefined {
     const normalized = value
         .replace(/[\u0000-\u001f\u007f]+/g, " ")
         .replace(/\s+/g, " ")
@@ -117,6 +117,8 @@ function normalizeText(value: string, maxLen = MAX_TEXT_LEN): string | undefined
         .trim();
     return normalized || undefined;
 }
+
+const normalizeText = normalizeDisplayText;
 
 /** metadata 里 tabs token 最多列几个 tab：8 位后缀 + 逗号留有余量，不会被截断。 */
 export const MAX_TAB_TOKENS = 8;

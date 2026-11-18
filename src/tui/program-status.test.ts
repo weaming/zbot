@@ -41,9 +41,14 @@ describe("OSC 7501 Program Status Protocol", () => {
         const frames: string[] = [];
         const reporter = new ProgramStatusReporter(true, frame => { frames.push(frame); });
         reporter.setTitle("任务");
+        reporter.reassert();
+        expect(frames).toHaveLength(0);
         reporter.sync(false);
         reporter.sync(false);
         expect(frames).toHaveLength(1);
+        reporter.reassert();
+        expect(frames).toHaveLength(2);
+        expect(frames[1]).toBe(frames[0]);
         reporter.session("one", { state: "working" });
         reporter.session("two", { state: "done" });
         reporter.sync(true);

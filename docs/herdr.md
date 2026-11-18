@@ -44,6 +44,7 @@ stdout 专用于协议消息，运行日志写入日志文件。原有 `zbot std
 在 `hc run` 启动的终端中运行普通 zbot TUI 即自动生效，无需设置旧版 HERDR_ENV。
 根状态优先级为 blocked、working、error、done、idle；任一会话等待提问或启动认证都会显示 blocked。
 子会话状态不增加根回合计数，退出时同步发送 clear。标准 ACP 入口不输出 OSC 帧。
+同时通过 `hc label <HC_TERMINAL_ID>` 同步 `agent=zbot`、`title`、`session`（当前会话后 8 位）、`tabs`（整条 tab 条后 8 位逗号列表）与 `model`，退出时同步清空。
 
 已使用 hc 0.1.13 验证中文字段、根/子状态、blocked 与回合计数。集成测试使用独立 HC_SESSION、
 socket 与 XDG 目录，结束只清理自身终端和服务。

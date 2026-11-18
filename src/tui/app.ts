@@ -98,6 +98,7 @@ import { editorTheme, theme } from "./theme.js";
 import { setLogSession } from "../host/runtime-context.js";
 import { DraftStore, loadRichDrafts, persistRichDrafts } from "./draft-store.js";
 import { isCmdDown, isCmdGateSupported } from "./cmd-modifier.js";
+import { hcReporter } from "./hc-reporter.js";
 import { herdrReporter, tabSessionToken } from "./herdr-reporter.js";
 import { programStatus } from "./program-status.js";
 import { notifyTurnResult } from "./notifier.js";
@@ -642,6 +643,7 @@ export class ChatApp {
         // 同一 source 的 metadata 可能被别的进程 release 清掉：状态每次变化都
         // 兜底补一次（内部按 5s 节流），否则 pane 会一直缺 session token。
         herdrReporter.refreshMetadata();
+        if (hcReporter.refreshMetadata()) programStatus.reassert();
         const block = this.herdrBlock ?? this.questions.blockedMessage();
         if (block) {
             herdrReporter.report("blocked", block);
@@ -660,7 +662,7 @@ export class ChatApp {
             ?? getChatApiSettings(this.currentModelSelection).model;
         programStatus.setTitle(session?.title);
         this.syncHerdrState();
-        herdrReporter.reportMetadata({
+        const metadata = {
             title: session?.title ?? null,
             displayAgent: "zbot",
             tokens: {
@@ -669,7 +671,9 @@ export class ChatApp {
                 // 整条 tab 条：单实例多会话时，外部靠它把每个会话分别列出来。
                 tabs: tabSessionToken(this.claimedSessions().map(item => item.sessionId)) ?? null,
             },
-        });
+        };
+        herdrReporter.reportMetadata(metadata);
+        hcReporter.reportMetadata(metadata);
     }
 
     private bindEditor(): void {
@@ -3264,6 +3268,7 @@ export class ChatApp {
     forceShutdown(exitCode: number): void {
         this.unsubscribeProgramStatus();
         programStatus.release();
+        hcReporter.release();
         this.unregisterRuntime();
         this.stopSpinnerTimer();
         // 强退前同步清状态：微任务队列没有机会在 process.exit 之后继续跑
@@ -3289,6 +3294,7 @@ export class ChatApp {
         this.exiting = true;
         this.unsubscribeProgramStatus();
         programStatus.release();
+        hcReporter.release();
         // 前端能力先下线：退出过程中不该再有工具把提问/通知投给这个实例
         this.unregisterRuntime();
         this.unsubscribeBackgroundTaskCompletion();

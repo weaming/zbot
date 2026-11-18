@@ -58,6 +58,8 @@ delete process.env.ZBOT_SESSION_ID;
 delete process.env.HERDR_ENV;
 delete process.env.HERDR_BIN_PATH;
 delete process.env.HERDR_PANE_ID;
+delete process.env.HC_TERMINAL_ID;
+delete process.env.HC_BIN_PATH;
 
 /** 兜底配置的句柄：必须留着，用例结束 restore 时才能删掉临时目录而不留悬空路径。 */
 let defaultTestConfigHandle: { dir: string; file: string; restore: () => void };
