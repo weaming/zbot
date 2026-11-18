@@ -74,7 +74,7 @@ export async function resolveSessionId(input: string): Promise<string> {
  * 「当前会话」的原始输入：`ZBOT_SESSION_ID`（脚本显式指定）优先，其次是 TUI
  * 最近一次进入的会话指针。返回 undefined 表示无从判断，由调用方给出用法提示。
  */
-export function currentSessionInput(): string | undefined {
+function currentSessionInput(): string | undefined {
     const fromEnv = process.env.ZBOT_SESSION_ID?.trim();
     if (fromEnv) return fromEnv;
     return readCurrentSessionPointer()?.sessionId;
@@ -150,7 +150,7 @@ async function assertSessionFree(sessionId: string): Promise<void> {
     );
 }
 
-export async function withSessionLock<T>(sessionId: string, run: () => Promise<T>): Promise<T> {
+async function withSessionLock<T>(sessionId: string, run: () => Promise<T>): Promise<T> {
     const lock = await acquireSessionLock(sessionId).catch((error: any) => {
         const message = error?.message ?? String(error);
         // 只有"别的实例在跑/在写"才是 held；权限、文件系统等异常保持 failed

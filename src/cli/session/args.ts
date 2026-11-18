@@ -122,7 +122,7 @@ export interface WaitCommand {
     json: boolean;
 }
 
-export interface RunCommand {
+interface RunCommand {
     kind: "run";
     text: string;
     title?: string;

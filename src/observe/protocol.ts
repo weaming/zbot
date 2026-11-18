@@ -64,7 +64,7 @@ export type ObservePush =
     | { type: "gap"; fromSeq: number; toSeq: number };
 
 /** 一道待答题目：题干与选项，选项回给来源的是 label。 */
-export interface ObserveQuestion {
+interface ObserveQuestion {
     requestId: string;
     sessionId: string;
     questions: Array<{
@@ -82,7 +82,7 @@ export function encodeObserveFrame(frame: ObserveFrame): string {
 }
 
 /** 解析一行；非法帧返回 undefined，由调用方回 bad_request 或忽略。 */
-export function decodeObserveFrame(line: string): unknown {
+function decodeObserveFrame(line: string): unknown {
     const trimmed = line.trim();
     if (!trimmed) return undefined;
     try {

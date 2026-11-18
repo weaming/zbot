@@ -13,7 +13,7 @@ import type { ExecutableTool, ToolExecutionResult } from "./tool-interface.js";
 import { ok, err } from "./tool-interface.js";
 import { getSessionTodosFile } from "../utils/runtime-paths.js";
 
-export type TodoStatus = "pending" | "in_progress" | "done";
+type TodoStatus = "pending" | "in_progress" | "done";
 
 export type TodoItem = {
     id: number;

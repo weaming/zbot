@@ -25,7 +25,7 @@ export class ApiError extends Error {
  * 不再支持 `/?token=`：URL 会进浏览器缓存、历史记录、Referer 和反代日志，
  * 令牌出现在 URL 里等于泄漏。首次进入用页面上的令牌输入框。
  */
-export function initToken(): string {
+function initToken(): string {
     return localStorage.getItem(STORAGE_KEY) ?? "";
 }
 
@@ -66,7 +66,7 @@ function jsonInit(method: string, body: unknown): RequestInit {
 }
 
 /** 服务端推送的实时信号（只包含界面要渲染的东西）。 */
-export type LiveFrame =
+type LiveFrame =
     | { t: "text"; d: string }
     | { t: "think"; on: boolean }
     | { t: "end" };

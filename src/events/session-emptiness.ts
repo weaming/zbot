@@ -11,7 +11,7 @@ import type { AgentEventType } from "./agent-events.js";
 import type { EventLog } from "./event-log.js";
 
 /** 只有「新建会话」与「建会话时写的 MCP 选中集」算没有内容；新增事件类型默认按有内容处理。 */
-export const EMPTY_SESSION_EVENT_TYPES: ReadonlySet<AgentEventType> = new Set<AgentEventType>([
+const EMPTY_SESSION_EVENT_TYPES: ReadonlySet<AgentEventType> = new Set<AgentEventType>([
     "session_created",
     "lazy_mcp_changed",
 ]);

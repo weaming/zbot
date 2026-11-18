@@ -22,19 +22,6 @@ import { runList, runShow } from "./session/view.js";
 import { runWait } from "./session/wait.js";
 
 export { SessionCliError, isSessionCliInvocation, parseSessionArgs };
-export type {
-    ArchiveCommand,
-    DeleteCommand,
-    ListCommand,
-    NewCommand,
-    QueueCommand,
-    RenameCommand,
-    RunCommand,
-    SendCommand,
-    SessionCommand,
-    ShowCommand,
-    WaitCommand,
-} from "./session/args.js";
 export type { SessionCliIO } from "./session/io.js";
 export { resolveSessionIdFrom } from "./session/store.js";
 export { formatTable } from "./session/view.js";

@@ -4,7 +4,6 @@ import { Key } from "@earendil-works/pi-tui";
 import type { SlashCommand } from "@earendil-works/pi-tui";
 import { isKnownSlashCommand, SLASH_COMMAND_SPECS } from "../commands/slash-command.js";
 
-export { REVIEW_PROMPT } from "../commands/slash-command.js";
 export { buildHelpText, buildSkillsHelpText } from "../commands/slash-help.js";
 
 export const SLASH_COMMANDS: SlashCommand[] = SLASH_COMMAND_SPECS.map(({ name, description }) => ({

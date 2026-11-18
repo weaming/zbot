@@ -67,7 +67,7 @@ function flushText(sessionId: string): void {
 }
 
 /** 追加一小段正文；80ms 内的多次调用会被合并成一帧。 */
-export function pushLiveText(sessionId: string, delta: string): void {
+function pushLiveText(sessionId: string, delta: string): void {
     if (!delta) return;
     const state = stateOf(sessionId);
     if (state.listeners.size === 0) return; // 没人看就别攒
@@ -86,7 +86,7 @@ export function pushLiveText(sessionId: string, delta: string): void {
 }
 
 /** 思考状态位：只在翻转时发一帧，推理正文一概不传。 */
-export function pushLiveThinking(sessionId: string, thinking: boolean): void {
+function pushLiveThinking(sessionId: string, thinking: boolean): void {
     const state = stateOf(sessionId);
     if (state.thinking === thinking) return;
     state.thinking = thinking;

@@ -258,7 +258,7 @@ export function compactJsonToolOutput(text: string, toolName: string): string {
 }
 
 /** 单条工具输出上限：一条消息就能把会话日志撑到几十 MB，这里兜住。 */
-export const MAX_TOOL_OUTPUT_CHARS = 1_000_000;
+const MAX_TOOL_OUTPUT_CHARS = 1_000_000;
 /** 截断时头部/尾部各占的比例：开头是结构或错误信息，结尾常是结论，中间最可丢。 */
 const TOOL_OUTPUT_HEAD_RATIO = 0.7;
 const TOOL_OUTPUT_TAIL_RATIO = 0.2;

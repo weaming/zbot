@@ -4,22 +4,22 @@ import type {
 } from "openai/resources/responses/responses";
 import type { ResponsesStreamMessage } from "openai/resources/responses/internal-base";
 
-export type ResponseInterruptClientEvent = {
+type ResponseInterruptClientEvent = {
   type: "response.interrupt";
   response_id: string;
 };
 
-export type ResponsesClientEvent =
+type ResponsesClientEvent =
   | OpenAIResponsesClientEvent
   | ResponseInterruptClientEvent;
 
-export interface ResponseInterruptAcceptedEvent {
+interface ResponseInterruptAcceptedEvent {
   type: "response.interrupt.accepted";
   response_id: string;
   sequence_number?: number;
 }
 
-export interface ResponseInterruptFailedEvent {
+interface ResponseInterruptFailedEvent {
   type: "response.interrupt.failed";
   response_id: string;
   sequence_number?: number;
@@ -31,27 +31,27 @@ export interface ResponseInterruptFailedEvent {
 }
 
 /** Codex 上游返回的账户限额快照。 */
-export interface CodexRateLimitsEvent {
+interface CodexRateLimitsEvent {
   type: "codex.rate_limits";
   rate_limits?: unknown;
   code_review_rate_limits?: unknown;
 }
 
-export interface ResponseToolSearchCallInProgressEvent {
+interface ResponseToolSearchCallInProgressEvent {
   type: "response.tool_search_call.in_progress";
   item_id: string;
   output_index: number;
   sequence_number: number;
 }
 
-export interface ResponseToolSearchCallSearchingEvent {
+interface ResponseToolSearchCallSearchingEvent {
   type: "response.tool_search_call.searching";
   item_id: string;
   output_index: number;
   sequence_number: number;
 }
 
-export interface ResponseToolSearchCallCompletedEvent {
+interface ResponseToolSearchCallCompletedEvent {
   type: "response.tool_search_call.completed";
   item_id: string;
   output_index: number;
@@ -68,7 +68,7 @@ export type ResponsesServerEvent =
   | ResponseToolSearchCallCompletedEvent;
 
 /** OpenAI 云端网页搜索事件。 */
-export type OpenAIWebSearchEvent = Extract<ResponsesServerEvent, {
+type OpenAIWebSearchEvent = Extract<ResponsesServerEvent, {
   type:
     | "response.web_search_call.completed"
     | "response.web_search_call.in_progress"
@@ -76,7 +76,7 @@ export type OpenAIWebSearchEvent = Extract<ResponsesServerEvent, {
 }>;
 
 /** OpenAI 云端文件搜索事件。 */
-export type OpenAIFileSearchEvent = Extract<ResponsesServerEvent, {
+type OpenAIFileSearchEvent = Extract<ResponsesServerEvent, {
   type:
     | "response.file_search_call.completed"
     | "response.file_search_call.in_progress"
@@ -84,7 +84,7 @@ export type OpenAIFileSearchEvent = Extract<ResponsesServerEvent, {
 }>;
 
 /** OpenAI 云端代码解释器事件。 */
-export type OpenAICodeInterpreterEvent = Extract<ResponsesServerEvent, {
+type OpenAICodeInterpreterEvent = Extract<ResponsesServerEvent, {
   type:
     | "response.code_interpreter_call_code.delta"
     | "response.code_interpreter_call_code.done"
@@ -94,7 +94,7 @@ export type OpenAICodeInterpreterEvent = Extract<ResponsesServerEvent, {
 }>;
 
 /** OpenAI 云端图像生成事件。 */
-export type OpenAIImageGenerationEvent = Extract<ResponsesServerEvent, {
+type OpenAIImageGenerationEvent = Extract<ResponsesServerEvent, {
   type:
     | "response.image_generation_call.completed"
     | "response.image_generation_call.generating"
@@ -103,7 +103,7 @@ export type OpenAIImageGenerationEvent = Extract<ResponsesServerEvent, {
 }>;
 
 /** OpenAI 云端工具搜索事件。 */
-export type OpenAIToolSearchEvent = Extract<ResponsesServerEvent, {
+type OpenAIToolSearchEvent = Extract<ResponsesServerEvent, {
   type:
     | "response.tool_search_call.in_progress"
     | "response.tool_search_call.searching"
@@ -111,13 +111,13 @@ export type OpenAIToolSearchEvent = Extract<ResponsesServerEvent, {
 }>;
 
 /** OpenAI 云端托管工具调用事件；不包含由客户端执行的 function/custom tool。 */
-export type OpenAIHostedToolCallEvent =
+type OpenAIHostedToolCallEvent =
   | OpenAIWebSearchEvent
   | OpenAIFileSearchEvent
   | OpenAICodeInterpreterEvent
   | OpenAIImageGenerationEvent
   | OpenAIToolSearchEvent;
 
-export type ResponsesWebSocketMessage =
+type ResponsesWebSocketMessage =
   | Exclude<ResponsesStreamMessage, { type: "message" }>
   | { type: "message"; message: ResponsesServerEvent };

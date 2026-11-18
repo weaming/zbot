@@ -98,7 +98,7 @@ export interface JobInput {
     autoStart?: boolean;
     /**
      * 卡片所在的看板列：纯粹是用户摆放位置，与任务状态无关。
-     * 缺省（老卡片）按状态兜底推导，见 columnOf。
+     * 缺省（老卡片）由看板按任务状态兜底推导。
      */
     column?: BoardColumn;
     /** 归档时间：归档后从看板隐藏，但状态与历史都保留。 */
@@ -189,27 +189,6 @@ export interface CreateJobOutcome {
 
 export const DEFAULT_MAX_ATTEMPTS = 1;
 
-/**
- * 卡片所在的列：以用户摆放的 column 为准；老卡片没有该字段时按状态兜底一次，
- * 之后用户一拖就以拖拽结果为准（状态怎么变都不再挪动卡片）。
- */
-export function columnOf(job: Pick<JobRecord, "state" | "input">): BoardColumn {
-    if (job.input.column) return job.input.column;
-    switch (job.state) {
-        case "queued":
-            return "todo";
-        case "leased":
-        case "running":
-            return "doing";
-        case "succeeded":
-            return "done";
-        case "cancelled":
-            return "cancelled";
-        default:
-            // failed / lost：没有对应列，落到待办等人工处理
-            return "todo";
-    }
-}
 /** 单个回合的默认上限：超过这个时间基本是卡死，继续等没有价值。 */
 export const DEFAULT_TIMEOUT_SEC = 30 * 60;
 /** 租约时长：worker 每 1/3 续租，连续三次失败才判 lost。 */

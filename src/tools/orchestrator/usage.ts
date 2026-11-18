@@ -22,7 +22,7 @@ const accumulatedUsageBaseline = new Map<string, number>();
  * 上游是否只给「会话累计」token：网关（llm-deepseek-web）用 x_usage_source 标注，
  * 该值是随会话单调增长的累计量（含新增输入），不是本请求的生成量。
  */
-export function isAccumulatedUsage(usage: any): boolean {
+function isAccumulatedUsage(usage: any): boolean {
     return usage?.x_usage_source?.completion_tokens === "upstream";
 }
 
@@ -142,4 +142,3 @@ export function buildUsageStats(input: UsageStatsInput): LLMUsageLogEntry {
         tools_hash: toolsHash,
     };
 }
-

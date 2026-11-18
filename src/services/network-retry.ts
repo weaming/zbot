@@ -9,8 +9,8 @@
 /** 单次重试链最多重试几次（不含首次请求）。 */
 export const MAX_RETRY_ATTEMPTS = 3;
 /** 退避起点、上限与抖动幅度（0.75～1.25 倍）。 */
-export const RETRY_BASE_DELAY_MS = 500;
-export const RETRY_MAX_DELAY_MS = 8_000;
+const RETRY_BASE_DELAY_MS = 500;
+const RETRY_MAX_DELAY_MS = 8_000;
 /** 同一 provider 连续失败多少次后熔断，以及冷却时长。 */
 export const CIRCUIT_FAILURE_THRESHOLD = 5;
 export const CIRCUIT_COOLDOWN_MS = 60_000;

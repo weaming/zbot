@@ -1,4 +1,4 @@
-export type JobState =
+type JobState =
     | "queued"
     | "leased"
     | "running"
@@ -7,7 +7,7 @@ export type JobState =
     | "cancelled"
     | "lost";
 
-export interface JobInput {
+interface JobInput {
     prompt: string;
     workspace: string;
     title?: string;

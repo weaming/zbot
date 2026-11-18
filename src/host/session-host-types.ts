@@ -239,7 +239,7 @@ export interface SessionTurnHost {
 }
 
 /** 会话间投递：入站消息落盘、结果取用与待交付计数。 */
-export interface PeerMailbox {
+interface PeerMailbox {
     /** 落盘一条会话间消息（时间线事实源；出入站各一条）。 */
     appendPeerMessage(sessionId: string, payload: AgentEventPayloads["peer_message"]): Promise<void>;
     /** 取走等待附加的会话间结果（下一次 HTTP 请求用），取后即清。 */
@@ -254,7 +254,7 @@ export interface PeerMailbox {
 }
 
 /** 宿主自身运行态：运行时重载与退出。 */
-export interface HostRuntime {
+interface HostRuntime {
     /** 重读磁盘技能与 MCP 工具，并让后续请求使用新的运行时上下文。 */
     reloadRuntime(): Promise<{ skillCount: number; mcpServerCount: number; mcpToolCount: number }>;
     /** 中止所有进行中的请求并等待其落盘（退出前调用，避免 turn 丢失）。 */
@@ -265,7 +265,7 @@ export interface HostRuntime {
  * 宿主向前端的状态变化回调（宿主主动通知，不是前端调用的方法）。
  * 非用户发起的变更也要让前端知情，否则列表与输入排队会停在旧状态。
  */
-export interface SessionHostCallbacks {
+interface SessionHostCallbacks {
     /** 持有权释放时的回调：宿主据此把会话从 tabs / 内存状态摘掉。 */
     onSessionReleased?: (sessionId: string, cause: SessionReleaseCause) => void;
     /** 模型派生了新的子会话（session_spawn）时回调：宿主据此把会话加进列表并固化标题。 */

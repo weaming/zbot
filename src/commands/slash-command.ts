@@ -15,7 +15,7 @@
  * 不存在"不能远程执行"的命令：面板类命令在这里都有等价的文本/JSON 视图与参数，
  * 差别只在由谁执行、以及是否转成模型指令。
  */
-export type SlashCommandPeerPolicy =
+type SlashCommandPeerPolicy =
     /** 转成一段模型指令执行（如 /review）。 */
     | "prompt"
     /** 宿主原生控制命令：在目标会话里由宿主直接执行，结果文本回传调用方。 */

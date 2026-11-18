@@ -18,7 +18,7 @@ export interface CurrentSessionPointer {
 }
 
 /** 指针文件放在 state root（~/.zbot/current-session.json），与会话目录同级便于排查。 */
-export function getCurrentSessionFile(): string {
+function getCurrentSessionFile(): string {
     return getStateDir("current-session.json");
 }
 

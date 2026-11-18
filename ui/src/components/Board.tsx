@@ -32,7 +32,7 @@ interface ColumnDef {
  * 卡片所在列：以用户拖拽结果（input.column）为准，老卡片没有该字段时按状态兜底。
  * 兜底只影响首次显示——列一旦被拖动过，任务跑完也不会自己跳列。
  */
-export function columnOf(job: Job): BoardColumnKey {
+function columnOf(job: Job): BoardColumnKey {
     if (job.input.column) return job.input.column;
     switch (job.state) {
         case "queued":

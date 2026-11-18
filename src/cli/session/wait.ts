@@ -35,12 +35,12 @@ const LOST_FREE_STREAK = 2;
 /** 与 wait 相关的事件类型：轻量扫描只完整解析这几种行。 */
 const WAIT_DECODE_TYPES: ReadonlySet<string> = new Set(["user_message", "turn_commit", "peer_message"]);
 
-export type TurnSelector =
+type TurnSelector =
     | { kind: "msg"; msgId: string }
     | { kind: "turn"; turnId: string }
     | { kind: "latest" };
 
-export type TurnStatus = "succeeded" | "failed" | "cancelled";
+type TurnStatus = "succeeded" | "failed" | "cancelled";
 
 export interface TurnOutcome {
     sessionId: string;
@@ -58,7 +58,7 @@ export interface TurnOutcome {
 }
 
 /** 在线结果源：推送 + 只读补查。命令行自己建连，或复用 send 已建好的连接。 */
-export interface PeerResultSource {
+interface PeerResultSource {
     /** 结果推送；只采纳 selector 指向的那条消息。 */
     promise: Promise<PeerResult>;
     /** 只读补查（不消费对方暂存，可并发重复调用）。 */
