@@ -4,16 +4,14 @@
     "src/scripts/decision-cli.ts",
     "src/scripts/compact-event-log.ts",
     "src/scripts/convert-exchange-logs.ts",
-    "src/tui/main.ts",
     "tests/integration/helpers/peer-child.ts",
     "tests/integration/helpers/acp-mcp-server.ts",
     "tests/integration/helpers/program-status.ts",
-    "tests/unit/**/*.test.ts",
-    "ui/src/main.tsx",
-    "ui/vite.config.ts"
+    "tests/unit/**/*.test.ts"
   ],
   "project": [
     "**/*.{js,cjs,mjs,jsx,ts,cts,mts,tsx}!",
+    "!ui/**",
     "!tmp/**",
     "!dist/**",
     "!dist-bundle/**",
