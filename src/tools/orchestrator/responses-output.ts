@@ -4,6 +4,8 @@
  * 响应两侧（实时与重放）都依赖同一份归一化，避免措辞与字段口径漂移。
  */
 
+import { isReasoningPlaceholder } from "../../utils/reasoning-placeholder.js";
+
 function normalizeResponsesUsage(usage: any): any {
   if (!usage || usage.input_tokens === undefined) return usage;
   return {
@@ -57,7 +59,9 @@ export function normalizeResponsesResponse(response: any): any {
     content,
     response_output: output,
   };
-  if (typeof response?.reasoning_content === "string") message.reasoning_content = response.reasoning_content;
+  const reasoning = typeof response?.reasoning_content === "string" ? response.reasoning_content : "";
+  // 上游可能把补进请求的占位思考原样回显：那不是模型的思考，不落盘也不渲染。
+  if (reasoning && !isReasoningPlaceholder(reasoning)) message.reasoning_content = reasoning;
   if (toolCalls.length > 0) message.tool_calls = toolCalls;
 
   const finishReason = response?.status === "failed"

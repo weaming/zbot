@@ -10,6 +10,7 @@
 import type { ChatMessage } from "../../types/session.js";
 import type { ToolImageContent } from "../tool-interface.js";
 import type { InputAudioContent } from "../../types/audio.js";
+import { REASONING_PLACEHOLDER } from "../../utils/reasoning-placeholder.js";
 import { materializeImageMessages } from "../../utils/image-assets.js";
 import { isApplyPatchTool } from "../tool-kinds.js";
 import { patchArgumentsJson, patchFromArguments } from "../../utils/patch-args.js";
@@ -161,7 +162,6 @@ function responseImagePart(part: any): any {
  * passed back to the API」）。历史里总会有拿不到明文的轮次（中断时从流式增量恢复的轮次、
  * 换过 provider 的老消息），补一条占位比整轮失败划算。
  */
-const REASONING_PLACEHOLDER = "(thinking unavailable)";
 
 /** 落盘的 reasoning_content 不是协议字段，只用来补 reasoning 项的明文。 */
 function reasoningTextOf(message: ChatMessage): string {

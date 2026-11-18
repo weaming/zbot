@@ -16,6 +16,7 @@ import { isCancelledStopReason } from "../control/protocol.js";
 import type { ChatMessage } from "../types/session.js";
 import type { SteerUpdate } from "../types/chat.js";
 import { StreamRecovery } from "../utils/stream-recovery.js";
+import { isReasoningPlaceholder } from "../utils/reasoning-placeholder.js";
 import type { AssistantTimelineItem, SessionUiState, ToolBlock, UiMessage } from "./store-types.js";
 import {
     abortMarkText,
@@ -144,7 +145,8 @@ function buildHistoryTimeline(
 
         if (message.role === "assistant") {
             const messageReasoning = message.reasoning_content ?? message.reasoning;
-            if (typeof messageReasoning === "string" && messageReasoning) {
+            // 老日志里可能存着补请求用的占位思考：它是协议产物，不当思考渲染。
+            if (typeof messageReasoning === "string" && messageReasoning && !isReasoningPlaceholder(messageReasoning)) {
                 reasoning += messageReasoning;
                 appendTimelineTextToList(timeline, "reasoning", messageReasoning);
             }

@@ -5,6 +5,7 @@ import type { ChatMessage } from "../../types/session.js";
 import { patchArgumentsJson } from "../../utils/patch-args.js";
 import { partialAssistantMessage } from "../../utils/stream-recovery.js";
 import { cleanGptText, GptTextFilter } from "./gpt-text.js";
+import { isReasoningPlaceholder } from "../../utils/reasoning-placeholder.js";
 
 /** 将 Responses 协议事件聚合为内部响应，并发出界面事件。 */
 export async function collectResponsesStream(
@@ -316,11 +317,12 @@ export async function collectResponsesStream(
       : { type: "function_call", id: call.id, call_id: call.id, name: call.name, arguments: call.arguments }));
   const mergedOutput = missingCalls.length > 0 ? [...output, ...missingCalls] : output;
   if (completedResponse) completedResponse.output = mergedOutput;
-  if (completedResponse && partialReasoning) completedResponse.reasoning_content = partialReasoning;
+  const reasoning = partialReasoning && !isReasoningPlaceholder(partialReasoning) ? partialReasoning : "";
+  if (completedResponse && reasoning) completedResponse.reasoning_content = reasoning;
   return completedResponse ?? {
     model,
     output: mergedOutput,
-    ...(partialReasoning ? { reasoning_content: partialReasoning } : {}),
+    ...(reasoning ? { reasoning_content: reasoning } : {}),
     usage,
   };
 }

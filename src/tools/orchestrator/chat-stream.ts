@@ -5,6 +5,7 @@ import type { ChatCompletionChunk } from "openai/resources/chat/completions/comp
 import { patchArgumentsJson } from "../../utils/patch-args.js";
 import { partialAssistantMessage } from "../../utils/stream-recovery.js";
 import { GptTextFilter } from "./gpt-text.js";
+import { isReasoningPlaceholder } from "../../utils/reasoning-placeholder.js";
 
 interface ChatStreamChunk extends Omit<ChatCompletionChunk, "choices"> {
   x_usage_source?: string;
@@ -154,7 +155,7 @@ export async function collectChatStream(
   }
 
   const assistantMsg: any = { role: "assistant", content: content || null };
-  if (reasoningContent) assistantMsg.reasoning_content = reasoningContent;
+  if (reasoningContent && !isReasoningPlaceholder(reasoningContent)) assistantMsg.reasoning_content = reasoningContent;
   if (toolCalls.size > 0) {
     assistantMsg.tool_calls = [...toolCalls.entries()]
       .sort(([left], [right]) => left - right)
