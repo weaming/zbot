@@ -871,13 +871,17 @@ export class LocalSessionHost implements SessionHost {
 
     /** 只补一条 session_created；已有事件时不做任何事。 */
     async ensureSessionCreated(sessionId: string): Promise<void> {
-        const active = this.activeSessions.get(sessionId);
-        const session = active?.session ?? (await this.requireActiveSession(sessionId));
         if ((await this.eventLog.lastSeq(sessionId, { forceRefresh: true })) > 0) return;
+        let active = this.activeSessions.get(sessionId);
+        if (!active) {
+            const session = createEmptySession(sessionId, this.startupCwd);
+            active = { session, lastSeq: 0 };
+            this.activeSessions.set(sessionId, active);
+        }
         const created = await this.eventLog.append(
             sessionId,
             "session_created",
-            sessionCreatedPayload(session.cwd, session.origin, session.delegation),
+            sessionCreatedPayload(active.session.cwd, active.session.origin, active.session.delegation),
         );
         this.updateActiveSeq(sessionId, created.seq);
     }

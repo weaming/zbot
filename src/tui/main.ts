@@ -88,6 +88,11 @@ if (isHelpCli) {
         process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
         process.exitCode = 1;
     }
+    await Promise.all([
+        new Promise<void>(resolve => process.stdout.write("", () => resolve())),
+        new Promise<void>(resolve => process.stderr.write("", () => resolve())),
+    ]);
+    process.exit(process.exitCode ?? 0);
 } else if (isStdioCli) {
     try {
         const { runStdio } = await import("../cli/stdio.js");
@@ -96,6 +101,11 @@ if (isHelpCli) {
         process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
         process.exitCode = 1;
     }
+    await Promise.all([
+        new Promise<void>(resolve => process.stdout.write("", () => resolve())),
+        new Promise<void>(resolve => process.stderr.write("", () => resolve())),
+    ]);
+    process.exit(process.exitCode ?? 0);
 } else if (isWebCli) {
     // 长驻宿主分支：与 TUI 并列，初始化同一套宿主环境后交给 web 入口，不再进入 TUI。
     loadConfigEarly();
