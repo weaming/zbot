@@ -11,7 +11,7 @@ import { forgetBound, locallyBoundSessionIds } from "../../src/control/registry.
 import { getObserveSocketPath } from "../../src/observe/paths.js";
 import { OBSERVE_PROTOCOL_VERSION } from "../../src/observe/protocol.js";
 import type { SessionEventView } from "../../src/events/session-event-view.js";
-import { publishUIEvent, pushLiveEnd } from "../../src/events/live-stream.js";
+import { publishUIEvent, pushLiveEnd, subscribeLive, type LiveFrame } from "../../src/events/live-stream.js";
 import { useTmpStateDir, type TmpStateDir } from "./test-env.js";
 
 const SESSION = "01JOBOBSERVE00000000000001";
@@ -161,5 +161,45 @@ describe("观察旁路的生命周期与事件来源", () => {
 
         control.release(SESSION);
         await waitFor(() => !fs.existsSync(getObserveSocketPath(SESSION)));
+    });
+
+    test("publishUIEvent：tool_start 立即冲刷待发正文并关闭 thinking，turn_end 发出 end 帧", () => {
+        const frames: LiveFrame[] = [];
+        const unsubscribe = subscribeLive(SESSION, frame => frames.push(frame));
+        try {
+            publishUIEvent(SESSION, { type: "reasoning_delta", delta: "思考中" });
+            publishUIEvent(SESSION, { type: "text_delta", delta: "先说一句" });
+            // tool_start 到来：立即冲刷缓冲正文（不等待 80ms 合批定时器）
+            publishUIEvent(SESSION, {
+                type: "tool_start",
+                toolId: 1,
+                callId: "c1",
+                name: "bash",
+                args: {},
+                mode: "serial",
+            });
+            // 仅 thinking=true 时 tool_start 也要能把 thinking 关掉
+            publishUIEvent(SESSION, { type: "reasoning_delta", delta: "再想" });
+            publishUIEvent(SESSION, {
+                type: "tool_start",
+                toolId: 2,
+                callId: "c2",
+                name: "bash",
+                args: {},
+                mode: "serial",
+            });
+            publishUIEvent(SESSION, { type: "turn_end", iteration: 1 });
+
+            expect(frames).toEqual([
+                { t: "think", on: true },
+                { t: "think", on: false },
+                { t: "text", d: "先说一句" },
+                { t: "think", on: true },
+                { t: "think", on: false },
+                { t: "end" },
+            ]);
+        } finally {
+            unsubscribe();
+        }
     });
 });

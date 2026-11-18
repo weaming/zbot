@@ -130,6 +130,11 @@ export function publishUIEvent(sessionId: string, event: UIEvent): void {
         case "reasoning_delta":
             pushLiveThinking(sessionId, true);
             break;
+        case "tool_start":
+            pushLiveThinking(sessionId, false);
+            flushText(sessionId);
+            break;
+        case "turn_end":
         case "message_end":
         case "error":
         case "aborted":

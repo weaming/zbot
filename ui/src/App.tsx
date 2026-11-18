@@ -1,16 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Board, COLUMNS } from "./components/Board";
 import { CardDetail } from "./components/CardDetail";
 import { CreateDialog } from "./components/CreateDialog";
 import { Button, Field, Input } from "./components/ui";
-import { api, ApiError, clearToken, getToken, openEventStream, saveToken } from "./lib/api";
-import type { BoardColumnKey, Job, McpServer } from "./lib/types";
+import { api, clearToken, getToken, saveToken, subscribeAuthError } from "./lib/api";
+import type { BoardColumnKey } from "./lib/types";
+import { useBoardStore, type ConnState } from "./lib/use-board-store";
 import { useScrollLock } from "./lib/use-scroll-lock";
 import { useVisualViewport } from "./lib/use-viewport";
 import { confirmAction } from "./lib/utils";
-
-/** 事件流状态：还没连上不算异常，只有连上又断了才值得报红 */
-type ConnState = "connecting" | "live" | "down";
 
 const CONN_DOT: Record<ConnState, string> = {
     connecting: "bg-muted/40",
@@ -30,86 +28,37 @@ export default function App() {
     // 键盘弹起时别让手指把整页拖走（iOS 上只靠 CSS 拦不住）
     useScrollLock();
     const [token, setToken] = useState(getToken());
-    const [jobs, setJobs] = useState<Job[]>([]);
-    const [servers, setServers] = useState<McpServer[]>([]);
     const [selectedId, setSelectedId] = useState<string | null>(null);
     /** 键盘焦点：箭头/hjkl 移动，Enter 打开详情；与 selectedId（详情已打开）分开 */
     const [focusId, setFocusId] = useState<string | null>(null);
     const [creating, setCreating] = useState(false);
-    const [showArchived, setShowArchived] = useState(false);
-    const [defaultCwd, setDefaultCwd] = useState("");
-    const [home, setHome] = useState("");
-    const [conn, setConn] = useState<ConnState>("connecting");
     const [authError, setAuthError] = useState<string | null>(null);
     const [tokenDraft, setTokenDraft] = useState("");
-    const [error, setError] = useState<string | null>(null);
-    const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const authorized = token.length > 0 && authError === null;
     // 退出后 token 为空，直接回到登录页（没有"取消返回"：已经登出了）
     const showAuth = !authorized;
 
-    const refresh = useCallback(async () => {
-        try {
-            const list = await api.listJobs(showArchived);
-            setJobs(list);
-            setError(null);
-            return list;
-        } catch (cause) {
-            if (cause instanceof ApiError && cause.status === 401) {
-                setAuthError("令牌无效，请重新输入");
-            } else {
-                setError(cause instanceof Error ? cause.message : String(cause));
-            }
-            return [];
-        }
-    }, [showArchived]);
-
-    // 首屏：列表 + MCP 选项 + 全局状态流
     useEffect(() => {
-        if (!token) return;
-        let stream: { close(): void } | null = null;
-        let cancelled = false;
+        return subscribeAuthError(() => {
+            setAuthError("令牌无效或已失效，请重新输入");
+        });
+    }, []);
 
-        void (async () => {
-            await refresh();
-            if (cancelled) return;
-            const health = await api.getHealth().catch(() => null);
-            setDefaultCwd(health?.cwd ?? "");
-            setHome(health?.home ?? "");
-            setServers(await api.listMcpServers().catch(() => []));
-
-            const history = await api.listJobEvents(0).catch(() => []);
-            if (cancelled) return;
-            const since = history.length > 0 ? history[history.length - 1].seq : 0;
-
-            stream = openEventStream("/api/jobs/live", since, {
-                onOpen: () => setConn("live"),
-                onError: info => {
-                    // 401 重连也没用：直接回登录页，别留一个永远红的灯
-                    if (info?.status === 401) {
-                        setAuthError("令牌已失效，请重新输入");
-                        return;
-                    }
-                    setConn("down");
-                },
-                onMessage: () => {
-                    // 状态流只用来触发刷新：卡片数少，重拉全量比增量合并更不容易出错
-                    if (refreshTimer.current) return;
-                    refreshTimer.current = setTimeout(() => {
-                        refreshTimer.current = null;
-                        void refresh();
-                    }, 200);
-                },
-            });
-        })();
-
-        return () => {
-            cancelled = true;
-            stream?.close();
-            if (refreshTimer.current) clearTimeout(refreshTimer.current);
-        };
-    }, [token, refresh]);
+    const {
+        jobs,
+        setJobs,
+        servers,
+        defaultCwd,
+        home,
+        showArchived,
+        setShowArchived,
+        conn,
+        error,
+        setError,
+        refresh,
+        subscribeJobEvents,
+    } = useBoardStore(authorized);
 
     const move = async (id: string, column: BoardColumnKey) => {
         // 乐观更新列归属：拖拽只改卡片放哪儿，状态由任务自己决定（取消是唯一例外，服务端也会落列）
@@ -260,16 +209,14 @@ export default function App() {
                     onClick={() => {
                         // 清掉本机令牌就回不去了：要重新从 token 文件里粘一次，先问一句
                         if (!confirmAction("退出登录？令牌需要重新粘贴。")) return;
-                        // 退出即清干净：令牌、列表、打开的卡片都不留在页面上
+                        // 退出即清干净：令牌、缓存图片 URL、列表、打开的卡片都不留在页面上
                         clearToken();
                         setToken("");
-                        setJobs([]);
                         setSelectedId(null);
                         setFocusId(null);
                         setTokenDraft("");
                         setAuthError(null);
                         setError(null);
-                        setConn("connecting");
                     }}
                 >
                     退出
@@ -301,6 +248,7 @@ export default function App() {
                             home={home}
                             onChanged={refresh}
                             onClose={() => setSelectedId(null)}
+                            subscribeJobEvents={subscribeJobEvents}
                         />
                     </aside>
                 )}

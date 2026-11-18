@@ -152,6 +152,31 @@ export interface AgentEvent {
 
 export type BoardColumnKey = "todo" | "doing" | "done" | "cancelled";
 
+export type JobEventType =
+    | "job_created"
+    | "job_state"
+    | "job_attempt"
+    | "job_updated"
+    | "session_added"
+    | "comment_added"
+    | "comment_updated"
+    | "comment_deleted";
+
+export interface JobEvent {
+    jobId: string;
+    seq: number;
+    type: JobEventType;
+    ts: string;
+    payload: Record<string, unknown>;
+}
+
+export interface EventPage {
+    events: AgentEvent[];
+    firstSeq: number;
+    lastSeq: number;
+    hasMore: boolean;
+}
+
 /** 一次工具调用的视图形状：时间线渲染与按需拉参数都用它。 */
 export type ToolCallView = NonNullable<NonNullable<AgentEvent["payload"]["message"]>["tool_calls"]>[number];
 

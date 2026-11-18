@@ -1,5 +1,6 @@
 import type {
     AgentEvent,
+    EventPage,
     ImageAsset,
     Job,
     JobComment,
@@ -8,6 +9,23 @@ import type {
 } from "./types";
 
 const STORAGE_KEY = "zbot-token";
+
+type AuthErrorListener = () => void;
+const authErrorListeners = new Set<AuthErrorListener>();
+
+/** 订阅 401 鉴权失败通知：任何 REST 或 SSE 收到 401 时立即回到登录页。 */
+export function subscribeAuthError(listener: AuthErrorListener): () => void {
+    authErrorListeners.add(listener);
+    return () => {
+        authErrorListeners.delete(listener);
+    };
+}
+
+function notifyAuthError(): void {
+    for (const listener of authErrorListeners) {
+        listener();
+    }
+}
 
 export class ApiError extends Error {
     status: number;
@@ -40,13 +58,17 @@ export function saveToken(next: string): void {
     localStorage.setItem(STORAGE_KEY, next);
 }
 
-/** 退出登录：内存与 localStorage 一起清掉，下一次请求会拿到 401 并回登录页。 */
+/** 退出登录：内存、localStorage 与缓存的 blob URL 一起清掉，避免泄漏。 */
 export function clearToken(): void {
     token = "";
     localStorage.removeItem(STORAGE_KEY);
+    for (const url of assetUrls.values()) {
+        URL.revokeObjectURL(url);
+    }
+    assetUrls.clear();
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function requestResponse(path: string, init: RequestInit = {}): Promise<Response> {
     const res = await fetch(path, {
         ...init,
         headers: {
@@ -55,10 +77,23 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
         },
     });
     if (!res.ok) {
+        if (res.status === 401) notifyAuthError();
         const body = (await res.json().catch(() => ({}))) as { error?: string };
         throw new ApiError(body.error ?? `HTTP ${res.status}`, res.status);
     }
+    return res;
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const res = await requestResponse(path, init);
     return (await res.json()) as T;
+}
+
+function parseSeqHeader(res: Response, name: string): number | null {
+    const raw = res.headers.get(name);
+    if (raw === null) return null;
+    const value = Number(raw);
+    return Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 function jsonInit(method: string, body: unknown): RequestInit {
@@ -133,6 +168,7 @@ export function openEventStream(path: string, since: number, options: EventStrea
                     signal: controller.signal,
                 });
                 if (res.status === 401) {
+                    notifyAuthError();
                     options.onError?.({ status: 401 });
                     return; // 令牌不对，重连也没用；让上层弹登录框
                 }
@@ -181,6 +217,10 @@ export async function fetchAssetUrl(id: string): Promise<string | undefined> {
     const res = await fetch(`/api/assets/${encodeURIComponent(id)}`, {
         headers: { authorization: `Bearer ${token}` },
     });
+    if (res.status === 401) {
+        notifyAuthError();
+        return undefined;
+    }
     if (!res.ok) return undefined;
     const url = URL.createObjectURL(await res.blob());
     assetUrls.set(id, url);
@@ -188,8 +228,12 @@ export async function fetchAssetUrl(id: string): Promise<string | undefined> {
 }
 
 export const api = {
-    listJobs: (includeArchived = false) =>
-        request<Job[]>(`/api/jobs?limit=200${includeArchived ? "&archived=1" : ""}`),
+    listJobsWithSeq: async (includeArchived = false): Promise<{ jobs: Job[]; lastSeq: number }> => {
+        const res = await requestResponse(`/api/jobs?limit=200${includeArchived ? "&archived=1" : ""}`);
+        const jobs = (await res.json()) as Job[];
+        const lastSeq = parseSeqHeader(res, "x-job-seq") ?? 0;
+        return { jobs, lastSeq };
+    },
     getJob: (id: string) => request<Job>(`/api/jobs/${id}`),
     createJob: (body: Record<string, unknown>) => request<Job>("/api/jobs", jsonInit("POST", body)),
     patchJob: (id: string, patch: Record<string, unknown>) =>
@@ -202,10 +246,17 @@ export const api = {
     unarchiveJob: (id: string) => request<Job>(`/api/jobs/${id}/unarchive`, { method: "POST" }),
     deleteJob: (id: string) => request<{ deleted: boolean }>(`/api/jobs/${id}`, { method: "DELETE" }),
     /** 会话的 MCP 选中集：只影响下一个回合 */
-    getMcpSelection: (id: string) =>
-        request<{ servers: string[]; initialized: boolean }>(`/api/jobs/${id}/mcp-selection`),
-    setMcpSelection: (id: string, servers: string[]) =>
-        request<{ servers: string[] }>(`/api/jobs/${id}/mcp-selection`, jsonInit("POST", { servers })),
+    getMcpSelection: (id: string, sessionId?: string) => {
+        const query = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : "";
+        return request<{ servers: string[]; initialized: boolean }>(`/api/jobs/${id}/mcp-selection${query}`);
+    },
+    setMcpSelection: (id: string, servers: string[], sessionId?: string) => {
+        const query = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : "";
+        return request<{ servers: string[] }>(
+            `/api/jobs/${id}/mcp-selection${query}`,
+            jsonInit("POST", { servers, ...(sessionId ? { sessionId } : {}) }),
+        );
+    },
 
     listComments: (id: string) => request<JobComment[]>(`/api/jobs/${id}/comments`),
     addComment: (id: string, body: string, sessionId?: string) =>
@@ -219,21 +270,28 @@ export const api = {
     createSession: (id: string, prompt?: string) =>
         request<{ sessionId: string }>(`/api/jobs/${id}/sessions`, jsonInit("POST", { prompt })),
 
-    /**
-     * 拉取历史事件；增量走 /live 长连接。
-     * 带 page 时按「最近 limit 条（seq < before）」取一页，顶部对齐回合边界；
-     * 不带 page 时保持全量语义。
-     */
-    listEvents: (jobId: string, sessionId: string, since: number, page?: { limit: number; before?: number }) => {
-        const base = `/api/jobs/${jobId}/events?sessionId=${encodeURIComponent(sessionId)}&since=${since}`;
-        const query = page
-            ? `&limit=${page.limit}${page.before !== undefined ? `&before=${page.before}` : ""}`
-            : "";
-        return request<AgentEvent[]>(base + query);
+    /** 分页拉取历史事件：从响应头读取首尾游标与是否还有更早记录。 */
+    listEventPage: async (
+        jobId: string,
+        sessionId: string,
+        options?: { since?: number; limit?: number; before?: number },
+    ): Promise<EventPage> => {
+        const params = new URLSearchParams({
+            sessionId,
+            since: String(options?.since ?? 0),
+        });
+        if (options?.limit !== undefined) params.set("limit", String(options.limit));
+        if (options?.before !== undefined) params.set("before", String(options.before));
+        const res = await requestResponse(`/api/jobs/${jobId}/events?${params.toString()}`);
+        const events = (await res.json()) as AgentEvent[];
+        const firstSeq = parseSeqHeader(res, "x-first-seq") ?? (events[0]?.seq ?? 0);
+        const lastSeq = parseSeqHeader(res, "x-last-seq") ?? (events.at(-1)?.seq ?? 0);
+        const hasMoreHeader = res.headers.get("x-has-more");
+        const hasMore = hasMoreHeader !== null
+            ? hasMoreHeader === "1"
+            : (options?.limit !== undefined ? events.length >= options.limit : false);
+        return { events, firstSeq, lastSeq, hasMore };
     },
-    listJobEvents: (since: number) => request<Array<{ seq: number; jobId: string }>>(
-        `/api/jobs/events?since=${since}`,
-    ),
 
     /** 长参数不在事件响应里：用户点开某次工具调用时再单独取一次原文。 */
     getToolArguments: (jobId: string, sessionId: string, seq: number, callId?: string) => {

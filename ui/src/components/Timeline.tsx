@@ -6,7 +6,7 @@
  * 和 TUI 一致：工具输出不铺开，只显示「工具名 + 用时」，要看细节去会话日志。
  */
 
-import { Fragment, useState, type ReactNode } from "react";
+import { Fragment, memo, useMemo, useState, type ReactNode } from "react";
 import type { AgentEvent, ToolCallView } from "../lib/types";
 import { formatDuration } from "../lib/format";
 import { cn } from "../lib/utils";
@@ -397,7 +397,7 @@ function PeerResult({ event }: { event: AgentEvent }) {
     );
 }
 
-export function Timeline({
+export const Timeline = memo(function Timeline({
     events,
     live,
     onLoadArguments,
@@ -407,53 +407,65 @@ export function Timeline({
     /** 长参数不在事件里：展开某次调用时按需拉原文 */
     onLoadArguments?: (seq: number, callId?: string) => Promise<string>;
 }) {
-    // 工具输出只有 tool_call_id，先扫一遍建立 id → 名字/结果的映射。
-    // 结果回填到发起它的那个工具块上，时间线里不再单独占一行。
-    const callNames = new Map<string, string>();
-    const callResults = new Map<
-        string,
-        {
-            durationMs?: number;
-            size?: number;
-            content?: string;
-            isError?: boolean;
-            peerResultStatus?: keyof typeof PEER_SEND_STATUS;
+    // 索引随 events 缓存：流式增量只重渲染 live 块，不必每 80ms 重扫整条历史
+    const { callNames, callResults, committedTurns, pendingThinkSeq, firstUserSeq } = useMemo(() => {
+        // 工具输出只有 tool_call_id，先扫一遍建立 id → 名字/结果的映射。
+        // 结果回填到发起它的那个工具块上，时间线里不再单独占一行。
+        const nextCallNames = new Map<string, string>();
+        const nextCallResults = new Map<
+            string,
+            {
+                durationMs?: number;
+                size?: number;
+                content?: string;
+                isError?: boolean;
+                peerResultStatus?: keyof typeof PEER_SEND_STATUS;
+            }
+        >();
+        // 必须两趟：turn_commit 排在同回合消息之后，单趟扫描时它还没进集合
+        const nextCommittedTurns = new Set<string>();
+        for (const event of events) {
+            const message = event.payload.message;
+            for (const call of message?.tool_calls ?? []) {
+                if (call.id) nextCallNames.set(call.id, call.name ?? call.function?.name ?? "工具");
+            }
+            if (message?.role === "tool" && message.tool_call_id) {
+                nextCallResults.set(message.tool_call_id, {
+                    durationMs: message.durationMs,
+                    size: message.contentLength,
+                    content: message.content ?? undefined,
+                    isError: message.isError,
+                    peerResultStatus: message.peerResultStatus,
+                });
+            }
+            if (event.type === "turn_commit" && event.payload.turnId) nextCommittedTurns.add(event.payload.turnId);
         }
-    >();
-    for (const event of events) {
-        const message = event.payload.message;
-        for (const call of message?.tool_calls ?? []) {
-            if (call.id) callNames.set(call.id, call.name ?? call.function?.name ?? "工具");
+
+        // 「思考中」只属于"还没收尾的那一轮的最后一条 assistant 消息"：
+        // 历史轮回放时 turn_commit 早就在了，一律不显示。
+        let nextPendingThinkSeq: number | undefined;
+        let nextFirstUserSeq: number | undefined;
+        for (const event of events) {
+            if (nextFirstUserSeq === undefined && event.type === "user_message") {
+                nextFirstUserSeq = event.seq;
+            }
+            const message = event.payload.message;
+            if (event.type !== "turn_message" || message?.role !== "assistant") continue;
+            const thinks = message.hasReasoning === true
+                || (typeof message.reasoning_content === "string" && message.reasoning_content.length > 0);
+            if (!thinks) continue;
+            const turnId = event.payload.turnId;
+            // 每遇到一条就覆盖：只有最后一条可能还在等下一次响应
+            nextPendingThinkSeq = turnId !== undefined && !nextCommittedTurns.has(turnId) ? event.seq : undefined;
         }
-        if (message?.role === "tool" && message.tool_call_id) {
-            callResults.set(message.tool_call_id, {
-                durationMs: message.durationMs,
-                size: message.contentLength,
-                content: message.content ?? undefined,
-                isError: message.isError,
-                peerResultStatus: message.peerResultStatus,
-            });
-        }
-    }
-    // 「思考中」只属于"还没收尾的那一轮的最后一条 assistant 消息"：
-    // 历史轮回放时 turn_commit 早就在了，一律不显示。
-    // 必须两趟：turn_commit 排在同回合消息之后，单趟扫描时它还没进集合
-    const committedTurns = new Set<string>();
-    for (const event of events) {
-        if (event.type === "turn_commit" && event.payload.turnId) committedTurns.add(event.payload.turnId);
-    }
-    let pendingThinkSeq: number | undefined;
-    for (const event of events) {
-        const message = event.payload.message;
-        if (event.type !== "turn_message" || message?.role !== "assistant") continue;
-        const thinks = message.hasReasoning === true
-            || (typeof message.reasoning_content === "string" && message.reasoning_content.length > 0);
-        if (!thinks) continue;
-        const turnId = event.payload.turnId;
-        // 每遇到一条就覆盖：只有最后一条可能还在等下一次响应
-        pendingThinkSeq = turnId !== undefined && !committedTurns.has(turnId) ? event.seq : undefined;
-    }
-    const firstUserSeq = events.find(event => event.type === "user_message")?.seq;
+        return {
+            callNames: nextCallNames,
+            callResults: nextCallResults,
+            committedTurns: nextCommittedTurns,
+            pendingThinkSeq: nextPendingThinkSeq,
+            firstUserSeq: nextFirstUserSeq,
+        };
+    }, [events]);
 
     const nodes: ReactNode[] = [];
     let pendingSteerText: string | undefined;
@@ -577,4 +589,4 @@ export function Timeline({
     }
 
     return <div className="flex flex-col gap-2.5">{nodes}</div>;
-}
+});

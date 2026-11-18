@@ -42,3 +42,8 @@ export function formatShortTime(iso?: string): string {
     const pad = (value: number): string => String(value).padStart(2, "0");
     return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
+
+/** 完整本地时间：卡片元信息与评论时间戳共用。 */
+export function formatTime(iso?: string): string {
+    return iso ? new Date(iso).toLocaleString() : "";
+}

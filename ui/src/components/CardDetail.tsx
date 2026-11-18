@@ -1,47 +1,27 @@
 /**
- * 卡片详情：属性 / 会话 / 评论 三个 tab。
+ * 卡片详情：协调卡片头、属性页（CardPropsPanel）与会话页（SessionPanel）。
  *
- * 数据按需加载（打开才拉），评论与会话改动后回调父组件刷新看板，
- * 保证卡片上的徽标与列表状态一致。
+ * 订阅全局任务流中属于本卡片的 JobEvent：评论与会话列表变动自动刷新，
+ * 首次产生执行会话时自动选中并切到「会话」页。
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, ApiError, openEventStream } from "../lib/api";
-import type { AgentEvent, ImageAsset, Job, JobComment, JobSession, McpServer } from "../lib/types";
-import { cn, confirmAction } from "../lib/utils";
-import { abbreviateHome, formatShortTime } from "../lib/format";
+import { api, ApiError } from "../lib/api";
+import { formatTime } from "../lib/format";
+import type { Job, JobComment, JobEvent, JobSession, McpServer } from "../lib/types";
 import { useInlineEdit } from "../lib/use-inline-edit";
 import { useNarrow } from "../lib/use-narrow";
-import { AssetImage } from "./AssetImage";
-import { DirInput } from "./DirInput";
-import { Timeline } from "./Timeline";
-import { TagInput } from "./TagInput";
-import { MarkdownBlock } from "./Markdown";
-import { MdEditor } from "./MdEditor";
-import { Button, Field, Input, OverflowMenu, Segmented, Textarea } from "./ui";
+import { confirmAction } from "../lib/utils";
+import { cn } from "../lib/utils";
+import { CardPropsPanel } from "./CardPropsPanel";
+import { SessionPanel } from "./SessionPanel";
+import { Button, Input, OverflowMenu, Segmented } from "./ui";
 
 type TabKey = "props" | "sessions";
-
-/** 时间线一页的事件条数：够铺几屏，又不至于为了首屏把整份日志传下来。 */
-const EVENT_PAGE_SIZE = 200;
-
-function formatTime(iso?: string): string {
-    return iso ? new Date(iso).toLocaleString() : "";
-}
-
-/** 会话下拉的选项文案：窄屏只留「#短 id · 用途」，时间挤不下就算了。 */
-function sessionOptionLabel(item: JobSession, narrow: boolean): string {
-    const head = `#${item.sessionId.slice(-8)} · ${item.purpose === "branch" ? "分支" : "执行"}`;
-    const archived = item.archived ? " · 已归档" : "";
-    if (narrow) return `${head}${archived}`;
-    const time = formatShortTime(item.createdAt);
-    return time ? `${head} · ${time}${archived}` : `${head}${archived}`;
-}
 
 /**
  * 打开卡片时的会话占位：`job.sessionId` 本来就知道，
  * 先用它撑住下拉框、分段计数与输入区，别等网络回来才让界面「长」出来。
- * 用途与时间留空，加载完再补齐（多数卡片只有一个会话，补齐后几乎看不出差别）。
  */
 function placeholderSessions(job: Job): JobSession[] {
     if (!job.sessionId) return [];
@@ -60,6 +40,7 @@ export function CardDetail({
     home,
     onChanged,
     onClose,
+    subscribeJobEvents,
 }: {
     job: Job;
     servers: McpServer[];
@@ -67,258 +48,94 @@ export function CardDetail({
     home: string;
     onChanged: () => Promise<unknown>;
     onClose: () => void;
+    subscribeJobEvents: (jobId: string, listener: (event: JobEvent) => void) => () => void;
 }) {
     /** 默认停在会话：跑过的卡片十次有九次是来看历史的，别再让用户先点一次 tab */
     const [tab, setTab] = useState<TabKey>(() => (job.sessionId ? "sessions" : "props"));
-    /** 窄屏下底部输入区是否展开：不聚焦时收成一行，把高度让给历史 */
-    const [composerFocus, setComposerFocus] = useState(false);
-    const composerRef = useRef<HTMLTextAreaElement>(null);
     const narrow = useNarrow();
+    const [immersive, setImmersive] = useState(false);
+
     const [comments, setComments] = useState<JobComment[]>([]);
     const [sessions, setSessions] = useState<JobSession[]>(() => placeholderSessions(job));
     /** 会话列表是否到手：没到手前不显示"还没有执行会话"，免得先空后有 */
     const [sessionsReady, setSessionsReady] = useState(false);
     const [activeSessionId, setActiveSessionId] = useState<string | null>(job.sessionId ?? null);
-    const [events, setEvents] = useState<AgentEvent[]>([]);
-    /** 更早的事件还有没有、是不是正在拉：时间线首屏只取最后一页，上翻再补 */
-    const [older, setOlder] = useState({ hasMore: false, loading: false });
-    /** 上翻插入历史后要还原滚动位置：记录插入前的 scrollHeight / scrollTop */
-    const scrollAnchor = useRef<{ height: number; top: number } | null>(null);
-    const [commentDraft, setCommentDraft] = useState("");
-    /** 正在内联编辑的评论 id 与草稿；null 表示没有在编辑 */
-    const [editingComment, setEditingComment] = useState<{ id: string; body: string } | null>(null);
-    /** 工作目录显示值：home 前缀缩成 ~，与看板里的目录列同一口径 */
-    const workspaceDisplay = abbreviateHome(job.input.workspace, home);
-    const titleText = job.input.title || job.input.prompt;
-    const [inputDraft, setInputDraft] = useState("");
-    const [pending, setPending] = useState({ request: 0, turn: 0 });
-    /** 正在发生的回合：正文增量与"是否在思考"（回合收尾即清空，交给持久化消息） */
-    const [live, setLive] = useState<{ text: string; thinking: boolean }>({ text: "", thinking: false });
-    /** 是否贴底：用户往上翻看历史时暂停自动滚动，翻回底部自动恢复 */
-    const stickToBottom = useRef(true);
+    const activeSessionIdRef = useRef<string | null>(activeSessionId);
+    activeSessionIdRef.current = activeSessionId;
+
     /** 会话的 MCP 选中集（有执行会话时以它为准）；null = 还没拉/任务尚未开始 */
     const [mcpSelection, setMcpSelection] = useState<string[] | null>(null);
     /** 会话是否已落过选中集：false 时运行期等于"不限制"，界面回退成全选 */
     const [selectionInitialized, setSelectionInitialized] = useState(false);
-    const [attachments, setAttachments] = useState<ImageAsset[]>([]);
-    const [uploading, setUploading] = useState(false);
-    const fileInputRef = useRef<HTMLInputElement>(null);
     const [error, setError] = useState<string | null>(null);
-    const timelineRef = useRef<HTMLDivElement>(null);
 
     const refreshComments = useCallback(async () => {
         setComments(await api.listComments(job.id).catch(() => []));
     }, [job.id]);
 
-    const refreshSessions = useCallback(async () => {
+    const refreshSessions = useCallback(async (): Promise<JobSession[] | null> => {
         // 拉失败就保持现状：占位会话是已知事实，别被当成"没有会话"清掉
         const list = await api.listSessions(job.id).catch(() => null);
-        if (!list) return;
+        if (!list) return null;
         setSessionsReady(true);
         setSessions(list);
         setActiveSessionId(current => {
             if (current && list.some(item => item.sessionId === current)) return current;
             return list.length > 0 ? list[list.length - 1].sessionId : (job.sessionId ?? null);
         });
+        return list;
     }, [job.id, job.sessionId]);
-
-    // 排队输入的数量跟着会话走：切会话时重新拉
-    useEffect(() => {
-        if (!activeSessionId) {
-            setPending({ request: 0, turn: 0 });
-            return;
-        }
-        void api.getPendingInputs(activeSessionId).then(setPending).catch(() => undefined);
-    }, [activeSessionId]);
 
     useEffect(() => {
         void refreshComments();
         void refreshSessions();
     }, [refreshComments, refreshSessions]);
 
-    // 切换卡片时收起评论编辑；标题/目录/描述由 useInlineEdit 按 job.id 自行复位
+    // 拉取当前会话的 MCP 选中集
+    const targetMcpSessionId = activeSessionId ?? job.sessionId ?? null;
     useEffect(() => {
-        setEditingComment(null);
-    }, [job.id]);
-
-    // 时间线：先拉历史，再从最后一条 seq 接 SSE
-    useEffect(() => {
-        if (!activeSessionId) {
-            setEvents([]);
+        if (!targetMcpSessionId) {
+            setMcpSelection(null);
+            setSelectionInitialized(false);
             return;
         }
         let cancelled = false;
-        let stream: { close(): void } | null = null;
-        setOlder({ hasMore: false, loading: false });
-        scrollAnchor.current = null;
-
-        void (async () => {
-            // 首屏只要最后一页：长会话整份日志动辄上 MB，浏览器根本用不到全部
-            const history = await api
-                .listEvents(job.id, activeSessionId, 0, { limit: EVENT_PAGE_SIZE })
-                .catch(() => []);
-            if (cancelled) return;
-            setEvents(history);
-            setOlder({ hasMore: history.length >= EVENT_PAGE_SIZE, loading: false });
-            // 打开或切换会话默认停在最新位置
-            stickToBottom.current = true;
-            const since = history.length > 0 ? history[history.length - 1].seq : 0;
-            stream = openEventStream(
-                `/api/jobs/${job.id}/live?sessionId=${encodeURIComponent(activeSessionId)}`,
-                since,
-                {
-                    onMessage: (data, seq) => {
-                        if (cancelled) return;
-                        try {
-                            const parsed = JSON.parse(data) as AgentEvent;
-                            // 服务端省了 seq（在 id: 行）与 sessionId（在 URL 里），这里补回来
-                            setEvents(current => [...current, { ...parsed, seq, sessionId: activeSessionId }]);
-                            if (parsed.type === "steer_update" && (parsed.payload.phase === "completed" || parsed.payload.phase === "steered")) {
-                                setLive({ text: "", thinking: false });
-                            }
-                            if (parsed.type === "user_message" && parsed.payload.trigger === "pending") {
-                                void api.getPendingInputs(activeSessionId)
-                                    .then(stats => { if (!cancelled) setPending(stats); })
-                                    .catch(() => undefined);
-                            }
-                        } catch {
-                            // 半帧或未知格式：丢掉一帧即可，不必打断整条时间线
-                        }
-                    },
-                    onReset: () => {
-                        setEvents([]);
-                        setLive({ text: "", thinking: false });
-                    },
-                    onLive: frame => {
-                        if (frame.t === "text") {
-                            // 正文开始 = 这轮思考结束，标记同步收掉
-                            setLive(current => ({ text: current.text + frame.d, thinking: false }));
-                        } else if (frame.t === "think") {
-                            setLive(current => ({ ...current, thinking: frame.on }));
-                        } else {
-                            setLive({ text: "", thinking: false });
-                        }
-                    },
-                },
-            );
-        })();
-
+        void api
+            .getMcpSelection(job.id, activeSessionId ?? undefined)
+            .then(res => {
+                if (cancelled) return;
+                setMcpSelection(res.servers);
+                setSelectionInitialized(res.initialized);
+            })
+            .catch(() => undefined);
         return () => {
             cancelled = true;
-            stream?.close();
         };
-    }, [job.id, activeSessionId]);
+    }, [job.id, activeSessionId, targetMcpSessionId]);
 
+    // 订阅属于本卡片的 JobEvent：评论与会话自动同步
     useEffect(() => {
-        const node = timelineRef.current;
-        if (!node) return;
-        const onScroll = (): void => {
-            // 滚到顶部就是"要看更早的"：正在拉或已经拉到头时不重复请求
-            if (node.scrollTop < 64) void loadOlder();
-        };
-        node.addEventListener("scroll", onScroll, { passive: true });
-        return () => node.removeEventListener("scroll", onScroll);
-    }, [tab, activeSessionId, events, older]);
-
-    /**
-     * 贴底判定 + 历史区变矮时的滚动策略。键盘弹起、输入区展开都会让历史区变矮：
-     * - 原本贴底且内容已溢出：跟到新底部，最新消息被输入框顶上去，仍停在视野里
-     * - 原本在看历史，或底部还有空白：原地不动，别被浏览器钳制滚动带走
-     */
-    useEffect(() => {
-        const node = timelineRef.current;
-        if (!node) return;
-        let height = node.clientHeight;
-        let top = node.scrollTop;
-        let selfScroll = false;
-
-        /** 自己写的 scrollTop 不算用户意图，否则会被当成"用户滚到底"改写贴底状态 */
-        const applyScroll = (value: number): void => {
-            top = value;
-            selfScroll = true;
-            node.scrollTop = value;
-            // scroll 事件在本帧之后派发，下一帧再撤标记才挡得住
-            requestAnimationFrame(() => {
-                selfScroll = false;
-            });
-        };
-
-        const onScroll = (): void => {
-            if (selfScroll) return;
-            top = node.scrollTop;
-            stickToBottom.current = node.scrollHeight - top - node.clientHeight < 48;
-        };
-
-        const observer = new ResizeObserver(() => {
-            const next = node.clientHeight;
-            if (next === height) return;
-            height = next;
-            // 内容没溢出时 scrollTop 只能停在 0，这么写本来就不会动
-            if (stickToBottom.current) applyScroll(node.scrollHeight - next);
-            // 变高时浏览器会把超出的 scrollTop 钳回来，这里还原成变之前的位置
-            else if (node.scrollTop !== top) applyScroll(top);
+        return subscribeJobEvents(job.id, event => {
+            if (
+                event.type === "comment_added"
+                || event.type === "comment_updated"
+                || event.type === "comment_deleted"
+            ) {
+                void refreshComments();
+                return;
+            }
+            if (event.type === "session_added" || event.type === "job_attempt") {
+                const hadSession = activeSessionIdRef.current !== null;
+                void refreshSessions().then(list => {
+                    if (!hadSession && list && list.length > 0) {
+                        setTab("sessions");
+                    }
+                });
+            }
         });
+    }, [job.id, refreshComments, refreshSessions, subscribeJobEvents]);
 
-        node.addEventListener("scroll", onScroll, { passive: true });
-        observer.observe(node);
-        return () => {
-            node.removeEventListener("scroll", onScroll);
-            observer.disconnect();
-        };
-    }, [tab, activeSessionId]);
-
-    /** 上翻一页：插入到已有事件之前，并把滚动位置钉在原处，视觉上不跳动。 */
-    async function loadOlder(): Promise<void> {
-        const oldest = events[0];
-        if (!activeSessionId || !oldest || older.loading || !older.hasMore) return;
-        setOlder(current => ({ ...current, loading: true }));
-        const node = timelineRef.current;
-        scrollAnchor.current = node ? { height: node.scrollHeight, top: node.scrollTop } : null;
-
-        const page = await api
-            .listEvents(job.id, activeSessionId, 0, { limit: EVENT_PAGE_SIZE, before: oldest.seq })
-            .catch(() => null);
-        if (!page) {
-            scrollAnchor.current = null;
-            setOlder(current => ({ ...current, loading: false }));
-            return;
-        }
-        // 少于一页说明已经到文件头，别让滚顶反复触发同一个请求
-        setOlder({ hasMore: page.length >= EVENT_PAGE_SIZE, loading: false });
-        if (page.length > 0) setEvents(current => [...page, ...current]);
-    }
-
-    // 上翻插入后还原滚动位置：插在前面会让内容整体下移，不补偿就会跳到别处
-    useEffect(() => {
-        const anchor = scrollAnchor.current;
-        if (!anchor) return;
-        scrollAnchor.current = null;
-        const node = timelineRef.current;
-        if (!node) return;
-        node.scrollTop = node.scrollHeight - anchor.height + anchor.top;
-    }, [events]);
-
-    // 新消息与流式增量都跟着贴底，否则看不到正在生成的最后几行
-    useEffect(() => {
-        const node = timelineRef.current;
-        if (node && stickToBottom.current) node.scrollTop = node.scrollHeight;
-    }, [events, live.text, live.thinking]);
-
-    // 点进「会话」页时容器才挂载：此时 events 没变，需要单独拉到底
-    useEffect(() => {
-        if (tab !== "sessions") return;
-        stickToBottom.current = true;
-        const raf = requestAnimationFrame(() => {
-            const node = timelineRef.current;
-            if (node) node.scrollTop = node.scrollHeight;
-        });
-        return () => cancelAnimationFrame(raf);
-    }, [tab, activeSessionId]);
-
-    /** 当前查看的会话是否已归档：归档态不能发消息，只能在卡片里取消归档。 */
-    const activeSessionArchived = sessions.find(item => item.sessionId === activeSessionId)?.archived === true;
-
-    const patch = async (body: Record<string, unknown>) => {
+    const patch = useCallback(async (body: Record<string, unknown>) => {
         setError(null);
         try {
             await api.patchJob(job.id, body);
@@ -326,39 +143,37 @@ export function CardDetail({
         } catch (cause) {
             setError(cause instanceof ApiError ? cause.message : String(cause));
         }
-    };
+    }, [job.id, onChanged]);
 
-    // 三处就地编辑共用同一套规则（Esc 放弃 / Cmd·Ctrl+Enter 提交 / 失焦提交），
-    // resetKey 用 job.id：切卡片时即使新旧值恰好相同也要退出编辑
+    const titleText = job.input.title || job.input.prompt;
     const titleEdit = useInlineEdit(titleText, next => patch({ title: next }), {
         resetKey: job.id,
         commitOnEnter: true,
     });
-    // 工作目录的 Enter 由 DirInput 自己处理（要区分补全态与编辑态），这里不开 commitOnEnter
-    const workspaceEdit = useInlineEdit(workspaceDisplay, next => patch({ workspace: next }), { resetKey: job.id });
-    const promptEdit = useInlineEdit(job.input.prompt, next => patch({ prompt: next }), { resetKey: job.id });
 
     /**
      * 改 MCP 选中集：有执行会话时改会话的（落事件、下个回合生效），
      * 还没跑过就改任务入参，作为首次建会话的初值。
      */
-    const applyMcpSelection = async (next: string[]) => {
+    const applyMcpSelection = useCallback(async (next: string[]) => {
         setError(null);
-        if (!job.sessionId) {
+        if (!activeSessionId && !job.sessionId) {
             await patch({ mcpServers: next });
             return;
         }
         const previous = mcpSelection;
+        const previousInit = selectionInitialized;
         setMcpSelection(next); // 乐观更新：网络往返期间不卡手感
         try {
-            const saved = await api.setMcpSelection(job.id, next);
+            const saved = await api.setMcpSelection(job.id, next, activeSessionId ?? undefined);
             setMcpSelection(saved.servers);
             setSelectionInitialized(true);
         } catch (cause) {
             setMcpSelection(previous);
+            setSelectionInitialized(previousInit);
             setError(cause instanceof ApiError ? cause.message : String(cause));
         }
-    };
+    }, [activeSessionId, job.id, job.sessionId, mcpSelection, patch, selectionInitialized]);
 
     const start = async () => {
         // 交给调度器就开始改文件、烧额度，界面上收不回来，先问一句
@@ -372,76 +187,8 @@ export function CardDetail({
         }
     };
 
-    const submitComment = async () => {
-        const body = commentDraft.trim();
-        if (!body) return;
-        setError(null);
-        try {
-            await api.addComment(job.id, body, activeSessionId ?? undefined);
-            setCommentDraft("");
-            await refreshComments();
-            await onChanged();
-        } catch (cause) {
-            setError(cause instanceof ApiError ? cause.message : String(cause));
-        }
-    };
-
-    /** 删除评论：软删除保留历史，但界面上撤不回来，仍需确认（编辑态与展示态共用） */
-    const removeComment = async (commentId: string) => {
-        if (!confirmAction("删除这条评论？")) return;
-        await api.deleteComment(job.id, commentId).catch(() => {});
-        setEditingComment(null);
-        await refreshComments();
-        await onChanged();
-    };
-
-    /**
-     * 向当前会话随时输入。两种「切入时机」用按钮表达，不再用一个 checkbox：
-     * request = 下一次请求前带上（默认），turn = 等当前对话结束后再开始。
-     */
-    const sendInput = async (mode: "request" | "turn" = "request") => {
-        const text = inputDraft.trim();
-        if (!text || !activeSessionId) return;
-        setError(null);
-        try {
-            const result = await api.sendInput(activeSessionId, text, mode, attachments);
-            setInputDraft("");
-            setAttachments([]);
-            setPending(result.pending);
-            // 归档会话发送时服务端会自动取消归档：把「已归档」标记刷掉
-            if (result.unarchived) await refreshSessions();
-            await onChanged();
-        } catch (cause) {
-            setError(cause instanceof ApiError ? cause.message : String(cause));
-        }
-    };
-
-    /** 选图/粘贴都走这里：先落到服务端资产目录，拿到引用再随消息发送。 */
-    const uploadImage = async (file: File) => {
-        if (!file.type.startsWith("image/")) {
-            setError("只支持图片文件");
-            return;
-        }
-        setUploading(true);
-        setError(null);
-        try {
-            const dataUrl = await new Promise<string>((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = () => resolve(String(reader.result ?? ""));
-                reader.onerror = () => reject(new Error("读取图片失败"));
-                reader.readAsDataURL(file);
-            });
-            const asset = await api.uploadAsset(dataUrl, file.name || "paste.png");
-            setAttachments(current => [...current, asset]);
-        } catch (cause) {
-            setError(cause instanceof ApiError ? cause.message : String(cause));
-        } finally {
-            setUploading(false);
-        }
-    };
-
     /** 在同一个任务下新开会话：换思路继续，不新建卡片。 */
-    const openBranch = async () => {
+    const openBranch = useCallback(async () => {
         const prompt = window.prompt("在这个新会话里做什么？（留空只建空会话）");
         if (prompt === null) return;
         // 填了内容就等于当场开跑，界面上收不回来；留空建的空会话随便删
@@ -455,10 +202,10 @@ export function CardDetail({
         } catch (cause) {
             setError(cause instanceof ApiError ? cause.message : String(cause));
         }
-    };
+    }, [job.id, onChanged, refreshSessions]);
 
     /** 归档执行会话：历史仍保留，只是从默认列表隐藏。 */
-    const archiveSession = async () => {
+    const archiveSession = useCallback(async () => {
         if (!activeSessionId) return;
         if (!confirmAction("归档这个会话？历史仍保留。")) return;
         try {
@@ -469,9 +216,9 @@ export function CardDetail({
         } catch (cause) {
             setError(cause instanceof ApiError ? cause.message : String(cause));
         }
-    };
+    }, [activeSessionId, onChanged, refreshSessions]);
 
-    const unarchiveSession = async () => {
+    const unarchiveSession = useCallback(async () => {
         if (!activeSessionId) return;
         try {
             await api.unarchiveSession(activeSessionId);
@@ -480,21 +227,11 @@ export function CardDetail({
         } catch (cause) {
             setError(cause instanceof ApiError ? cause.message : String(cause));
         }
-    };
+    }, [activeSessionId, onChanged, refreshSessions]);
 
     const isActive = job.state === "running" || job.state === "leased";
-    /** 窄屏且没在输入：输入区只留一行，历史区多出两三行可见高度 */
-    const composerExpanded = !narrow || composerFocus || attachments.length > 0;
-    /**
-     * 沉浸态：窄屏一聚焦输入，header 与会话选择行就让出去。
-     * 键盘弹起已经吃掉小半屏，这两行再占着就没剩几行历史可看；
-     * 点一下历史区失焦即收回，不需要额外的开关。
-     */
-    const immersive = narrow && composerExpanded;
-    /** 出错提示：沉浸时 header 不在，改挂到输入区上方，免得报错看不见 */
-    const errorBar = job.error || error
-        ? <p className="text-xs text-bad">{job.error ?? error}</p>
-        : null;
+    const errorText = job.error ?? error;
+    const errorBar = errorText ? <p className="text-xs text-bad">{errorText}</p> : null;
 
     // 桌面铺成一行按钮，窄屏塞进「⋯」菜单：两处共用同一批动作，免得两套状态机各自演进
     const actionNodes = (
@@ -590,96 +327,6 @@ export function CardDetail({
         />
     );
 
-    /** 评论流：Trello 式，跟在属性内容下方一起滚，不再单开 tab */
-    const commentsSection = (
-        <section className="flex flex-col gap-2 border-t border-border pt-3">
-            <h3 className="text-xs text-muted">评论{comments.length > 0 ? ` · ${comments.length}` : ""}</h3>
-            {comments.length === 0 && <p className="text-xs text-muted">还没有评论</p>}
-            {comments.map(comment => (
-                <div key={comment.id} className="flex flex-col gap-1.5">
-                    <div className="flex items-center gap-2 text-xs text-muted">
-                        <span>{comment.author === "agent" ? "agent" : "我"}</span>
-                        <span>{formatTime(comment.createdAt)}</span>
-                        {comment.editedAt && <span>已编辑</span>}
-                    </div>
-                    {editingComment?.id === comment.id ? (
-                        /* Esc 先退出编辑（放弃改动），再按一次才轮到关闭卡片 */
-                        <div
-                            className="flex flex-col gap-1"
-                            onKeyDown={event => {
-                                if (event.key !== "Escape") return;
-                                event.preventDefault();
-                                event.stopPropagation();
-                                setEditingComment(null);
-                            }}
-                        >
-                            <MdEditor
-                                value={editingComment.body}
-                                onChange={body => setEditingComment({ id: comment.id, body })}
-                                rows={4}
-                                autoFocus
-                            />
-                            <div className="flex gap-1">
-                                <Button
-                                    variant="primary"
-                                    onClick={async () => {
-                                        const next = editingComment.body.trim();
-                                        if (!next) return;
-                                        await api.updateComment(job.id, comment.id, next).catch(() => {});
-                                        setEditingComment(null);
-                                        await refreshComments();
-                                    }}
-                                >
-                                    保存
-                                </Button>
-                                <Button variant="ghost" onClick={() => setEditingComment(null)}>
-                                    取消
-                                </Button>
-                                <Button
-                                    variant="ghost"
-                                    className="text-bad"
-                                    onClick={() => void removeComment(comment.id)}
-                                >
-                                    删除
-                                </Button>
-                            </div>
-                        </div>
-                    ) : (
-                        <>
-                            <MarkdownBlock content={comment.body} />
-                            <div className="flex gap-1">
-                                <Button
-                                    variant="ghost"
-                                    onClick={() => setEditingComment({ id: comment.id, body: comment.body })}
-                                >
-                                    编辑
-                                </Button>
-                                <Button
-                                    variant="ghost"
-                                    className="text-bad"
-                                    onClick={() => void removeComment(comment.id)}
-                                >
-                                    删除
-                                </Button>
-                            </div>
-                        </>
-                    )}
-                </div>
-            ))}
-            <MdEditor
-                value={commentDraft}
-                onChange={setCommentDraft}
-                rows={3}
-                placeholder="写评论…（Ctrl/⌘ + Enter 提交）"
-                onSubmit={() => void submitComment()}
-            />
-            <div>
-                <Button variant="primary" onClick={() => void submitComment()}>
-                    发表评论
-                </Button>
-            </div>
-        </section>
-    );
     return (
         <div
             className="flex h-full flex-col"
@@ -744,301 +391,40 @@ export function CardDetail({
                 )}
             >
                 {tab === "props" && (
-                    <div className="stable-scroll flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto overscroll-contain text-sm">
-                        {/* 上下结构：长内容（描述、MCP）能用满面板宽度；评论跟在下面一起滚 */}
-                        {/* 平时是普通文字，点一下才变成输入框：目录很少改，摊个输入框在那儿反而抢注意力 */}
-                        <Field label="工作目录（只影响新会话）">
-                            {workspaceEdit.editing ? (
-                                <div {...workspaceEdit.editorProps}>
-                                    <DirInput
-                                        value={workspaceEdit.draft}
-                                        placeholder={workspaceDisplay}
-                                        onChange={workspaceEdit.setDraft}
-                                        onSubmit={value => workspaceEdit.commitWith(value)}
-                                        autoFocus
-                                    />
-                                </div>
-                            ) : (
-                                <button
-                                    type="button"
-                                    title={workspaceDisplay}
-                                    onClick={workspaceEdit.begin}
-                                    // 与 DirInput 里的 <input> 同盒模型：切换时只换边框，不产生位移
-                                    className="w-full cursor-text truncate rounded-md border border-transparent px-2.5 py-1.5 text-left text-base text-fg sm:text-sm hover:border-border hover:bg-col"
-                                >
-                                    {workspaceDisplay}
-                                </button>
-                            )}
-                        </Field>
-
-                        <Field label="任务描述">
-                            {promptEdit.editing ? (
-                                <div className="flex flex-col gap-1.5" {...promptEdit.editorProps}>
-                                    <MdEditor value={promptEdit.draft} onChange={promptEdit.setDraft} rows={3} autoFocus />
-                                    <div className="flex items-center gap-1.5">
-                                        {/* 按钮抢焦点会让编辑器先失焦提交，mousedown 拦一下 */}
-                                        <Button
-                                            variant="primary"
-                                            onMouseDown={event => event.preventDefault()}
-                                            onClick={promptEdit.commit}
-                                        >
-                                            保存
-                                        </Button>
-                                        <Button onMouseDown={event => event.preventDefault()} onClick={promptEdit.cancel}>
-                                            取消
-                                        </Button>
-                                        <span className="text-xs text-muted">⌘/Ctrl+Enter 保存 · Esc 取消</span>
-                                    </div>
-                                </div>
-                            ) : (
-                                /* 点正文即可进入编辑；链接与复制按钮照旧生效 */
-                                <div
-                                    className="cursor-text"
-                                    onClick={event => {
-                                        if ((event.target as HTMLElement).closest("a, button")) return;
-                                        promptEdit.begin();
-                                    }}
-                                >
-                                    {/* min-h 与 MdEditor 的 min-h-[96px] 对齐：进编辑态时高度不变，下面不跳 */}
-                                    <MarkdownBlock content={job.input.prompt} className="min-h-[96px]" />
-                                </div>
-                            )}
-                        </Field>
-
-                        <Field label="标签">
-                            <TagInput
-                                value={job.input.labels ?? []}
-                                onChange={next => void patch({ labels: next })}
-                                placeholder="空格或回车添加"
-                            />
-                        </Field>
-
-                        <Field
-                            label={job.sessionId ? "选中的 MCP（下个回合生效）" : "允许的 MCP"}
-                            // 「清空」放标签行右侧：留在胶囊流里换行时会和上面一行挤到一起
-                            action={
-                                servers.length > 0 && (mcpSelection ?? job.input.mcpServers)?.length !== 0 ? (
-                                    <button
-                                        type="button"
-                                        onClick={() => void applyMcpSelection([])}
-                                        className="rounded px-1.5 py-0.5 text-xs text-muted hover:bg-col hover:text-fg"
-                                    >
-                                        清空
-                                    </button>
-                                ) : undefined
-                            }
-                        >
-                            <div className="flex flex-wrap gap-1.5">
-                                {servers.length === 0 && <span className="text-xs text-muted">（没有可选的 MCP）</span>}
-                                {servers.map(server => {
-                                    // 有执行会话时以会话选中集为准；未初始化（老会话）或还没跑过都等于全选
-                                    // 未初始化时与后端同口径：默认只选非 lazy 的服务
-                                    const fallback = servers.filter(item => !item.lazy).map(item => item.name);
-                                    const current = mcpSelection !== null && selectionInitialized
-                                        ? mcpSelection
-                                        : (job.input.mcpServers ?? fallback);
-                                    const checked = current.includes(server.name);
-                                    return (
-                                        <button
-                                            key={server.name}
-                                            onClick={() => {
-                                                const next = checked
-                                                    ? current.filter(item => item !== server.name)
-                                                    : [...current, server.name];
-                                                void applyMcpSelection(next);
-                                            }}
-                                            className={cn(
-                                                "rounded-full border px-2.5 py-0.5 text-xs",
-                                                checked ? "border-accent text-accent" : "border-border text-muted",
-                                            )}
-                                        >
-                                            {server.name} ({server.toolCount})
-                                        </button>
-                                    );
-                                })}
-                            </div>
-                        </Field>
-
-                        {commentsSection}
-                    </div>
+                    <CardPropsPanel
+                        job={job}
+                        home={home}
+                        servers={servers}
+                        activeSessionId={activeSessionId}
+                        mcpSelection={mcpSelection}
+                        selectionInitialized={selectionInitialized}
+                        comments={comments}
+                        onPatch={patch}
+                        onApplyMcp={applyMcpSelection}
+                        onRefreshComments={refreshComments}
+                        onChanged={onChanged}
+                        onError={setError}
+                    />
                 )}
 
-                {tab === "sessions" && (
-                    <div className="flex min-h-0 flex-1 flex-col gap-1.5 md:gap-2">
-                        {/* 沉浸态连会话下拉一起让出去：切会话先退出输入即可，不值当占着两行高度 */}
-                        {/* 行高固定：下拉框是网络回来才有的，别让它把整列顶下去 */}
-                        <div className={cn("flex h-9 shrink-0 items-center gap-1.5", immersive && "hidden")}>
-                            {sessions.length === 0 ? (
-                                <span className="flex-1 text-xs text-muted">
-                                    {sessionsReady ? "还没有执行会话" : ""}
-                                </span>
-                            ) : (
-                                <select
-                                    value={activeSessionId ?? ""}
-                                    onChange={event => setActiveSessionId(event.target.value)}
-                                    className="h-full min-w-0 flex-1 rounded-md border border-border bg-bg px-2 text-sm"
-                                >
-                                    {sessions.map(item => (
-                                        <option key={item.sessionId} value={item.sessionId}>
-                                            {sessionOptionLabel(item, narrow)}
-                                        </option>
-                                    ))}
-                                </select>
-                            )}
-                            {/* 「+ 新会话」最常用，桌面直接摆出来；窄屏连它一起收进「⋯」，下拉才腾得出宽度 */}
-                            <Button className="hidden md:inline-flex" onClick={() => void openBranch()}>
-                                + 新会话
-                            </Button>
-                            <OverflowMenu>
-                                <Button className="md:hidden" onClick={() => void openBranch()}>
-                                    + 新会话
-                                </Button>
-                                {activeSessionId && (
-                                    <Button
-                                        variant="danger"
-                                        disabled={activeSessionArchived}
-                                        onClick={() => void archiveSession()}
-                                    >
-                                        归档会话
-                                    </Button>
-                                )}
-                                {activeSessionArchived && (
-                                    <Button onClick={() => void unarchiveSession()}>取消归档</Button>
-                                )}
-                            </OverflowMenu>
-                        </div>
-                        <div
-                            ref={timelineRef}
-                            className="stable-scroll flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain pr-1"
-                        >
-                            <Timeline
-                                events={events}
-                                live={live}
-                                onLoadArguments={(seq, callId) => {
-                                    if (!activeSessionId) return Promise.reject(new Error("没有执行会话"));
-                                    return api.getToolArguments(job.id, activeSessionId, seq, callId)
-                                        .then(result => result.arguments);
-                                }}
-                            />
-                        </div>
-                        {activeSessionId && (
-                            <div className="flex shrink-0 flex-col gap-2 border-t border-border pt-2">
-                                {immersive && errorBar}
-                                <div className={cn("flex gap-1.5", composerExpanded ? "flex-col" : "items-end")}>
-                                    <Textarea
-                                        ref={composerRef}
-                                        rows={composerExpanded ? 3 : 1}
-                                        // 收起态压成一行：标签页里的历史能多露出两三行；一行的高度没什么可拖的
-                                        className={composerExpanded ? undefined : "min-h-0 resize-none py-1.5"}
-                                        value={inputDraft}
-                                        placeholder="你的创意灵感（可直接粘贴图片）"
-                                        onFocus={() => setComposerFocus(true)}
-                                        onBlur={() => setComposerFocus(false)}
-                                        onChange={event => setInputDraft(event.target.value)}
-                                        onPaste={event => {
-                                            const file = Array.from(event.clipboardData.files)[0];
-                                            if (!file) return;
-                                            event.preventDefault();
-                                            void uploadImage(file);
-                                        }}
-                                        onKeyDown={event => {
-                                            if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-                                                event.preventDefault();
-                                                void sendInput("request");
-                                            }
-                                        }}
-                                    />
-                                    {/* 收起态在输入框旁留一个发送键：发一句话犯不上先展开整排按钮 */}
-                                    {!composerExpanded && (
-                                        <Button
-                                            variant="primary"
-                                            className="shrink-0"
-                                            disabled={activeSessionArchived}
-                                            onMouseDown={event => event.preventDefault()}
-                                            onClick={() => void sendInput("request")}
-                                        >
-                                            发送
-                                        </Button>
-                                    )}
-                                </div>
-                                {/* 展开态的一排按钮：点按时别让输入框失焦，否则这一排刚点上去就自己收起来了 */}
-                                {composerExpanded && (
-                                    <div onMouseDown={event => event.preventDefault()} className="flex flex-col gap-2">
-                                        {attachments.length > 0 && (
-                                            <div className="flex flex-wrap gap-2">
-                                                {attachments.map(asset => (
-                                                    <div key={asset.id} className="relative">
-                                                        <AssetImage
-                                                            id={asset.id}
-                                                            alt={asset.filename}
-                                                            className="h-16 w-16 rounded-md border border-border object-cover"
-                                                        />
-                                                        <button
-                                                            type="button"
-                                                            onClick={() =>
-                                                                setAttachments(current =>
-                                                                    current.filter(item => item.id !== asset.id),
-                                                                )
-                                                            }
-                                                            className="absolute -top-1.5 -right-1.5 flex h-5 w-5 items-center justify-center rounded-full border border-border bg-panel text-xs text-muted hover:text-bad"
-                                                            aria-label="移除图片"
-                                                        >
-                                                            ×
-                                                        </button>
-                                                    </div>
-                                                ))}
-                                        </div>
-                                    )}
-                                    <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
-                                        <input
-                                            ref={fileInputRef}
-                                            type="file"
-                                            accept="image/*"
-                                            className="hidden"
-                                            onChange={event => {
-                                                const file = event.target.files?.[0];
-                                                event.target.value = "";
-                                                if (file) void uploadImage(file);
-                                            }}
-                                        />
-                                        <Button
-                                            variant="ghost"
-                                            disabled={uploading}
-                                            onClick={() => fileInputRef.current?.click()}
-                                        >
-                                            {uploading ? "上传中…" : "图片"}
-                                        </Button>
-                                        <span className="flex-1" />
-                                        {(pending.request > 0 || pending.turn > 0) && (
-                                            <span>
-                                                排队中 请求 {pending.request} · 回合 {pending.turn}
-                                            </span>
-                                        )}
-                                        {activeSessionArchived && (
-                                            <Button
-                                                onClick={() => void unarchiveSession()}
-                                            >
-                                                取消归档
-                                            </Button>
-                                        )}
-                                        <Button disabled={activeSessionArchived} onClick={() => void sendInput("turn")}>
-                                            排队
-                                        </Button>
-                                        <Button
-                                            variant="primary"
-                                            disabled={activeSessionArchived}
-                                            onClick={() => void sendInput("request")}
-                                        >
-                                            尽快处理
-                                        </Button>
-                                    </div>
-                                    </div>
-                                )}
-                            </div>
-                        )}
-                    </div>
-                )}
-
+                <SessionPanel
+                    active={tab === "sessions"}
+                    jobId={job.id}
+                    sessions={sessions}
+                    sessionsReady={sessionsReady}
+                    activeSessionId={activeSessionId}
+                    narrow={narrow}
+                    immersive={immersive}
+                    errorText={errorText}
+                    onSelectSession={setActiveSessionId}
+                    onOpenBranch={openBranch}
+                    onArchiveSession={archiveSession}
+                    onUnarchiveSession={unarchiveSession}
+                    onRefreshSessions={refreshSessions}
+                    onChanged={onChanged}
+                    onError={setError}
+                    onImmersiveChange={setImmersive}
+                />
             </div>
         </div>
     );

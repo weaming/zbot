@@ -575,6 +575,12 @@ export class JobStore {
 
     // ---------- 事件流 ----------
 
+    /** 当前最大事件 seq（空表为 0）：列表首屏据此直接订阅后续增量，不必先把历史事件拉一遍。 */
+    lastEventSeq(): number {
+        const row = this.db.query<{ seq: number }>("SELECT COALESCE(MAX(seq), 0) AS seq FROM job_events").get();
+        return row?.seq ?? 0;
+    }
+
     appendEvent(jobId: string, type: JobEventType, payload: Record<string, unknown>): JobEvent {
         const ts = this.isoNow();
         const result = this.db.run(

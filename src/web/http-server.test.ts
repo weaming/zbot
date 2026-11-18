@@ -52,6 +52,10 @@ function createStubHost(
             calls.sinceCalls.push(after);
             return (options.history ?? []).filter(event => event.seq > after);
         },
+        readSessionEventsBefore: async (_sessionId: string, before: number, count: number) => {
+            const older = (options.history ?? []).filter(event => event.seq < before);
+            return older.slice(-count);
+        },
         subscribeEvents: (listener: (sessionId: string, event: AgentEvent | null) => void) => {
             listeners.add(listener);
             return () => {
@@ -373,6 +377,30 @@ describe("http-server 事件流", () => {
 
             expect(calls.sinceCalls).toEqual([2]);
             expect(events.map(item => item.seq)).toEqual([3]);
+        } finally {
+            await handle.stop();
+        }
+    });
+
+    test("events 响应携带 x-first-seq / x-last-seq / x-has-more 游标头", async () => {
+        const { host } = createStubHost({ history: [event(1), event(2), event(3)] });
+        const handle = web(host);
+        try {
+            const page1 = await call(handle, "/api/sessions/s1/events?limit=2&before=99");
+            expect(page1.status).toBe(200);
+            expect(page1.headers.get("x-first-seq")).toBe("2");
+            expect(page1.headers.get("x-last-seq")).toBe("3");
+            expect(page1.headers.get("x-has-more")).toBe("1");
+
+            const page2 = await call(handle, "/api/sessions/s1/events?limit=2&before=2");
+            expect(page2.headers.get("x-first-seq")).toBe("1");
+            expect(page2.headers.get("x-last-seq")).toBe("1");
+            expect(page2.headers.get("x-has-more")).toBe("0");
+
+            const empty = await call(handle, "/api/sessions/s1/events?since=10");
+            expect(empty.headers.get("x-first-seq")).toBe("0");
+            expect(empty.headers.get("x-last-seq")).toBe("0");
+            expect(empty.headers.get("x-has-more")).toBe("0");
         } finally {
             await handle.stop();
         }

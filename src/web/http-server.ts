@@ -20,7 +20,7 @@ import {
     type SessionTurnHost,
 } from "../host/session-host-types.js";
 import { handleJobsRoute, type JobsApiContext } from "./jobs-api.js";
-import { parseEventPage } from "./page-params.js";
+import { eventPageHeaders, parseEventPage } from "./page-params.js";
 import { enqueueInput, pendingStats, removeInput, takeInputs } from "./pending-inputs.js";
 import { fail, json, readJson } from "./respond.js";
 import { toLiveEventPayload, toSessionEventView, toSessionEventViews } from "./event-view.js";
@@ -346,9 +346,10 @@ export function startHttpServer(options: HttpServerOptions): HttpServerHandle {
                     if ("error" in page) return fail(page.error, 400);
                     if (page.limit !== undefined) {
                         const events = await host.readSessionEventsBefore(sessionId, page.before, page.limit);
-                        return json(toSessionEventViews(events));
+                        return json(toSessionEventViews(events), 200, eventPageHeaders(events));
                     }
-                    return json(toSessionEventViews(await host.readSessionEventsSince(sessionId, cursor.since)));
+                    const events = await host.readSessionEventsSince(sessionId, cursor.since);
+                    return json(toSessionEventViews(events), 200, eventPageHeaders(events));
                 }
 
                 if (action === "live" && req.method === "GET") {

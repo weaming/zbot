@@ -4,6 +4,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import type { AgentEvent } from "../events/agent-events.js";
 import type { JobsApiHost } from "./jobs-api.js";
 import { JobRunner } from "../jobs/runner.js";
 import { JobStore } from "../jobs/store.js";
@@ -23,11 +24,15 @@ interface HostState {
     summaries: Array<{ sessionId: string; archived: boolean }>;
     /** 会话写操作的调用顺序：验证「取消归档 → 改 → 归档回去」的时序。 */
     calls: string[];
+    /** readSessionEventsBefore 返回的原始事件（可选，验证游标头不受视图过滤影响）。 */
+    beforeEvents: AgentEvent[];
+    /** MCP 选中集操作落到的目标 sessionId。 */
+    mcpTargets: string[];
 }
 
 /** archived/deleted 收集会话处置结果；isBusy 模拟「会话正在跑一轮」。 */
 function stubHost(
-    state: HostState = { archived: [], deleted: [], pages: [], summaries: [], calls: [] },
+    state: HostState = { archived: [], deleted: [], pages: [], summaries: [], calls: [], beforeEvents: [], mcpTargets: [] },
     isBusy = false,
 ): JobsApiHost {
     return {
@@ -45,11 +50,13 @@ function stubHost(
         unarchiveSession: async () => {
             state.calls.push("unarchive");
         },
-        setSessionLazyMcpServers: async () => {
+        setSessionLazyMcpServers: async (sessionId: string) => {
             state.calls.push("set");
+            state.mcpTargets.push(`set:${sessionId}`);
         },
-        readSessionLazyMcpServers: async () => {
+        readSessionLazyMcpServers: async (sessionId: string) => {
             state.calls.push("read");
+            state.mcpTargets.push(`read:${sessionId}`);
             return [];
         },
         getSessionLazyMcpServers: async () => [],
@@ -63,7 +70,7 @@ function stubHost(
         readSessionEventsSince: async () => [],
         readSessionEventsBefore: async (sessionId: string, before: number, count: number) => {
             state.pages.push({ sessionId, before, count });
-            return [];
+            return state.beforeEvents;
         },
         subscribeEvents: () => () => {},
     } as unknown as JobsApiHost;
@@ -78,8 +85,10 @@ function web(options: { isBusy?: boolean } = {}): {
     pages: Array<{ sessionId: string; before: number; count: number }>;
     summaries: Array<{ sessionId: string; archived: boolean }>;
     calls: string[];
+    beforeEvents: AgentEvent[];
+    mcpTargets: string[];
 } {
-    const state: HostState = { archived: [], deleted: [], pages: [], summaries: [], calls: [] };
+    const state: HostState = { archived: [], deleted: [], pages: [], summaries: [], calls: [], beforeEvents: [], mcpTargets: [] };
     const store = new JobStore({ path: ":memory:" });
     const runner = new JobRunner({ store, host: stubHost(state), owner: "w1", tickMs: 60_000 });
     const handle = startHttpServer({
@@ -98,6 +107,8 @@ function web(options: { isBusy?: boolean } = {}): {
         pages: state.pages,
         summaries: state.summaries,
         calls: state.calls,
+        beforeEvents: state.beforeEvents,
+        mcpTargets: state.mcpTargets,
     };
 }
 
@@ -273,6 +284,25 @@ describe("jobs API 查询与取消", () => {
             // 取消不再联动列归属
             expect(body.job.input.column).toBe("doing");
             expect(store.get(job.id)?.input.column).toBe("doing");
+        } finally {
+            await handle.stop();
+        }
+    });
+
+    test("列表响应携带 x-job-seq 且与 store.lastEventSeq() 一致", async () => {
+        const { handle, store } = web();
+        try {
+            const emptyRes = await call(handle, "/api/jobs");
+            expect(emptyRes.status).toBe(200);
+            expect(emptyRes.headers.get("x-job-seq")).toBe("0");
+            expect(store.lastEventSeq()).toBe(0);
+
+            const { job } = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } });
+            store.updateInput(job.id, { column: "doing" });
+            const listRes = await call(handle, "/api/jobs");
+            expect(listRes.status).toBe(200);
+            expect(listRes.headers.get("x-job-seq")).toBe(String(store.lastEventSeq()));
+            expect(store.lastEventSeq()).toBeGreaterThan(0);
         } finally {
             await handle.stop();
         }
@@ -469,14 +499,50 @@ describe("jobs API 其它端点", () => {
     });
 
     test("/events?limit= 取尾部一页，把 before 与条数交给宿主", async () => {
-        const { handle, store, pages } = web();
+        const { handle, store, pages, beforeEvents } = web();
         try {
             const { job } = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } });
             store.attachSession(job.id, "s-run");
+            // 两条都被 toSessionEventViews 过滤掉的内部事件：响应头仍必须按原始 seq 报告
+            beforeEvents.push(
+                { seq: 4, ts: new Date(0).toISOString(), sessionId: "s-run", type: "turn_segment_start", payload: {} } as AgentEvent,
+                { seq: 5, ts: new Date(0).toISOString(), sessionId: "s-run", type: "usage_recorded", payload: {} } as AgentEvent,
+            );
 
             const res = await call(handle, `/api/jobs/${job.id}/events?limit=2&before=99`);
             expect(res.status).toBe(200);
             expect(pages).toEqual([{ sessionId: "s-run", before: 99, count: 2 }]);
+            expect(await res.json()).toEqual([]);
+            expect(res.headers.get("x-first-seq")).toBe("4");
+            expect(res.headers.get("x-last-seq")).toBe("5");
+            expect(res.headers.get("x-has-more")).toBe("1");
+        } finally {
+            await handle.stop();
+        }
+    });
+
+    test("mcp-selection 支持指定绑定分支会话，越权会话报 404", async () => {
+        const { handle, store, mcpTargets } = web();
+        try {
+            const { job } = store.create({ source: "t", input: { prompt: "a", workspace: WORKSPACE } });
+            store.attachSession(job.id, "s-run");
+            store.addSession(job.id, "s-branch", "branch", 0);
+
+            const getRes = await call(handle, `/api/jobs/${job.id}/mcp-selection?sessionId=s-branch`);
+            expect(getRes.status).toBe(200);
+            expect(await getRes.json()).toEqual({ servers: [], initialized: false });
+
+            const postRes = await call(
+                handle,
+                `/api/jobs/${job.id}/mcp-selection?sessionId=s-branch`,
+                postBody({ servers: ["b", "a"] }),
+            );
+            expect(postRes.status).toBe(200);
+            expect(await postRes.json()).toEqual({ servers: ["a", "b"] });
+            expect(mcpTargets).toEqual(["read:s-branch", "set:s-branch"]);
+
+            const unowned = await call(handle, `/api/jobs/${job.id}/mcp-selection?sessionId=s-other`);
+            expect(unowned.status).toBe(404);
         } finally {
             await handle.stop();
         }

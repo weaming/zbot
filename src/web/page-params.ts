@@ -28,3 +28,17 @@ export function parseEventPage(url: URL): EventPageParams | { error: string } {
     if (limit <= 0) return { error: "limit 必须是正整数" };
     return { limit: Math.min(limit, MAX_LIMIT), before };
 }
+
+/**
+ * 原始事件页的游标响应头：toSessionEventViews 会过滤掉段边界与用量等内部事件，
+ * 前端不能靠「视图数组长度 >= limit」判断还有没有更早的一页，必须看原始事件是否已读到 seq=1。
+ */
+export function eventPageHeaders(rawEvents: ReadonlyArray<{ seq: number }>): Record<string, string> {
+    const firstSeq = rawEvents.length > 0 ? rawEvents[0]!.seq : 0;
+    const lastSeq = rawEvents.length > 0 ? rawEvents[rawEvents.length - 1]!.seq : 0;
+    return {
+        "x-first-seq": String(firstSeq),
+        "x-last-seq": String(lastSeq),
+        "x-has-more": firstSeq > 1 ? "1" : "0",
+    };
+}

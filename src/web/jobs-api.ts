@@ -35,7 +35,7 @@ import { defaultMcpSelection, getMcpServersStatus } from "../mcp/client-manager.
 import { readMcpSelection } from "../tools/session-mcp-selection.js";
 import { toolCatalog } from "../tools/tool-catalog.js";
 import { fail, json, readJson } from "./respond.js";
-import { parseEventPage } from "./page-params.js";
+import { eventPageHeaders, parseEventPage } from "./page-params.js";
 import { readToolCall, toLiveEventPayload, toSessionEventView, toSessionEventViews } from "./event-view.js";
 import { subscribeLive as subscribeLiveFrames } from "./live-stream.js";
 import { openSseStream, parseSseCursor, type SseSource } from "./sse.js";
@@ -294,9 +294,13 @@ export async function handleJobsRoute(
                     : DEFAULT_LIST_LIMIT;
                 // 归档的默认不出现在看板上，需要时带 ?archived=1
                 const includeArchived = url.searchParams.get("archived") === "1";
-                return json(
-                    ctx.store.list({ states: states.length ? (states as never) : undefined, limit, includeArchived }),
-                );
+                const lastSeq = ctx.store.lastEventSeq();
+                const list = ctx.store.list({
+                    states: states.length ? (states as never) : undefined,
+                    limit,
+                    includeArchived,
+                });
+                return json(list, 200, { "x-job-seq": String(lastSeq) });
             }
 
             if (req.method === "POST") {
@@ -468,38 +472,42 @@ export async function handleJobsRoute(
         if (sub === "mcp-selection") {
             const job = ctx.store.get(jobId);
             if (!job) return fail("任务不存在", 404);
-            if (!job.sessionId) return fail("任务尚未开始，暂无执行会话", 409);
+            if (req.method !== "GET" && req.method !== "POST") return fail("方法不支持", 405);
+            const body = req.method === "POST" ? await readJson(req) : undefined;
+            const requested = (typeof body?.sessionId === "string" ? body.sessionId.trim() : "")
+                || url.searchParams.get("sessionId")?.trim();
+            const sessionId = requested || job.sessionId;
+            if (!sessionId) return fail("任务尚未开始，暂无执行会话", 409);
+            if (requested && !ctx.store.listSessions(jobId).some(item => item.sessionId === requested)) {
+                return fail("该会话不属于此任务", 404);
+            }
             if (req.method === "GET") {
                 // initialized=false：该会话还没有选中集（老会话）→ 运行期等于"不限制"，
                 // 界面据此回退成"全选"，而不是显示"一个都没选"
-                const initialized = readMcpSelection(job.sessionId) !== undefined;
+                const initialized = readMcpSelection(sessionId) !== undefined;
                 return json({
                     // 只读接口：已归档的会话也要能查，否则归档后界面连当前选中集都显示不出来
-                    servers: await ctx.host.readSessionLazyMcpServers(job.sessionId),
+                    servers: await ctx.host.readSessionLazyMcpServers(sessionId),
                     initialized,
                 });
             }
-            if (req.method === "POST") {
-                const body = await readJson(req);
-                if (!Array.isArray(body?.servers)) return fail("servers 必须是字符串数组", 400);
-                const servers = body.servers
-                    .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-                    .map(item => item.trim());
-                const next = [...new Set(servers)].sort();
-                // 归档会话不可写：临时取消归档，改完按原状归档回去（用户看到的仍是归档态）
-                const archived = await ctx.host.isSessionArchived(job.sessionId);
-                if (archived) {
-                    if (ctx.host.isSessionBusy(job.sessionId)) return fail("会话执行中，暂不能修改", 409);
-                    await ctx.host.unarchiveSession(job.sessionId);
-                }
-                try {
-                    await ctx.host.setSessionLazyMcpServers(job.sessionId, next);
-                } finally {
-                    if (archived) await ctx.host.closeSession(job.sessionId);
-                }
-                return json({ servers: next });
+            if (!Array.isArray(body?.servers)) return fail("servers 必须是字符串数组", 400);
+            const servers = body.servers
+                .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+                .map(item => item.trim());
+            const next = [...new Set(servers)].sort();
+            // 归档会话不可写：临时取消归档，改完按原状归档回去（用户看到的仍是归档态）
+            const archived = await ctx.host.isSessionArchived(sessionId);
+            if (archived) {
+                if (ctx.host.isSessionBusy(sessionId)) return fail("会话执行中，暂不能修改", 409);
+                await ctx.host.unarchiveSession(sessionId);
             }
-            return fail("方法不支持", 405);
+            try {
+                await ctx.host.setSessionLazyMcpServers(sessionId, next);
+            } finally {
+                if (archived) await ctx.host.closeSession(sessionId);
+            }
+            return json({ servers: next });
         }
 
         if (sub === "cancel" && req.method === "POST") {
@@ -531,9 +539,10 @@ export async function handleJobsRoute(
                 if ("error" in page) return fail(page.error, 400);
                 if (page.limit !== undefined) {
                     const events = await ctx.host.readSessionEventsBefore(sessionId, page.before, page.limit);
-                    return json(toSessionEventViews(events));
+                    return json(toSessionEventViews(events), 200, eventPageHeaders(events));
                 }
-                return json(toSessionEventViews(await ctx.host.readSessionEventsSince(sessionId, cursor.since)));
+                const events = await ctx.host.readSessionEventsSince(sessionId, cursor.since);
+                return json(toSessionEventViews(events), 200, eventPageHeaders(events));
             }
             return openSseStream(
                 sessionEventSource(ctx.host, sessionId, jobId),
