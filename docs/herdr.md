@@ -68,7 +68,8 @@ zbot herdr spawn "只读复审这次改动" --title "复审" --cwd ~/src/neta-ap
 ```
 
 等价于手工的四步：新建标签页 → 新建会话 → 在标签页里 `zbot resume <id>` → `zbot session send`。
-只能在 herdr 内运行（`HERDR_ENV=1`），否则报 `herdr_unavailable`。
+可在 Herdr 1（`HERDR_ENV=1`）或 herdr-core（`HC_TERMINAL_ID`）终端内运行，否则报 `herdr_unavailable`。
+在 `hc` 终端内运行时，会自动通过 `hc connect`（`terminal.run`）创建后台终端、转发 `ZBOT_STATE_DIR` / `ZBOT_CONFIG_FILE`，并用 `hc kill && hc rm` 完成收尾。
 
 - `--title` 与 `--cwd` **必填**：标题同时是新标签页的默认标签（要分开写就用 `--label`），
   目录决定标签页与会话的 cwd（相对路径按调用方 cwd 解析）。不给就报 `usage`，不猜。

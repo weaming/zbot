@@ -6,15 +6,19 @@
  * `result.root_pane.pane_id` 里；解析失败时退化为正则兜底，避免 herdr 换版就把命令打死。
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
+import { resolveHcBinPath } from "../../tui/hc-reporter.js";
 import { HerdrCliError } from "./args.js";
 
 const execFileAsync = promisify(execFile);
 /** 单次 herdr 调用上限：卡住的 CLI 不该把 spawn 挂死。 */
 const CALL_TIMEOUT_MS = 20_000;
 
+export type HerdrBackend = "herdr" | "hc";
+
 export interface HerdrSpawnContext {
+    backend: HerdrBackend;
     binPath: string;
     workspaceId: string;
 }
@@ -27,7 +31,15 @@ export interface HerdrCaller {
 }
 
 export function readHerdrCaller(env: NodeJS.ProcessEnv): HerdrCaller | undefined {
-    if (env.HERDR_ENV !== "1") return undefined;
+    if (env.HERDR_ENV !== "1") {
+        const hcTerminalId = env.HC_TERMINAL_ID?.trim();
+        if (!hcTerminalId) return undefined;
+        return {
+            workspaceId: "hc",
+            tabId: hcTerminalId,
+            paneId: hcTerminalId,
+        };
+    }
     const caller: HerdrCaller = {
         workspaceId: env.HERDR_WORKSPACE_ID?.trim() || null,
         tabId: env.HERDR_TAB_ID?.trim() || null,
@@ -37,7 +49,7 @@ export function readHerdrCaller(env: NodeJS.ProcessEnv): HerdrCaller | undefined
 }
 
 /**
- * 从 herdr 注入的环境变量取上下文：只有确认在 herdr 里运行才继续，
+ * 从 herdr / hc 注入的环境变量取上下文：只有确认在 herdr 或 hc 里运行才继续，
  * 否则「新建标签页」这个前提根本不存在，直接报错比留半个会话干净。
  */
 export function readHerdrSpawnContext(
@@ -45,11 +57,20 @@ export function readHerdrSpawnContext(
     workspaceOverride?: string,
 ): HerdrSpawnContext {
     if (env.HERDR_ENV !== "1") {
+        const hcTerminalId = env.HC_TERMINAL_ID?.trim();
+        const hcBin = env.HC_BIN_PATH?.trim() || (hcTerminalId ? resolveHcBinPath(env) : undefined);
+        if (hcBin) {
+            return {
+                backend: "hc",
+                binPath: hcBin,
+                workspaceId: workspaceOverride?.trim() || "hc",
+            };
+        }
         throw new HerdrCliError(
             "herdr_unavailable",
-            "zbot herdr 需要在 herdr 里运行（HERDR_ENV != 1）：请在 herdr pane 内执行",
+            "zbot herdr 需要在 herdr 或 hc 里运行（HERDR_ENV != 1 且缺少 HC_TERMINAL_ID）：请在 herdr pane 或 hc 终端内执行",
             1,
-            { herdrEnv: env.HERDR_ENV ?? null },
+            { herdrEnv: env.HERDR_ENV ?? null, hcTerminalId: hcTerminalId ?? null },
         );
     }
     const binPath = env.HERDR_BIN_PATH?.trim();
@@ -65,7 +86,7 @@ export function readHerdrSpawnContext(
             {},
         );
     }
-    return { binPath, workspaceId };
+    return { backend: "herdr", binPath, workspaceId };
 }
 
 export interface CreateTabInput {
@@ -117,7 +138,8 @@ export interface HerdrCli {
     closeTab(tabId: string): Promise<void>;
 }
 
-export function createHerdrCli(binPath: string): HerdrCli {
+export function createHerdrCli(binPath: string, backend: HerdrBackend = "herdr"): HerdrCli {
+    if (backend === "hc") return createHcCli(binPath);
     return {
         async createTab(input) {
             const created = parseCreatedTab(await callHerdr(binPath, buildCreateTabArgs(input)));
@@ -147,6 +169,190 @@ export function createHerdrCli(binPath: string): HerdrCli {
         async closeTab(tabId) {
             await callHerdr(binPath, ["tab", "close", tabId]);
         },
+    };
+}
+
+/**
+ * herdr-core (hc) 客户端：每个终端同时是自己的 tab 与 pane，
+ * `terminal.run` 通过 `hc connect` JSON-RPC 传入 `env` 与 `cwd`，保证 `ZBOT_STATE_DIR` 透传。
+ */
+function createHcCli(binPath: string): HerdrCli {
+    return {
+        async createTab(input) {
+            const result = await callHcRpc<{ address?: string }>(binPath, "terminal.run", {
+                cwd: input.cwd,
+                env: input.env ?? {},
+                labels: { agent: "zbot", title: input.label },
+                no_notify: true,
+                outlive_parent: true,
+                wait: false,
+            });
+            const address = asString(result?.address);
+            if (!address) {
+                throw new HerdrCliError("herdr_failed", "hc terminal.run 的输出里没有终端地址", 1, {});
+            }
+            return { tabId: address, paneId: address };
+        },
+        async runInPane(paneId, command) {
+            await callHerdr(binPath, ["send", paneId, command, "--json"]);
+        },
+        async getTab(tabId) {
+            const raw = parseJsonObject(await callHerdr(binPath, ["get", tabId, "--json"]));
+            return normalizeHcTab(raw);
+        },
+        async getPane(paneId) {
+            const raw = parseJsonObject(await callHerdr(binPath, ["get", paneId, "--json"]));
+            return normalizeHcPane(raw);
+        },
+        async listPanes() {
+            const list = parseJsonObject(await callHerdr(binPath, ["ls", "--json"])) as
+                { terminals?: Array<{ address?: unknown }> } | undefined;
+            const addresses = (list?.terminals ?? [])
+                .map(item => asString(item.address))
+                .filter((addr): addr is string => addr !== undefined);
+            const panes = await Promise.all(
+                addresses.map(addr => this.getPane(addr).catch(() => undefined)),
+            );
+            return panes.filter((pane): pane is HerdrPaneMeta => pane !== undefined);
+        },
+        async closeTab(tabId) {
+            await callHerdr(binPath, ["kill", tabId, "--json"]);
+            await callHerdr(binPath, ["rm", tabId, "--json"]).catch(() => undefined);
+        },
+    };
+}
+
+async function callHcRpc<T>(binPath: string, method: string, params: Record<string, unknown>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+        const child = spawn(binPath, ["connect"], { stdio: ["pipe", "pipe", "pipe"] });
+        let stdout = "";
+        let stderr = "";
+        let settled = false;
+
+        const finish = (fn: () => void): void => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            try { child.kill(); } catch { /* ignore */ }
+            fn();
+        };
+
+        const timer = setTimeout(() => {
+            finish(() => reject(new HerdrCliError(
+                "herdr_failed",
+                `hc ${method} 执行超时（${CALL_TIMEOUT_MS / 1000}s）`,
+                1,
+                { method },
+            )));
+        }, CALL_TIMEOUT_MS);
+        timer.unref?.();
+
+        child.stderr?.on("data", (chunk: Buffer) => {
+            if (stderr.length < 1024) stderr += chunk.toString();
+        });
+        child.stdout?.on("data", (chunk: Buffer) => {
+            stdout += chunk.toString();
+            const newline = stdout.indexOf("\n");
+            if (newline === -1) return;
+            const line = stdout.slice(0, newline).trim();
+            finish(() => {
+                try {
+                    const parsed = JSON.parse(line) as {
+                        result?: T;
+                        error?: { message?: string; data?: { message?: string } };
+                    };
+                    if (parsed.error) {
+                        const msg = parsed.error.data?.message ?? parsed.error.message ?? "RPC error";
+                        reject(new HerdrCliError("herdr_failed", `hc ${method} 失败：${msg}`, 1, { method }));
+                        return;
+                    }
+                    resolve(parsed.result as T);
+                } catch (err) {
+                    reject(new HerdrCliError(
+                        "herdr_failed",
+                        `hc ${method} 返回非 JSON：${err instanceof Error ? err.message : String(err)}`,
+                        1,
+                        { method },
+                    ));
+                }
+            });
+        });
+        child.once("error", (error) => {
+            finish(() => reject(new HerdrCliError(
+                "herdr_failed",
+                `hc ${method} 失败：${describeFailure(error)}`,
+                1,
+                { method },
+            )));
+        });
+        child.once("exit", (code) => {
+            finish(() => reject(new HerdrCliError(
+                "herdr_failed",
+                `hc ${method} 提前退出（码 ${code ?? "null"}）${stderr.trim() ? `：${stderr.trim().slice(0, 200)}` : ""}`,
+                1,
+                { method },
+            )));
+        });
+
+        child.stdin?.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method, params })}\n`);
+        child.stdin?.end();
+    });
+}
+
+function parseJsonObject(output: string): Record<string, unknown> | undefined {
+    try {
+        const parsed = JSON.parse(output) as Record<string, unknown>;
+        if (!parsed || typeof parsed !== "object") return undefined;
+        return (parsed.terminal && typeof parsed.terminal === "object"
+            ? parsed.terminal as Record<string, unknown>
+            : parsed);
+    } catch {
+        return undefined;
+    }
+}
+
+function readHcStatusState(status: unknown): string | null {
+    if (typeof status === "string" && status.length > 0) return status;
+    if (status && typeof status === "object") {
+        const state = (status as { state?: unknown }).state;
+        if (typeof state === "string" && state.length > 0) return state;
+    }
+    return null;
+}
+
+function normalizeHcTab(raw: Record<string, unknown> | undefined): HerdrTabMeta | undefined {
+    const address = asString(raw?.address);
+    if (!address) return undefined;
+    const labels = asTokenMap(raw?.labels);
+    return {
+        tabId: address,
+        workspaceId: "hc",
+        label: labels?.title ?? asString(raw?.title) ?? asString(raw?.name) ?? null,
+        number: null,
+        paneCount: 1,
+        focused: null,
+        agentStatus: readHcStatusState(raw?.status),
+    };
+}
+
+function normalizeHcPane(raw: Record<string, unknown> | undefined): HerdrPaneMeta | undefined {
+    const address = asString(raw?.address);
+    if (!address) return undefined;
+    const labels = asTokenMap(raw?.labels);
+    const foreground = raw?.foreground && typeof raw.foreground === "object"
+        ? raw.foreground as Record<string, unknown>
+        : undefined;
+    return {
+        paneId: address,
+        tabId: address,
+        workspaceId: "hc",
+        cwd: asString(raw?.cwd) ?? null,
+        foregroundCwd: asString(foreground?.cwd) ?? null,
+        focused: null,
+        agent: labels?.agent ?? asString(raw?.agent) ?? null,
+        agentStatus: readHcStatusState(raw?.status),
+        title: labels?.title ?? asString(raw?.title) ?? null,
+        tokens: labels,
     };
 }
 

@@ -26,6 +26,7 @@ import {
     readHerdrSpawnContext,
     type CreateTabInput,
     type CreatedTab,
+    type HerdrBackend,
     type HerdrCaller,
     type HerdrCli,
     type HerdrPaneMeta,
@@ -117,7 +118,7 @@ export async function runSpawn(command: SpawnCommand, deps: SpawnDeps = {}): Pro
     const title = cleanTitle(command.title);
 
     const sessionId = await (deps.createSession ?? createSession)({ cwd, title });
-    const herdr = deps.herdr ?? createHerdrCli(context.binPath);
+    const herdr = deps.herdr ?? createHerdrCli(context.binPath, context.backend);
     const paneEnv = forwardPaneEnv(env);
     const created = await createTabFor(herdr, sessionId, {
         workspaceId: context.workspaceId,
@@ -126,18 +127,23 @@ export async function runSpawn(command: SpawnCommand, deps: SpawnDeps = {}): Pro
         focus: command.focus,
         ...(paneEnv ? { env: paneEnv } : {}),
     });
-    await runResumeIn(herdr, created, sessionId);
+    await runResumeIn(herdr, created, sessionId, context.backend);
 
     if (command.readyTimeoutSeconds > 0) {
         const ready = await (deps.waitForClaim ?? waitForSessionClaim)(
             sessionId,
             command.readyTimeoutSeconds * 1000,
         );
-        if (!ready) throw notReadyError(sessionId, created, command.readyTimeoutSeconds);
+        if (!ready) throw notReadyError(sessionId, created, command.readyTimeoutSeconds, context.backend);
     }
 
     const delivery = command.text
-        ? await deliverOrExplain(deps.deliver ?? deliverFirstInput, { sessionId, text: command.text }, created)
+        ? await deliverOrExplain(
+            deps.deliver ?? deliverFirstInput,
+            { sessionId, text: command.text },
+            created,
+            context.backend,
+        )
         : undefined;
     // 元数据放在投递之后读：此时 pane 里的 zbot 已经上报过 agent_status，拿到的是真实状态
     const meta = await readHerdrMeta(herdr, created);
@@ -149,7 +155,7 @@ export async function runSpawn(command: SpawnCommand, deps: SpawnDeps = {}): Pro
         // 会话被 TUI 持有时 session archive 会被 held 拒绝，归档要走持有者的 /archive
         archive: `zbot session send ${sessionId} "/archive"`,
         close: `zbot session send ${sessionId} "/close"`,
-        closeTab: `herdr tab close ${created.tabId}`,
+        closeTab: closeTabCommandFor(created.tabId, context.backend),
         teardown: `zbot herdr teardown ${sessionId} --tab ${created.tabId}`,
         sendAndWait: `zbot session send ${sessionId} "<文本>" --wait`,
     };
@@ -176,9 +182,7 @@ export async function runSpawn(command: SpawnCommand, deps: SpawnDeps = {}): Pro
             later: `后续发的消息用 ${commands.sendAndWait} 一条拿到结果；`
                 + `要能在中断/断线后按轮续等，就先 \`zbot session send ${sessionId} "<文本>" --json\` 拿 msgId，`
                 + `再 \`zbot session wait ${sessionId} --msg=<msgId>\` 续等`,
-            observe: `通用：\`zbot session show ${sessionId} --json --lite\`；`
-                + `在 herdr 里还可以看终端与 pane 状态：\`herdr pane read ${created.paneId} --lines 40\`、`
-                + `\`herdr pane get ${created.paneId}\``,
+            observe: observeHintFor(sessionId, created.paneId, context.backend),
         },
     };
 
@@ -260,7 +264,12 @@ async function createTabFor(herdr: HerdrCli, sessionId: string, input: CreateTab
     }
 }
 
-async function runResumeIn(herdr: HerdrCli, created: CreatedTab, sessionId: string): Promise<void> {
+async function runResumeIn(
+    herdr: HerdrCli,
+    created: CreatedTab,
+    sessionId: string,
+    backend: HerdrBackend = "herdr",
+): Promise<void> {
     try {
         await herdr.runInPane(created.paneId, `zbot resume ${sessionId}`);
     } catch (error) {
@@ -271,23 +280,29 @@ async function runResumeIn(herdr: HerdrCli, created: CreatedTab, sessionId: stri
             1,
             {
                 sessionId,
-                ...handoffCommands(sessionId, created),
+                ...handoffCommands(sessionId, created, backend),
                 ...errorDetails(error),
             },
         );
     }
 }
 
-function notReadyError(sessionId: string, created: CreatedTab, timeoutSeconds: number): HerdrCliError {
+function notReadyError(
+    sessionId: string,
+    created: CreatedTab,
+    timeoutSeconds: number,
+    backend: HerdrBackend = "herdr",
+): HerdrCliError {
+    const readCmd = readScreenCommandFor(created.paneId, 30, backend);
     return new HerdrCliError(
         "not_ready",
         `等了 ${timeoutSeconds}s 仍没有实例认领会话 ${sessionId}（标签页 ${created.tabId} / pane ${created.paneId}）：`
-        + `先看 \`herdr pane read ${created.paneId} --lines 30\`；认领后可 \`zbot session send ${sessionId} <文本>\``,
+        + `先看 \`${readCmd}\`；认领后可 \`zbot session send ${sessionId} <文本>\``,
         1,
         {
             sessionId,
             delivered: false,
-            ...handoffCommands(sessionId, created),
+            ...handoffCommands(sessionId, created, backend),
         },
     );
 }
@@ -324,14 +339,37 @@ function renderHuman(result: SpawnResult, env: NodeJS.ProcessEnv): string {
     return `${lines.join("\n")}\n`;
 }
 
+function closeTabCommandFor(tabId: string, backend: HerdrBackend): string {
+    return backend === "hc" ? `hc kill ${tabId} && hc rm ${tabId}` : `herdr tab close ${tabId}`;
+}
+
+function readScreenCommandFor(paneId: string, lines: number, backend: HerdrBackend): string {
+    return backend === "hc" ? `hc read ${paneId} --lines ${lines}` : `herdr pane read ${paneId} --lines ${lines}`;
+}
+
+function observeHintFor(sessionId: string, paneId: string, backend: HerdrBackend): string {
+    if (backend === "hc") {
+        return `通用：\`zbot session show ${sessionId} --json --lite\`；`
+            + `在 hc 里还可以看终端与状态：\`hc read ${paneId} --lines 40\`、`
+            + `\`hc get ${paneId}\``;
+    }
+    return `通用：\`zbot session show ${sessionId} --json --lite\`；`
+        + `在 herdr 里还可以看终端与 pane 状态：\`herdr pane read ${paneId} --lines 40\`、`
+        + `\`herdr pane get ${paneId}\``;
+}
+
 /** 半成品状态（tab/pane 已建但没跑起来）的接手与收尾命令。 */
-function handoffCommands(sessionId: string, created: CreatedTab): Record<string, unknown> {
+function handoffCommands(
+    sessionId: string,
+    created: CreatedTab,
+    backend: HerdrBackend = "herdr",
+): Record<string, unknown> {
     return {
         tabId: created.tabId,
         paneId: created.paneId,
         retryCommand: `zbot session send ${sessionId} "<文本>"`,
         teardownCommand: `zbot herdr teardown ${sessionId} --tab=${created.tabId}`,
-        closeTabCommand: `herdr tab close ${created.tabId}`,
+        closeTabCommand: closeTabCommandFor(created.tabId, backend),
     };
 }
 
@@ -356,6 +394,7 @@ async function deliverOrExplain(
     deliver: (input: { sessionId: string; text: string }) => Promise<FirstInputDelivery>,
     input: { sessionId: string; text: string },
     created: CreatedTab,
+    backend: HerdrBackend = "herdr",
 ): Promise<FirstInputDelivery> {
     try {
         return await deliver(input);
@@ -363,8 +402,9 @@ async function deliverOrExplain(
         const cause = (error as { code?: unknown } | null)?.code;
         const code = typeof cause === "string" ? cause : "send_failed";
         const message = error instanceof Error ? error.message : String(error);
+        const readCmd = readScreenCommandFor(created.paneId, 30, backend);
         const hint = code === "no_holder"
-            ? `先看 \`herdr pane read ${created.paneId} --lines 30\` 确认 pane 里的 zbot 是否起来了，再重投；`
+            ? `先看 \`${readCmd}\` 确认 pane 里的 zbot 是否起来了，再重投；`
             : "";
         throw new HerdrCliError(
             code === "no_holder" ? "not_ready" : code,
@@ -374,7 +414,7 @@ async function deliverOrExplain(
                 sessionId: input.sessionId,
                 delivered: false,
                 cause: code,
-                ...handoffCommands(input.sessionId, created),
+                ...handoffCommands(input.sessionId, created, backend),
             },
         );
     }

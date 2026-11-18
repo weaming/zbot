@@ -350,4 +350,21 @@ describe("runSpawn", () => {
         expect(result.herdr.tab).toBeNull();
         expect(result.herdr.pane).toBeNull();
     });
+
+    test("hc 后端：生成 hc 关闭与观察命令", async () => {
+        const { deps } = baseDeps({
+            env: { HC_TERMINAL_ID: "t1k", HC_BIN_PATH: "/usr/local/bin/hc" } as NodeJS.ProcessEnv,
+            herdr: fakeHerdr({
+                createTab: async () => ({ tabId: "t2a", paneId: "t2a" }),
+            }).cli,
+        });
+        const result = await runJson(spawnCommand({ text: "检查代码" }), deps);
+
+        expect(result.herdr.workspaceId).toBe("hc");
+        expect(result.herdr.caller).toEqual({ workspaceId: "hc", tabId: "t1k", paneId: "t1k" });
+        expect(result.commands.closeTab).toBe("hc kill t2a && hc rm t2a");
+        expect(result.commands.teardown).toBe(`zbot herdr teardown ${SESSION_ID} --tab t2a`);
+        expect(result.hints.observe).toContain("hc read t2a --lines 40");
+        expect(result.hints.observe).toContain("hc get t2a");
+    });
 });

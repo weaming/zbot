@@ -72,7 +72,7 @@ export async function runTeardown(command: TeardownCommand, deps: TeardownDeps =
     const sessionId = await (deps.resolveId ?? resolveSendTarget)(command.id);
     const readMeta = deps.readMeta ?? readSessionMetaOf;
     const meta = await readMeta(sessionId);
-    const herdr = deps.herdr ?? createHerdrCli(context.binPath);
+    const herdr = deps.herdr ?? createHerdrCli(context.binPath, context.backend);
 
     const target = await resolveTarget(herdr, sessionId, command, meta?.title, context.workspaceId);
     const ownership = await (deps.ownership ?? probeOwnership)(sessionId);

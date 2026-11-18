@@ -211,4 +211,15 @@ describe("runTeardown", () => {
         expect(calls.archiveViaHolder + calls.archiveLocally).toBe(0);
         expect(calls.closedTabs).toEqual([]);
     });
+
+    test("hc 环境：按 hc workspace 匹配终端并关闭", async () => {
+        const { deps, calls } = harness(
+            { env: { HC_TERMINAL_ID: "t1k", HC_BIN_PATH: "/usr/local/bin/hc" } as NodeJS.ProcessEnv },
+            [pane({ paneId: "t2a", tabId: "t2a", workspaceId: "hc", tokens: { session: "1Z6K2B" } })],
+        );
+        const result = await runJson(cmd(), deps);
+
+        expect(calls.closedTabs).toEqual(["t2a"]);
+        expect(result.herdr).toMatchObject({ tabId: "t2a", paneId: "t2a", tabClosed: true });
+    });
 });

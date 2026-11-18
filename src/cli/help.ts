@@ -129,7 +129,7 @@ export const HERDR_CLI_USAGE = [
     "  --json                     输出会话元数据、herdr 元数据与后续命令（commands/hints）",
     "  -h, --help                 查看用法",
     "",
-    "只能在 herdr 内运行（HERDR_ENV=1），否则直接报 herdr_unavailable。",
+    "只能在 herdr（HERDR_ENV=1）或 hc 终端（HC_TERMINAL_ID）内运行，否则直接报 herdr_unavailable。",
     "位置参数是首条用户输入，正文以 - 开头时用 -- 分隔；不给正文就只建标签页与会话。",
     "返回里的 commands 覆盖后续动作：wait 等结果、send 继续发、show 看进度、",
     "archive 归档、close 让 TUI 释放会话、closeTab 关标签页、teardown 归档+关标签页。",

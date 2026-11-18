@@ -7,11 +7,11 @@ import { HERDR_CLI_USAGE } from "../help.js";
 const SRC_ROOT = path.resolve(import.meta.dir, "..", "..", "..");
 const MAIN = path.join("src", "tui", "main.ts");
 
-/** 去掉 HERDR_* 的运行环境：既验证「不在 herdr 里」的分支，也不受跑测试的 pane 影响。 */
+/** 去掉 HERDR_* 与 HC_* 的运行环境：既验证「不在 herdr/hc 里」的分支，也不受跑测试的终端影响。 */
 function envWithoutHerdr(): Record<string, string> {
     const env: Record<string, string> = {};
     for (const [key, value] of Object.entries(process.env)) {
-        if (key.startsWith("HERDR_") || value === undefined) continue;
+        if (key.startsWith("HERDR_") || key.startsWith("HC_") || value === undefined) continue;
         env[key] = value;
     }
     return env;
