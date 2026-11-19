@@ -99,7 +99,7 @@ import { setLogSession } from "../host/runtime-context.js";
 import { DraftStore, loadRichDrafts, persistRichDrafts } from "./draft-store.js";
 import { isCmdDown, isCmdGateSupported } from "./cmd-modifier.js";
 import { hcReporter } from "./hc-reporter.js";
-import { herdrReporter, tabSessionToken } from "./herdr-reporter.js";
+import { herdrReporter, normalizeDisplayText, tabSessionToken } from "./herdr-reporter.js";
 import { programStatus } from "./program-status.js";
 import { notifyTurnResult } from "./notifier.js";
 import {
@@ -210,6 +210,7 @@ export class ChatApp {
     private readonly layout: ChatLayout;
     private readonly pendingList = new Container();
     private terminalStarted = false;
+    private terminalTitle = "";
     /** pending 列表一次最多显示的消息行数（不含 header），超出时窗口化。 */
     private static readonly PENDING_MAX_VISIBLE = 5;
     /** 按会话隔离的入队消息队列与选中索引。 */
@@ -660,6 +661,7 @@ export class ChatApp {
             : undefined;
         const model = this.currentModelSelection?.model
             ?? getChatApiSettings(this.currentModelSelection).model;
+        this.syncHerdrTerminalTitle(session?.title);
         programStatus.setTitle(session?.title);
         this.syncHerdrState();
         const metadata = {
@@ -674,6 +676,14 @@ export class ChatApp {
         };
         herdrReporter.reportMetadata(metadata);
         hcReporter.reportMetadata(metadata);
+    }
+
+    private syncHerdrTerminalTitle(rawTitle = ""): void {
+        if (!this.terminalStarted || process.env.HERDR_ENV !== "1") return;
+        const title = normalizeDisplayText(rawTitle.replace(/[\u0080-\u009f]/g, " ")) ?? "";
+        if (title === this.terminalTitle) return;
+        this.tui.terminal.setTitle(title);
+        this.terminalTitle = title;
     }
 
     private bindEditor(): void {
@@ -3266,6 +3276,7 @@ export class ChatApp {
     }
 
     forceShutdown(exitCode: number): void {
+        this.syncHerdrTerminalTitle();
         this.unsubscribeProgramStatus();
         programStatus.release();
         hcReporter.release();
@@ -3292,6 +3303,7 @@ export class ChatApp {
     private async exit(exitCode = 0): Promise<void> {
         if (this.exiting) return;
         this.exiting = true;
+        this.syncHerdrTerminalTitle();
         this.unsubscribeProgramStatus();
         programStatus.release();
         hcReporter.release();
