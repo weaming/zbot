@@ -56,7 +56,6 @@ import {
     MAX_TASK_TEXT_COLUMNS,
 } from "../format/task-format.js";
 import { bindGlobalKeys, type GlobalKeyHost } from "./keybindings.js";
-import { buildStatusBarModel } from "./status-bar-model.js";
 import { protocolStatusLabel } from "../utils/responses-transport.js";
 import { writeCurrentSessionPointer } from "../utils/session-pointer.js";
 import { ChatLayout } from "./chat-layout.js";
@@ -2888,14 +2887,14 @@ export class ChatApp {
         this.tui.requestRender();
     }
 
-    /** 底部状态栏（双行）：
-     * 第 1 行：模型信息 + 思考强度 + 生成速率 ······ 实时执行阶段 + 当前目录
-     * 第 2 行：Token 统计与容量比  ······  当前会话 ID
+    /** 底部状态栏（宽屏双行，窄屏按需 2–4 行）：
+     * 宽屏第 1 行：模型信息 + 思考强度 + 生成速率 ······ 实时执行阶段 + 当前目录
+     * 宽屏第 2 行：Token 统计与容量比  ······  当前会话 ID
      */
     private renderStatusBar(): void {
         const modelSettings = getChatApiSettings(this.currentModelSelection);
         const protocolName = protocolStatusLabel(modelSettings.protocol, modelSettings.websocket);
-        const modelName = `${modelSettings.model || "default"} (${protocolName})`;
+        const modelName = modelSettings.model || "default";
         const sessionId = this.store.currentSessionId;
         const pricing = resolvePricingMode(endpointHost(modelSettings.apiBase), modelSettings);
         const isDeepSeekPriced = pricing !== undefined
@@ -2910,8 +2909,9 @@ export class ChatApp {
         this.todoBar.setTodos(todos);
         this.layout.setMinSize(this.todoBar, this.todoBar.lineCount());
 
-        const model = buildStatusBarModel({
+        this.statusBar.setInput({
             modelName,
+            protocolLabel: protocolName,
             effort: modelSettings.reasoningEffort
                 ?? effectiveReasoningEffort(this.currentModelSelection),
             sessionId,
@@ -2936,8 +2936,6 @@ export class ChatApp {
             deepSeek: isDeepSeekPriced ? deepSeekPhaseInfo() : undefined,
             contextWindow: getContextWindowForModel(modelName),
         });
-
-        this.statusBar.setStatus(model.line1, model.line2);
         this.statusBar.invalidate();
         this.tui.requestRender();
     }

@@ -1,17 +1,28 @@
-/** 底部两行状态栏：左右对齐渲染，右侧留固定内边距。 */
+/** 底部状态栏：按终端宽度自适应渲染（宽屏双行，窄屏 2–4 行）。 */
 
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
+import {
+    renderStatusBarLines,
+    renderWideStatusLine,
+    type StatusBarInput,
+} from "./status-bar-model.js";
 
 export class StatusBar implements Component {
-    private static readonly RIGHT_PADDING = 2;
+    private input: StatusBarInput | null = null;
     private line1 = { left: "", right: "" };
     private line2 = { left: "", right: "" };
 
+    /** 设置响应式状态栏数据，render(width) 时按当前列宽排版。 */
+    setInput(input: StatusBarInput): void {
+        this.input = input;
+    }
+
+    /** 直接设置静态双行文本（用于未接入 StatusBarInput 的场景）。 */
     setStatus(
         line1: { left: string; right?: string } | string,
         line2?: { left: string; right?: string } | string,
     ): void {
+        this.input = null;
         if (typeof line1 === "string") {
             this.line1 = { left: line1, right: typeof line2 === "string" ? line2 : "" };
             this.line2 = { left: "", right: "" };
@@ -29,32 +40,13 @@ export class StatusBar implements Component {
 
     render(width: number): string[] {
         const safeWidth = Math.max(1, Math.floor(width));
-        const renderedLine1 = this.renderLine(this.line1.left, this.line1.right, safeWidth);
-        const renderedLine2 = this.renderLine(this.line2.left, this.line2.right, safeWidth);
-        return [renderedLine1, renderedLine2];
-    }
-
-    private renderLine(leftText: string, rightText: string, safeWidth: number): string {
-        if (!leftText && !rightText) {
-            return " ".repeat(safeWidth);
+        if (this.input) {
+            return renderStatusBarLines(this.input, safeWidth);
         }
-        if (visibleWidth(leftText) >= safeWidth) {
-            return truncateToWidth(leftText, safeWidth);
-        }
-
-        const availableRightWidth = Math.max(
-            0,
-            safeWidth - visibleWidth(leftText) - 1 - StatusBar.RIGHT_PADDING,
-        );
-        const truncatedRight = truncateToWidth(rightText, availableRightWidth, "…");
-        const gap = Math.max(
-            1,
-            safeWidth
-                - visibleWidth(leftText)
-                - visibleWidth(truncatedRight)
-                - StatusBar.RIGHT_PADDING,
-        );
-        return `${leftText}${" ".repeat(gap)}${truncatedRight}${" ".repeat(StatusBar.RIGHT_PADDING)}`;
+        return [
+            renderWideStatusLine(this.line1.left, this.line1.right, safeWidth),
+            renderWideStatusLine(this.line2.left, this.line2.right, safeWidth),
+        ];
     }
 
     invalidate(): void {}

@@ -3,7 +3,14 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { buildStatusBarModel, formatRateTag, type StatusBarInput } from "../../src/tui/status-bar-model.js";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import {
+    buildStatusBarModel,
+    formatRateTag,
+    renderStatusBarLines,
+    type StatusBarInput,
+} from "../../src/tui/status-bar-model.js";
+import { StatusBar } from "../../src/tui/status-bar.js";
 
 /** 去掉 CSI 颜色与 OSC 超链接，只看可见文本。 */
 function plain(text: string): string {
@@ -126,5 +133,143 @@ describe("状态栏模型", () => {
 
         const idle = buildStatusBarModel(input());
         expect(plain(idle.line1.right)).not.toContain("待作答");
+    });
+});
+
+describe("状态栏窄屏响应式布局", () => {
+    test("宽屏（>= 80 列）保持经典双行并包含协议后缀与完整会话 ID", () => {
+        const lines = renderStatusBarLines(
+            input({
+                modelName: "deepseek-reasoner",
+                protocolLabel: "chat",
+                sessionId: "01JZZZZZZZZZZZZZZZZZZ12345",
+                cwd: "/Users/me/src/zbot",
+                home: "/Users/me",
+            }),
+            100,
+        );
+
+        expect(lines.length).toBe(2);
+        expect(plain(lines[0])).toContain("deepseek-reasoner (chat)");
+        expect(plain(lines[0])).toContain("~/src/zbot");
+        expect(plain(lines[1])).toContain("01JZZZZZZZZZZZZZZZZZZ12345");
+    });
+
+    test("手机窄屏（40 列）空闲新会话占 2 行：模型精简 + 末级目录 + 短会话 ID", () => {
+        const lines = renderStatusBarLines(
+            input({
+                modelName: "deepseek-reasoner",
+                protocolLabel: "chat",
+                effort: "high",
+                sessionId: "01JZZZZZZZZZZZZZZZZZZ12345",
+                cwd: "/Users/me/very/deep/workspace/zbot",
+                home: "/Users/me",
+            }),
+            40,
+        );
+
+        expect(lines.length).toBe(2);
+        for (const line of lines) {
+            expect(visibleWidth(line)).toBeLessThanOrEqual(40);
+        }
+        expect(plain(lines[0])).toContain("deepseek-reasoner");
+        expect(plain(lines[0])).toContain("🧠H");
+        expect(plain(lines[0])).not.toContain("(chat)");
+        expect(plain(lines[1])).toContain("zbot");
+        expect(plain(lines[1])).toContain("ZZZ12345");
+        expect(plain(lines[1])).not.toContain("01JZZZZZZZZZZZZZZZZZZ12345");
+    });
+
+    test("手机窄屏（40 列）运行中 + 有统计时扩展为 4 行，实时状态独占首行不被挤掉", () => {
+        const lines = renderStatusBarLines(
+            input({
+                modelName: "deepseek-reasoner",
+                protocolLabel: "responses",
+                effort: "high",
+                sessionId: "01JZZZZZZZZZZZZZZZZZZ12345",
+                phase: {
+                    phase: "tool",
+                    toolName: "execute-shell",
+                    startTime: 990_000,
+                    toolStartTime: 995_000,
+                },
+                awaitingAnswer: 2,
+                backgroundRunning: 1,
+                contextTokens: 12_000,
+                contextSource: "provider",
+                contextWindow: 64_000,
+                totalTokens: 34_000,
+                promptTokens: 20_000,
+                completionTokens: 14_000,
+                reasoningTokens: 5_000,
+                cacheHitTokens: 8_000,
+                cacheMissTokens: 2_000,
+                costYuan: 0.1234,
+                lastRate: { totalTps: 45.4, outputTps: 10.2, reasoningTps: 35.1 },
+                cwd: "/Users/me/very/deep/workspace/zbot",
+                home: "/Users/me",
+            }),
+            40,
+        );
+
+        expect(lines.length).toBe(4);
+        for (const line of lines) {
+            expect(visibleWidth(line)).toBeLessThanOrEqual(40);
+        }
+
+        // 首行：实时执行阶段、耗时、待作答、后台任务全部可见
+        expect(plain(lines[0])).toContain("5.0s|10.0s");
+        expect(plain(lines[0])).toContain("❓2");
+        expect(plain(lines[0])).toContain("⚙1");
+
+        // 第 2 行：模型名去协议后缀、缩写 effort、精简速率
+        expect(plain(lines[1])).toContain("deepseek-reasoner");
+        expect(plain(lines[1])).toContain("🧠H");
+        expect(plain(lines[1])).toContain("⚡45T/s");
+        expect(plain(lines[1])).not.toContain("(responses)");
+        expect(plain(lines[1])).not.toContain("✏️10");
+
+        // 第 3 行：保留上下文占比与费用，无半截 token 统计
+        expect(plain(lines[2])).toContain("12k/64k(18.8%)");
+        expect(plain(lines[2])).toContain("¥0.12");
+
+        // 第 4 行：末级目录 + 末 8 位会话 ID
+        expect(plain(lines[3])).toContain("zbot");
+        expect(plain(lines[3])).toContain("ZZZ12345");
+    });
+
+    test("极窄宽度（28 列）所有行均不溢出且仍保留关键计时、费用与短 ID", () => {
+        const bar = new StatusBar();
+        bar.setInput(
+            input({
+                modelName: "claude-3-7-sonnet-20250219",
+                protocolLabel: "responses-ws",
+                effort: "xhigh",
+                sessionId: "01JZZZZZZZZZZZZZZZZZZ99999",
+                phase: {
+                    phase: "tool",
+                    toolName: "very_long_tool_name_here",
+                    startTime: 990_000,
+                    toolStartTime: 995_000,
+                },
+                awaitingAnswer: 1,
+                contextTokens: 12_000,
+                contextWindow: 64_000,
+                costYuan: 0.5,
+                lastRate: { totalTps: 60 },
+                cwd: "/Users/me/projects/super-long-directory-name",
+                home: "/Users/me",
+            }),
+        );
+
+        const lines = bar.render(28);
+        expect(lines.length).toBe(4);
+        for (const line of lines) {
+            expect(visibleWidth(line)).toBeLessThanOrEqual(28);
+        }
+        expect(plain(lines[0])).toContain("5.0s|10.0s");
+        expect(plain(lines[0])).toContain("❓1");
+        expect(plain(lines[2])).toContain("¥0.50");
+        expect(plain(lines[3])).toContain("ZZZ99999");
     });
 });
